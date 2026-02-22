@@ -52,8 +52,7 @@
         "android.permission.SYSTEM_ALERT_WINDOW",
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
-      ],
-      "googleServicesFile": "./google-services.json"
+      ]
     },
     "web": {
       "output": "static",
