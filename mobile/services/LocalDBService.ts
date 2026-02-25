@@ -100,7 +100,7 @@ export const offlineService = {
     const db = await getDB();
     if (!db) return [];
     const rows = await db.getAllAsync(
-      `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC;`,
+      `SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC;`,
       [chatId]
     );
 
@@ -450,5 +450,23 @@ export const offlineService = {
         localFileUri
       ]
     );
+  },
+
+  /**
+   * Clear all messages and media records for a chat
+   */
+  async clearChat(chatId: string): Promise<void> {
+    const db = await getDB();
+    if (!db) return;
+    
+    // Delete all messages for this chat
+    await db.runAsync(`DELETE FROM messages WHERE chat_id = ?;`, [chatId]);
+    
+    // Delete associated media records (if any records remain that aren't linked)
+    // Actually, media_downloads are usually linked by message_id. 
+    // We can't easily delete by chatId there without joining, so we'll just delete all
+    // Or we can be precise if we wanted, but deleting messages is the priority.
+    // Based on schema, media_downloads has message_id.
+    await db.runAsync(`DELETE FROM media_downloads WHERE message_id NOT IN (SELECT id FROM messages);`);
   }
 };

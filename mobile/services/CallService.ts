@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
+import * as Crypto from 'expo-crypto';
 
 export interface CallSignal {
     type: 'offer' | 'answer' | 'ice-candidate' | 'call-request' | 'call-accept' | 'call-reject' | 'call-end' | 'call-ringing';
@@ -56,7 +57,7 @@ class CallService {
 
         this.signalsChannel
             .on('broadcast', { event: 'signal' }, ({ payload }) => {
-                console.log('[CallService] Received personal signal:', payload);
+                console.log(`[CallService] 📶 Received signal: ${payload.type} from ${payload.callerId} to ${payload.calleeId}`);
                 this.handleIncomingSignal(payload as CallSignal);
             })
             .subscribe((status) => {
@@ -69,10 +70,10 @@ class CallService {
         // If it's a call request and we are already in a call, check if it's the SAME call
         if (signal.type === 'call-request' && this.currentRoomId) {
             if (this.currentRoomId === signal.roomId) {
-                console.log('[CallService] Received duplicate call request for current room, ignoring');
+                console.log('[CallService] 🔄 Ignoring duplicate call-request for own active room:', signal.roomId);
                 return;
             }
-            console.log('[CallService] Busy with', this.currentRoomId, '- auto-rejecting call request for', signal.roomId);
+            console.log(`[CallService] 🚫 Busy: auto-rejecting request ${signal.roomId} (current: ${this.currentRoomId})`);
             this.rejectCall(signal);
             return;
         }
@@ -97,8 +98,7 @@ class CallService {
     async initiateCall(partnerId: string, callType: 'audio' | 'video'): Promise<string | null> {
         if (!this.userId) return null;
 
-        const participants = [this.userId, partnerId].sort();
-        const roomId = `call:${participants.join('-')}`;
+        const roomId = Crypto.randomUUID();
 
         this.currentRoomId = roomId;
         this.currentPartnerId = partnerId;
@@ -201,7 +201,7 @@ class CallService {
             }
         });
 
-        this.cleanup();
+        this.cleanup('reject');
     }
 
     async endCall(): Promise<void> {
@@ -217,7 +217,7 @@ class CallService {
                 roomId: this.currentRoomId
             });
         }
-        this.cleanup();
+        this.cleanup('manual-end');
     }
 
     public async notifyRinging(roomId: string, callerId: string, callType: 'audio' | 'video'): Promise<void> {
@@ -242,11 +242,15 @@ class CallService {
 
     private async sendSignal(signal: CallSignal) {
         if (this.roomChannel) {
-            await this.roomChannel.send({
+            console.log(`[CallService] 📤 Sending [${signal.type}] to room ${this.currentRoomId}`);
+            const status = await this.roomChannel.send({
                 type: 'broadcast',
                 event: 'signal',
                 payload: signal
             });
+            if (status !== 'ok') console.error(`[CallService] ❌ Failed to send [${signal.type}]: status is ${status}`);
+        } else {
+            console.warn(`[CallService] ⚠️ Cannot send [${signal.type}]: No roomChannel subscribed`);
         }
     }
 
@@ -307,9 +311,10 @@ class CallService {
         this.listeners.delete(handler);
     }
 
-    cleanup(): void {
-        console.log('[CallService] Cleaning up call state');
+    cleanup(reason: string = 'unknown'): void {
+        console.log(`[CallService] 🧹 Cleaning up call state. Reason: ${reason}`);
         if (this.roomChannel) {
+            console.log(`[CallService] Unsubscribing from room ${this.currentRoomId}`);
             this.roomChannel.unsubscribe();
             this.roomChannel = null;
         }

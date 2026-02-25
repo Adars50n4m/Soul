@@ -3,6 +3,49 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from './api';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+/**
+ * Get the Realtime WebSocket URL for connectivity testing
+ */
+export const getRealtimeUrl = (): string => {
+    try {
+        const url = new URL(SUPABASE_URL);
+        return `wss://${url.hostname.replace('.supabase.co', '.supabase.co')}/realtime/v1`;
+    } catch {
+        // Fallback to default derivation
+        return SUPABASE_URL.replace('https://', 'wss://').replace('/rest/v1', '/realtime/v1');
+    }
+};
+
+/**
+ * Check if Supabase Realtime is reachable
+ */
+export const checkRealtimeConnectivity = async (): Promise<{ ok: boolean; error?: string }> => {
+    const realtimeUrl = getRealtimeUrl();
+    console.log(`[Supabase] Testing realtime connectivity: ${realtimeUrl}`);
+    
+    return new Promise((resolve) => {
+        const ws = new WebSocket(realtimeUrl);
+        const timeout = setTimeout(() => {
+            ws.close();
+            console.warn('[Supabase] Realtime connectivity check timed out');
+            resolve({ ok: false, error: 'Connection timed out' });
+        }, 10000);
+
+        ws.onopen = () => {
+            clearTimeout(timeout);
+            ws.close();
+            console.log('[Supabase] ✅ Realtime endpoint is reachable');
+            resolve({ ok: true });
+        };
+
+        ws.onerror = () => {
+            clearTimeout(timeout);
+            console.warn('[Supabase] ❌ Realtime endpoint unreachable');
+            resolve({ ok: false, error: 'WebSocket connection failed' });
+        };
+    });
+};
+
 // Database types
 export interface User {
     id: string;

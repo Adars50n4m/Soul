@@ -183,7 +183,7 @@ export default function HelpCenterScreen() {
 
                 {filteredTopics.length === 0 && filteredArticles.length === 0 && (
                     <View style={styles.emptyResults}>
-                        <Text style={styles.emptyText}>No results found for "{searchQuery}"</Text>
+                        <Text style={styles.emptyText}>No results found for &quot;{searchQuery}&quot;</Text>
                     </View>
                 )}
 

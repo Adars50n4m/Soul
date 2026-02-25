@@ -1,4 +1,5 @@
 import { supabase } from '../config/supabase';
+import { SUPABASE_URL } from '../config/api';
 import { offlineService, type QueuedMessage, type MessageStatus } from './LocalDBService';
 import { AppState, AppStateStatus } from 'react-native';
 
@@ -160,15 +161,11 @@ class ChatService {
      */
     private async checkConnectivity(): Promise<boolean> {
         try {
-            // A simple lightweight check to see if we can reach the network
-            // Using a timeout to prevent long hangs
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
 
-            // Fetch something lightweight. Even a 404/403 means we are online.
-            // We use the supabase URL since we know it must be reachable.
-            await fetch(supabase.auth.getSession().toString(), { 
-                method: 'HEAD', 
+            await fetch(SUPABASE_URL, { 
+                method: 'GET', // GET is sometimes better for some proxies
                 signal: controller.signal,
                 mode: 'no-cors'
             });
@@ -178,7 +175,14 @@ class ChatService {
             this.startQueueProcessing();
             return true;
         } catch (error) {
-            console.log('[ChatService] Connectivity check failed:', error);
+            console.log('[ChatService] Connectivity check:', error);
+            
+            // Stay optimistic on timeout (AbortError) - it might just be slow/throttled
+            if (error instanceof Error && error.name === 'AbortError') {
+                this.updateNetworkStatus(true);
+                return true;
+            }
+
             this.updateNetworkStatus(false);
             this.stopQueueProcessing();
             return false;
@@ -327,7 +331,7 @@ class ChatService {
             }
 
         } catch (error: any) {
-            console.error(`[ChatService] Failed to send message ${message.id}:`, error);
+            console.warn(`[ChatService] Failed to send message ${message.id}:`, error);
             
             // Increment retry count
             const newRetryCount = message.retryCount + 1;
@@ -358,7 +362,7 @@ class ChatService {
                     message.id,
                     error?.message || 'Failed after maximum retries'
                 );
-                console.error(`[ChatService] Message ${message.id} marked as failed after max retries`);
+                console.warn(`[ChatService] Message ${message.id} marked as failed after max retries`);
             }
         } finally {
             this.sendingIds.delete(message.id);
@@ -366,7 +370,7 @@ class ChatService {
     }
 
     /**
-     * Fetch unread/missed messages from DB
+     * Fetch unread/missed messages from DB and deliver them to the UI
      */
     private async fetchMissedMessages() {
         if (!this.userId || !this.partnerId) return;
@@ -379,12 +383,16 @@ class ChatService {
             .limit(50);
 
         if (error) {
-            console.error('Error fetching history:', error);
+            console.warn('[ChatService] Error fetching missed messages:', error);
             return;
         }
 
-        if (data) {
-            // Messages are available, UI can fetch from local DB
+        if (data && data.length > 0) {
+            console.log(`[ChatService] Delivering ${data.length} missed message(s) to UI`);
+            for (const row of data) {
+                const msg = this.mapDbMessageToChatMessage(row);
+                this.onNewMessage?.(msg);
+            }
         }
     }
 
@@ -522,6 +530,27 @@ class ChatService {
             reply_to: dbRow.reply_to_id?.toString(),
             reactions: dbRow.reaction ? [dbRow.reaction] : undefined
         };
+    }
+
+    /**
+     * Clear all messages between users on the server
+     */
+    async clearServerMessages(userId: string, partnerId: string): Promise<void> {
+        try {
+            const { error } = await supabase
+                .from('messages')
+                .delete()
+                .or(`and(sender.eq.${userId},receiver.eq.${partnerId}),and(sender.eq.${partnerId},receiver.eq.${userId})`);
+
+            if (error) {
+                console.warn('[ChatService] Error clearing server messages:', error);
+                throw error;
+            }
+            console.log(`[ChatService] Successfully cleared messages between ${userId} and ${partnerId}`);
+        } catch (e) {
+            console.error('[ChatService] Exception in clearServerMessages:', e);
+            throw e;
+        }
     }
 
     /**

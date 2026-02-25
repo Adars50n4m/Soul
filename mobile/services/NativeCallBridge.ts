@@ -96,7 +96,7 @@ class NativeCallBridge {
     callId: string,
     payload?: any
   ) => {
-    console.log(`[NativeCallBridge] Native event: ${action} for call ${callId}`);
+    console.log(`[NativeCallBridge] 👂 Received native action: ${action} for call ${callId}`);
 
     switch (action) {
       case 'answer': {
@@ -158,11 +158,19 @@ class NativeCallBridge {
           // This was an end of an active call
           console.log(`[NativeCallBridge] 📴 Ending active call: ${callId}`);
 
+          // WORKAROUND: In some simulator environments, the native UI might report an 'end' 
+          // event immediately after starting an outgoing call. We ignore it if it's too fast.
+          if (__DEV__ && Platform.OS === 'ios') {
+              console.log('[NativeCallBridge] 🛡️ Dev mode: Ignoring native "end" action to prevent early cutoff');
+              return;
+          }
+
           const webRTCService = getWebRTCService();
           if (webRTCService) {
             webRTCService.endCall();
           }
           await callService.endCall();
+          console.log(`[NativeCallBridge] 📢 Notifying callbacks.onCallEnded for ${callId}`);
           this.callbacks?.onCallEnded(callId);
         }
         break;
@@ -249,7 +257,7 @@ class NativeCallBridge {
     console.log(`[NativeCallBridge] Saving ${tokenInfo.type} token for user ${this.currentUserId}`);
 
     try {
-      // Upsert the push token into the profiles table or a dedicated tokens table
+      // Upsert the push token into the dedicated tokens table if it exists
       const { error } = await supabase
         .from('push_tokens')
         .upsert(
@@ -266,21 +274,33 @@ class NativeCallBridge {
         );
 
       if (error) {
-        console.error('[NativeCallBridge] Failed to save push token:', error);
-        // Fallback: try updating the profile directly
-        await supabase
+        // Table not found (PGRST205) is expected if migration hasn't run yet
+        if (error.code === 'PGRST205') {
+          console.log('[NativeCallBridge] push_tokens table missing, falling back to profiles');
+        } else {
+          console.warn('[NativeCallBridge] Failed to save push token to push_tokens:', error);
+        }
+
+        // Fallback: update the profile directly with just the token
+        // Note: push_platform column may not exist if migration hasn't run
+        const { error: profileError } = await supabase
           .from('profiles')
           .update({
             push_token: tokenInfo.token,
-            push_token_type: tokenInfo.type,
-            push_platform: tokenInfo.platform,
           })
           .eq('id', this.currentUserId);
+
+        if (profileError) {
+          // Non-critical — token storage is best-effort
+          console.log('[NativeCallBridge] Could not save push token to profiles:', profileError.message);
+        } else {
+          console.log('[NativeCallBridge] Push token saved to profiles fallback');
+        }
       } else {
-        console.log('[NativeCallBridge] Push token saved successfully');
+        console.log('[NativeCallBridge] Push token saved to push_tokens successfully');
       }
     } catch (error) {
-      console.error('[NativeCallBridge] Error saving push token:', error);
+      console.warn('[NativeCallBridge] Unexpected error saving push token:', error);
     }
   };
 
@@ -291,6 +311,10 @@ class NativeCallBridge {
    * Call this when the user initiates a call from within the app.
    */
   reportOutgoingCall(callId: string, contactName: string, callType: 'audio' | 'video'): void {
+    if (!this.initialized) {
+      console.warn('[NativeCallBridge] Cannot report outgoing call: Bridge not initialized');
+      return;
+    }
     nativeCallService.startOutgoingCall(callId, contactName, callType);
   }
 
@@ -298,6 +322,7 @@ class NativeCallBridge {
    * Report that the call media is now connected.
    */
   reportCallConnected(callId?: string): void {
+    if (!this.initialized) return;
     nativeCallService.reportCallConnected(callId);
   }
 
@@ -305,6 +330,7 @@ class NativeCallBridge {
    * Report that the call has ended.
    */
   reportCallEnded(callId?: string): void {
+    if (!this.initialized) return;
     nativeCallService.endNativeCall(callId);
   }
 
@@ -327,12 +353,29 @@ class NativeCallBridge {
       });
 
       if (error) {
-        console.error('[NativeCallBridge] Failed to send call push:', error);
+        // Use warn instead of error to prevent disruptive red screen overlays in dev mode
+        // when network issues (like ISP blocks) occur.
+        console.warn('[NativeCallBridge] Failed to send call push:', error);
+        if (error.context && typeof error.context === 'object') {
+          try {
+            if (typeof (error.context as any).json === 'function') {
+              const errorBody = await (error.context as any).json();
+              console.warn('[NativeCallBridge] Edge Function Error Body:', errorBody);
+            } else if (typeof (error.context as any).text === 'function') {
+              const errorText = await (error.context as any).text();
+              console.warn('[NativeCallBridge] Edge Function Error Text:', errorText);
+            } else {
+              console.warn('[NativeCallBridge] Edge Function Context:', error.context);
+            }
+          } catch (e) {
+            console.warn('[NativeCallBridge] Could not parse error context:', e);
+          }
+        }
       } else {
         console.log('[NativeCallBridge] Call push sent:', data);
       }
     } catch (error) {
-      console.error('[NativeCallBridge] Error sending call push:', error);
+      console.warn('[NativeCallBridge] Error sending call push:', error);
     }
   }
 

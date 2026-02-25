@@ -15,7 +15,7 @@ import {
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
-import { Video, AVPlaybackStatus } from 'expo-av';
+import { Video, AVPlaybackStatus, ResizeMode } from 'expo-av';
 
 interface MediaPlayerModalProps {
   visible: boolean;
@@ -38,7 +38,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const [duration, setDuration] = useState(0);
   const [position, setPosition] = useState(0);
   const [showControls, setShowControls] = useState(true);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout>();
+  const controlsTimeoutRef = useRef<NodeJS.Timeout | number | null>(null);
   const { width, height } = Dimensions.get('window');
 
   // Pinch-to-zoom state for images
@@ -177,7 +177,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               ref={videoRef}
               source={{ uri: mediaUrl }}
               style={styles.video}
-              resizeMode="contain"
+              resizeMode={ResizeMode.CONTAIN}
               onPlaybackStatusUpdate={handleVideoStatusUpdate}
               onError={() => {
                 Alert.alert('Error', 'Failed to load video');
@@ -195,7 +195,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                     <MaterialIcons
                       name={isPlaying ? 'pause-circle-filled' : 'play-circle-filled'}
                       size={64}
-                      color="#F50057"
+                      color="#BC002A"
                     />
                   </Pressable>
                 </View>
@@ -208,7 +208,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   >
                     <View style={styles.progressBarBackground}>
                       <LinearGradient
-                        colors={['#F50057', '#c40046']}
+                        colors={['#BC002A', '#c40046']}
                         start={{ x: 0, y: 0 }}
                         end={{ x: 1, y: 0 }}
                         style={[
@@ -241,14 +241,14 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
         {mediaType === 'audio' && (
           <BlurView intensity={100} tint="dark" style={styles.audioContainer}>
-            <MaterialIcons name="graphic-eq" size={120} color="#F50057" />
+            <MaterialIcons name="graphic-eq" size={120} color="#BC002A" />
 
             {/* Play Button */}
             <Pressable onPress={togglePlayPause} style={styles.playButton}>
               <MaterialIcons
                 name={isPlaying ? 'pause-circle-filled' : 'play-circle-filled'}
                 size={80}
-                color="#F50057"
+                color="#BC002A"
               />
             </Pressable>
 
@@ -260,7 +260,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               >
                 <View style={styles.progressBarBackground}>
                   <LinearGradient
-                    colors={['#F50057', '#c40046']}
+                    colors={['#BC002A', '#c40046']}
                     start={{ x: 0, y: 0 }}
                     end={{ x: 1, y: 0 }}
                     style={[

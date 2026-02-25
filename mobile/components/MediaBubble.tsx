@@ -53,11 +53,8 @@ export const MediaBubble: React.FC<MediaBubbleProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const media = message.media;
-  if (!media) return null;
-
-  // Determine media dimensions
   const mediaWidth = MAX_MEDIA_WIDTH;
-  const mediaHeight = media.type === 'video' ? mediaWidth * 0.75 : mediaWidth;
+  const mediaHeight = media?.type === 'video' ? mediaWidth * 0.75 : mediaWidth;
 
   // Check if media is available locally
   useEffect(() => {
@@ -86,7 +83,7 @@ export const MediaBubble: React.FC<MediaBubbleProps> = ({
 
   // Handle download button press
   const handleDownload = useCallback(async () => {
-    if (isDownloading || !media.url) return;
+    if (isDownloading || !media?.url) return;
 
     setIsDownloading(true);
     setMediaStatus('downloading');
@@ -114,7 +111,7 @@ export const MediaBubble: React.FC<MediaBubbleProps> = ({
     } finally {
       setIsDownloading(false);
     }
-  }, [message.id, media.url, isDownloading]);
+  }, [message.id, media?.url, isDownloading]);
 
   // Handle media tap
   const handleTap = useCallback(() => {
@@ -127,6 +124,7 @@ export const MediaBubble: React.FC<MediaBubbleProps> = ({
 
   // Render based on media status
   const renderContent = () => {
+    if (!media) return null;
     // Media is downloaded and available locally
     if (mediaStatus === 'downloaded' && localUri) {
       return (
@@ -216,6 +214,8 @@ export const MediaBubble: React.FC<MediaBubbleProps> = ({
       </Pressable>
     );
   };
+
+  if (!media) return null;
 
   return (
     <View style={[styles.container, isOwn ? styles.ownMedia : styles.theirMedia]}>

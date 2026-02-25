@@ -88,7 +88,7 @@ export const NoteCreatorModal: React.FC<NoteCreatorModalProps> = ({ visible, onC
                                 <TextInput
                                     ref={inputRef}
                                     style={styles.input}
-                                    placeholder="Share a thought..."
+                                    placeholder="What&apos;s on your mind?"
                                     placeholderTextColor="rgba(255,255,255,0.4)"
                                     value={noteText}
                                     onChangeText={setNoteText}
@@ -106,7 +106,7 @@ export const NoteCreatorModal: React.FC<NoteCreatorModalProps> = ({ visible, onC
                         </View>
 
                         <Text style={styles.hintText}>
-                            Shared for 24 hours. People won't be notified when you share a note.
+                            Shared for 24 hours. People won&apos;t be notified when you share a note.
                         </Text>
                     </View>
 

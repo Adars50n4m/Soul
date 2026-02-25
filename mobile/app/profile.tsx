@@ -1,13 +1,22 @@
 import React, { useRef } from 'react';
 import {
-    View, Text, Image, StyleSheet, StatusBar, ScrollView, Animated, Dimensions
+    View, Text, Image, StyleSheet, StatusBar, ScrollView, Animated as RNAnimated, Dimensions, Pressable
 } from 'react-native';
 import { useRouter, useNavigation } from 'expo-router';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
-import { Pressable, Alert } from 'react-native';
+import { Alert } from 'react-native';
 import { useApp } from '../context/AppContext';
+import Animated, {
+    FadeIn,
+    FadeOut,
+    SlideInRight,
+    SlideOutLeft,
+    withSpring,
+    useAnimatedScrollHandler,
+    useSharedValue,
+} from 'react-native-reanimated';
 
 const { width } = Dimensions.get('window');
 const HEADER_HEIGHT = 300;
@@ -16,7 +25,7 @@ export default function ProfileScreen() {
     const router = useRouter();
     const navigation = useNavigation();
     const { currentUser, logout, activeTheme } = useApp();
-    const scrollY = useRef(new Animated.Value(0)).current;
+    const scrollY = useRef(new RNAnimated.Value(0)).current;
 
     if (!currentUser) {
         return (
@@ -61,6 +70,10 @@ export default function ProfileScreen() {
                 }
             ]
         );
+    };
+
+    const handleEditProfile = () => {
+        router.push('/profile-edit' as any);
     };
 
     const MenuItem = ({ icon, title, subtitle, onPress, isLast, danger }: any) => (
@@ -127,17 +140,31 @@ export default function ProfileScreen() {
                 style={styles.scrollView}
                 contentContainerStyle={styles.scrollContent}
                 showsVerticalScrollIndicator={false}
-                onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: false })}
+                onScroll={RNAnimated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: false })}
                 scrollEventThrottle={16}
             >
                 {/* Hero Profile Section */}
-                <Animated.View style={[styles.heroSection, { opacity: avatarOpacity, transform: [{ scale: avatarScale }] }]}>
-                    <View style={styles.avatarGlowContainer}>
-                        <Image source={{ uri: currentUser.avatar }} style={styles.profileAvatar} />
-                        <View style={styles.avatarGlassBorder} />
-                    </View>
+                <Animated.View style={[styles.heroSection, { opacity: avatarOpacity, transform: [{ scale: avatarScale }]}]}>
+                    <Pressable onPress={handleEditProfile}>
+                        <Animated.View
+                            style={styles.avatarGlowContainer}
+                        >
+                            <Image source={{ uri: currentUser.avatar }} style={styles.profileAvatar} />
+                            <View style={styles.avatarGlassBorder} />
+                            <View style={styles.editOverlay}>
+                                <MaterialIcons name="edit" size={24} color="#ffffff" />
+                            </View>
+                        </Animated.View>
+                    </Pressable>
                     <Text style={styles.userName}>{currentUser.name}</Text>
                     <Text style={styles.userHandle}>@{currentUser.id || 'soul_sync'}</Text>
+                    <Pressable 
+                        style={({ pressed }) => [styles.editProfileButton, pressed && styles.editProfileButtonPressed]}
+                        onPress={handleEditProfile}
+                    >
+                        <MaterialIcons name="edit" size={18} color="#ffffff" />
+                        <Text style={styles.editProfileText}>Edit Profile</Text>
+                    </Pressable>
                 </Animated.View>
 
                 {/* Glassmorphism Menu Cards */}
@@ -241,6 +268,40 @@ const styles = StyleSheet.create({
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.05)',
         margin: -5,
+    },
+    editOverlay: {
+        position: 'absolute',
+        bottom: 0,
+        right: 0,
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: 'rgba(244, 63, 94, 0.9)',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 3,
+        borderColor: '#09090E',
+    },
+    editProfileButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: 'rgba(244, 63, 94, 0.2)',
+        paddingHorizontal: 20,
+        paddingVertical: 12,
+        borderRadius: 25,
+        marginTop: 16,
+        borderWidth: 1,
+        borderColor: 'rgba(244, 63, 94, 0.3)',
+    },
+    editProfileButtonPressed: {
+        opacity: 0.7,
+        transform: [{ scale: 0.96 }],
+    },
+    editProfileText: {
+        color: '#ffffff',
+        fontSize: 15,
+        fontWeight: '600',
+        marginLeft: 8,
     },
     userName: {
         color: '#ffffff',

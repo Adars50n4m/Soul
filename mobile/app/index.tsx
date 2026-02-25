@@ -1,8 +1,21 @@
-// cache bust 1
-import Animated, { useSharedValue, useAnimatedStyle } from 'react-native-reanimated';
-
 import { Redirect } from 'expo-router';
+import { useApp } from '../context/AppContext';
+import { View, ActivityIndicator } from 'react-native';
 
 export default function Index() {
-  return <Redirect href="/(tabs)/" />;
+  const { currentUser, isReady } = useApp();
+
+  if (!isReady) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color="#BC002A" />
+      </View>
+    );
+  }
+
+  if (!currentUser) {
+    return <Redirect href="/login" />;
+  }
+
+  return <Redirect href="/(tabs)" />;
 }

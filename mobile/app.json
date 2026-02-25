@@ -9,6 +9,7 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
+      "appleTeamId": "NSQLLV82SH",
       "supportsTablet": true,
       "bundleIdentifier": "com.soulsync4.mobile",
       "infoPlist": {
@@ -16,8 +17,6 @@
         "NSMicrophoneUsageDescription": "SoulSync needs microphone access for audio and video calls",
         "UIBackgroundModes": [
           "audio",
-          "voip",
-          "remote-notification",
           "fetch",
           "processing"
         ],
@@ -61,6 +60,15 @@
     "plugins": [
       "expo-router",
       [
+        "expo-build-properties",
+        {
+          "ios": {
+            "useFrameworks": "static",
+            "buildReactNativeFromSource": true
+          }
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
@@ -80,14 +88,6 @@
           "recordAudioAndroid": true
         }
       ],
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/images/icon.png",
-          "color": "#ffffff",
-          "sounds": []
-        }
-      ],
       "expo-sqlite",
       [
         "expo-background-fetch",
@@ -95,8 +95,7 @@
           "minimumInterval": 900
         }
       ],
-      "./plugins/withCallKit",
-      "./plugins/withAndroidCalling"
+      "./plugins/withCallKit"
     ],
     "experiments": {
       "typedRoutes": true,

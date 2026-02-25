@@ -1,22 +1,25 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
-    TextInput, ScrollView, Alert, Modal, Animated, Dimensions,
+    TextInput, ScrollView, Alert, Modal, Animated as RNAnimated, Dimensions,
     KeyboardAvoidingView, Platform
 } from 'react-native';
-import { useRouter, useNavigation } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
+import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useApp } from '../context/AppContext';
 import { storageService } from '../services/StorageService';
+import Animated, {
+    interpolate,
+    useAnimatedStyle,
+    useSharedValue,
+    withTiming,
+} from 'react-native-reanimated';
 
-const { width, height } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
 
 export default function ProfileEditScreen() {
     const router = useRouter();
-    const navigation = useNavigation();
     const { currentUser, updateProfile, activeTheme } = useApp();
 
     const [name, setName] = useState(currentUser?.name || '');
@@ -27,19 +30,44 @@ export default function ProfileEditScreen() {
     const [showFullImage, setShowFullImage] = useState(false);
     const [isEditing, setIsEditing] = useState<'name' | 'bio' | 'birthdate' | null>(null);
 
-    const slideAnim = useRef(new Animated.Value(0)).current;
+    const slideAnim = useRef(new RNAnimated.Value(0)).current;
+    const heroProgress = useSharedValue(0);
+
+    useEffect(() => {
+        heroProgress.value = withTiming(1, {
+            duration: 500,
+        });
+    }, [heroProgress]);
+
+    const avatarMorphStyle = useAnimatedStyle(() => ({
+        borderRadius: 70,
+        transform: [
+            { scale: interpolate(heroProgress.value, [0, 1], [0.92, 1]) },
+        ],
+    }));
+
+    const contentEntranceStyle = useAnimatedStyle(() => ({
+        opacity: interpolate(heroProgress.value, [0, 1], [0.92, 1]),
+        transform: [
+            { translateY: interpolate(heroProgress.value, [0, 1], [16, 0]) },
+        ],
+    }));
+
+    const handleBack = () => {
+        router.back();
+    };
 
     const showModal = () => {
         setShowImageModal(true);
-        Animated.spring(slideAnim, {
+        RNAnimated.spring(slideAnim, {
             toValue: 1,
             useNativeDriver: true,
-            friction: 8,
+            friction: 800,
         }).start();
     };
 
     const hideModal = () => {
-        Animated.timing(slideAnim, {
+        RNAnimated.timing(slideAnim, {
             toValue: 0,
             duration: 200,
             useNativeDriver: true,
@@ -178,16 +206,16 @@ export default function ProfileEditScreen() {
     );
 
     return (
-        <View style={styles.container}>
+        <Animated.View 
+            style={styles.container}
+        >
             <StatusBar barStyle="light-content" />
 
             {/* Header */}
             <View style={styles.header}>
                 <Pressable 
                     style={styles.backButton} 
-                    onPress={() => {
-                        if (navigation.canGoBack()) navigation.goBack();
-                    }}
+                    onPress={handleBack}
                 >
                     <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
                 </Pressable>
@@ -207,14 +235,20 @@ export default function ProfileEditScreen() {
                     showsVerticalScrollIndicator={false}
                 >
                     {/* Profile Photo Section */}
-                    <View style={styles.avatarSection}>
+                    <Animated.View style={[styles.avatarSection, contentEntranceStyle]} collapsable={false}>
                         <Pressable onPress={() => setShowFullImage(true)}>
-                            <Image source={{ uri: avatar }} style={styles.avatar} />
+                            <Animated.View
+                                style={[styles.avatarMorphShell, avatarMorphStyle]}
+                            >
+                                <Animated.Image source={{ uri: avatar }} style={styles.avatarMorphImage} />
+                            </Animated.View>
                         </Pressable>
-                        <Pressable onPress={showModal}>
-                            <Text style={[styles.editButton, { color: activeTheme.primary }]}>Edit</Text>
-                        </Pressable>
-                    </View>
+                        <Animated.View>
+                            <Pressable onPress={showModal}>
+                                <Text style={[styles.editButton, { color: activeTheme.primary }]}>Edit</Text>
+                            </Pressable>
+                        </Animated.View>
+                    </Animated.View>
 
                     {/* Settings Rows */}
                     <View style={styles.section}>
@@ -346,7 +380,7 @@ export default function ProfileEditScreen() {
             <Modal visible={showImageModal} transparent animationType="fade">
                 <View style={styles.modalOverlay}>
                     <Pressable style={styles.modalBackdrop} onPress={hideModal} />
-                    <Animated.View
+                    <RNAnimated.View
                         style={[
                             styles.modalContent,
                             {
@@ -382,10 +416,10 @@ export default function ProfileEditScreen() {
                             <MaterialIcons name="delete" size={24} color="#ef4444" />
                             <Text style={[styles.modalOptionText, { color: '#ef4444' }]}>Delete photo</Text>
                         </Pressable>
-                    </Animated.View>
+                    </RNAnimated.View>
                 </View>
             </Modal>
-        </View>
+        </Animated.View>
     );
 }
 
@@ -426,11 +460,16 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         paddingVertical: 32,
     },
-    avatar: {
+    avatarMorphShell: {
         width: 140,
         height: 140,
         borderRadius: 70,
+        overflow: 'hidden',
         backgroundColor: 'rgba(255,255,255,0.1)',
+    },
+    avatarMorphImage: {
+        width: '100%',
+        height: '100%',
     },
     editButton: {
         marginTop: 12,

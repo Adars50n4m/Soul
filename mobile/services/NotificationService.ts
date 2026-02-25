@@ -73,7 +73,7 @@ class NotificationService {
     await this.requestPermissions();
     await this.configureChannelsAndCategories();
 
-    this.responseSub = Notifications.addNotificationResponseReceivedListener((response) => {
+    this.responseSub = Notifications.addNotificationResponseReceivedListener((response: any) => {
       const payload = response.notification.request.content.data as NotificationPayload;
       const actionIdentifier = response.actionIdentifier;
       const userText = (response as any)?.userText as string | undefined;
@@ -82,7 +82,7 @@ class NotificationService {
       this.onResponse(actionIdentifier, payload, userText);
     });
 
-    this.receiveSub = Notifications.addNotificationReceivedListener((_event) => {
+    this.receiveSub = Notifications.addNotificationReceivedListener((_event: any) => {
       // Reserved: can be used for in-app banners/sound routing if needed.
     });
 

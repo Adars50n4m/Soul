@@ -1,10 +1,5 @@
 import React from 'react';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withSpring,
-  SharedTransition,
-} from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 import { View } from 'react-native';
 
 interface SharedElementProps {
@@ -15,10 +10,7 @@ interface SharedElementProps {
 
 export const SharedElement: React.FC<SharedElementProps> = ({ children, tag, style }) => {
   return (
-    <Animated.View
-      style={style}
-      sharedTransitionTag={tag}
-    >
+    <Animated.View style={style}>
       {children}
     </Animated.View>
   );

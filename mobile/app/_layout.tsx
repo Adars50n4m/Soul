@@ -10,9 +10,24 @@ import { IncomingCallModal } from '../components/IncomingCallModal';
 import '../global.css';
 
 function RootContent() {
-  const { activeCall } = useApp();
+  const { activeCall, currentUser, isReady } = useApp();
   const router = useRouter();
   const segments = useSegments();
+
+    // --- AUTH GUARD ---
+    useEffect(() => {
+        if (!isReady) return;
+
+        const inAuthGroup = segments[0] === 'login';
+
+        if (!currentUser && !inAuthGroup) {
+            // Redirect to login if user is not authenticated
+            router.replace('/login');
+        } else if (currentUser && inAuthGroup) {
+            // Redirect to home if user is authenticated and tries to access login
+            router.replace('/(tabs)');
+        }
+    }, [currentUser, isReady, segments]);
 
     // --- TRAFFIC CONTROLLER FOR CALLS ---
     useEffect(() => {
@@ -31,7 +46,9 @@ function RootContent() {
 
   return (
     <View style={{ flex: 1 }}>
-      <Stack screenOptions={{ headerShown: false, gestureEnabled: false }} initialRouteName="(tabs)">
+      <Stack screenOptions={{ headerShown: false, gestureEnabled: false }}>
+        <Stack.Screen name="index" options={{ headerShown: false }} />
+        <Stack.Screen name="login" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ 
           headerShown: false,
           gestureEnabled: false // Prevents root-level GO_BACK crash on swipe
@@ -47,11 +64,45 @@ function RootContent() {
           headerShown: false
         }} />
         <Stack.Screen name="chat/[id]" options={{
-          presentation: 'transparentModal',
+          // Use a real transition so Reanimated sharedTransitionTag can run
+          // between the chat-list pill and the chat header pill.
+          presentation: 'card',
+          // Disable screen-level animation; let the shared-element morph be the animation.
           animation: 'none',
           headerShown: false,
           gestureEnabled: true,
+          // Keep the previous screen mounted during the transition so the shared element
+          // can be captured and morphed smoothly.
           contentStyle: { backgroundColor: 'transparent' },
+        }} />
+        <Stack.Screen name="profile-edit" options={{
+          presentation: 'card',
+          animation: 'fade',
+          gestureEnabled: true,
+        }} />
+        <Stack.Screen name="profile" options={{
+          animation: 'ios_from_right',
+          headerShown: false,
+        }} />
+        <Stack.Screen name="profile/[id]" options={{
+          animation: 'ios_from_right',
+          headerShown: false,
+        }} />
+        <Stack.Screen name="theme" options={{
+          animation: 'ios_from_right',
+          headerShown: false,
+        }} />
+        <Stack.Screen name="about" options={{
+          animation: 'ios_from_right',
+          headerShown: false,
+        }} />
+        <Stack.Screen name="help-center" options={{
+          animation: 'ios_from_right',
+          headerShown: false,
+        }} />
+        <Stack.Screen name="storage-management" options={{
+          animation: 'ios_from_right',
+          headerShown: false,
         }} />
         <Stack.Screen name="+not-found" />
       </Stack>

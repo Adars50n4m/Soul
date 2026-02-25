@@ -2,149 +2,175 @@
  * Expo Config Plugin: withCallKit
  * 
  * Configures the iOS native project for CallKit + VoIP Push support.
- * 
- * What this plugin does:
- * 1. Adds the "Voice over IP" background mode to Info.plist
- * 2. Adds the PushKit framework
- * 3. Adds the CallKit framework
- * 4. Configures the VoIP push entitlement
- * 5. Adds the AppDelegate code for PushKit registration
- * 
- * Usage in app.json:
- *   "plugins": [
- *     "./plugins/withCallKit"
- *   ]
+ * Supports both Objective-C and Swift AppDelegate.
  */
 
-const { withInfoPlist, withEntitlementsPlist, withXcodeProject, withAppDelegate } = require('expo/config-plugins');
+const { withInfoPlist, withEntitlementsPlist, withAppDelegate, withDangerousMod } = require('expo/config-plugins');
 
-/**
- * Add VoIP background mode and required frameworks
- */
 function withCallKitPlugin(config) {
   // Step 1: Add VoIP background mode to Info.plist
   config = withInfoPlist(config, (config) => {
     const bgModes = config.modResults.UIBackgroundModes || [];
     
-    if (!bgModes.includes('voip')) {
-      bgModes.push('voip');
-    }
-    if (!bgModes.includes('audio')) {
-      bgModes.push('audio');
-    }
-    if (!bgModes.includes('remote-notification')) {
-      bgModes.push('remote-notification');
-    }
+    if (!bgModes.includes('voip')) bgModes.push('voip');
+    if (!bgModes.includes('audio')) bgModes.push('audio');
     
     config.modResults.UIBackgroundModes = bgModes;
-    
     return config;
   });
 
-  // Step 2: Add VoIP push entitlement
+  // Step 2: Add VoIP push entitlement (Temporarily disabled for "Lite" mode)
+  /*
   config = withEntitlementsPlist(config, (config) => {
-    config.modResults['aps-environment'] = 'development'; // Change to 'production' for release
+    config.modResults['aps-environment'] = 'development';
+    return config;
+  });
+  */
+
+  // Step 3: Patch AppDelegate
+  config = withAppDelegate(config, (config) => {
+    if (config.modResults.language === 'swift') {
+      config.modResults.contents = patchSwiftAppDelegate(config.modResults.contents);
+    } else {
+      config.modResults.contents = patchObjCAppDelegate(config.modResults.contents);
+    }
     return config;
   });
 
-  // Step 3: Add PushKit delegate code to AppDelegate
-  config = withAppDelegate(config, (config) => {
-    const appDelegate = config.modResults.contents;
-    
-    // Check if PushKit import already exists
-    if (!appDelegate.includes('#import <PushKit/PushKit.h>')) {
-      // Add PushKit import after UIKit import
-      config.modResults.contents = appDelegate.replace(
-        '#import <UIKit/UIKit.h>',
-        '#import <UIKit/UIKit.h>\n#import <PushKit/PushKit.h>\n#import "RNVoipPushNotificationManager.h"\n#import "RNCallKeep.h"'
-      );
-    }
-    
-    // Add PushKit delegate methods if not already present
-    if (!appDelegate.includes('pushRegistry:didUpdatePushCredentials')) {
-      const delegateMethodsCode = `
+  // Step 4: Patch Bridging Header
+  config = withDangerousMod(config, [
+    'ios',
+    async (config) => {
+      const fs = require('fs');
+      const path = require('path');
+      const bridgingHeaderPath = path.join(config.modRequest.platformProjectRoot, config.modRequest.projectName, `${config.modRequest.projectName}-Bridging-Header.h`);
+      if (fs.existsSync(bridgingHeaderPath)) {
+        let contents = fs.readFileSync(bridgingHeaderPath, 'utf8');
+        if (!contents.includes('RNCallKeep.h')) {
+          contents += '\n#import "RNVoipPushNotificationManager.h"\n#import "RNCallKeep.h"\n';
+          fs.writeFileSync(bridgingHeaderPath, contents);
+        }
+      }
+      return config;
+    },
+  ]);
 
-// ─── PushKit VoIP Push Delegate Methods ─────────────────────────────────────
+  return config;
+}
 
-// Called when the device registers for VoIP pushes
+function patchSwiftAppDelegate(contents) {
+  // 1. Add imports
+  if (!contents.includes('import PushKit')) {
+    contents = contents.replace('import Expo', 'import Expo\nimport PushKit\nimport CallKit');
+  }
+
+  // 2. Add Delegate conformance
+  if (!contents.includes('PKPushRegistryDelegate')) {
+    contents = contents.replace(
+      'class AppDelegate: ExpoAppDelegate {',
+      'class AppDelegate: ExpoAppDelegate, PKPushRegistryDelegate {'
+    );
+  }
+
+  // 3. Add Initialization in didFinishLaunching
+  if (!contents.includes('RNVoipPushNotificationManager.voipRegistration')) {
+    const initCode = `
+    // Register for VoIP pushes
+    RNVoipPushNotificationManager.voipRegistration()
+    
+    // Setup CallKeep
+    RNCallKeep.setup([
+      "appName": "SoulSync",
+      "maximumCallGroups": 1,
+      "maximumCallsPerCallGroup": 1,
+      "supportsVideo": true
+    ])
+    `;
+    contents = contents.replace(
+      'return super.application(application, didFinishLaunchingWithOptions: launchOptions)',
+      `${initCode}\n    return super.application(application, didFinishLaunchingWithOptions: launchOptions)`
+    );
+  }
+
+  // 4. Add Delegate methods before the last closing brace
+  if (!contents.includes('didUpdate credentials')) {
+    const delegateMethods = `
+  // MARK: - PKPushRegistryDelegate
+
+  public func pushRegistry(_ registry: PKPushRegistry, didUpdate credentials: PKPushCredentials, for type: PKPushType) {
+    RNVoipPushNotificationManager.didUpdate(credentials, forType: type.rawValue)
+  }
+
+  public func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completionHandler: @escaping () -> Void) {
+    let dict = payload.dictionaryPayload as? [String: Any] ?? [:]
+    let uuid = (dict["callId"] as? String) ?? (dict["uuid"] as? String) ?? UUID().uuidString
+    let callerName = (dict["callerName"] as? String) ?? "Unknown Caller"
+    let handle = (dict["callerId"] as? String) ?? "unknown"
+    let hasVideo = (dict["callType"] as? String) == "video"
+
+    RNCallKeep.reportNewIncomingCall(
+      uuid,
+      handle: handle,
+      handleType: "generic",
+      hasVideo: hasVideo,
+      localizedCallerName: callerName,
+      supportsHolding: true,
+      supportsDTMF: true,
+      supportsGrouping: true,
+      supportsUngrouping: true,
+      fromPushKit: true,
+      payload: dict,
+      withCompletionHandler: completionHandler
+    )
+
+    RNVoipPushNotificationManager.didReceiveIncomingPush(with: payload, forType: type.rawValue)
+  }
+
+  public func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
+  }
+`;
+    // Insert after the continueUserActivity restorationHandler
+    contents = contents.replace(
+      /(return super\.application\(application, continue: userActivity, restorationHandler: restorationHandler\) \|\| result\n\s*\})/,
+      '$1\n' + delegateMethods
+    );
+  }
+
+  return contents;
+}
+
+function patchObjCAppDelegate(contents) {
+  if (!contents.includes('#import <PushKit/PushKit.h>')) {
+    contents = contents.replace(
+      '#import <UIKit/UIKit.h>',
+      '#import <UIKit/UIKit.h>\n#import <PushKit/PushKit.h>\n#import "RNVoipPushNotificationManager.h"\n#import "RNCallKeep.h"'
+    );
+  }
+
+  if (!contents.includes('PKPushRegistryDelegate')) {
+    contents = contents.replace('@interface AppDelegate', '@interface AppDelegate <PKPushRegistryDelegate>');
+  }
+
+  if (!contents.includes('pushRegistry:didUpdatePushCredentials')) {
+    const methods = `
 - (void)pushRegistry:(PKPushRegistry *)registry didUpdatePushCredentials:(PKPushCredentials *)credentials forType:(PKPushType)type {
   [RNVoipPushNotificationManager didUpdatePushCredentials:credentials forType:(NSString *)type];
 }
 
-// Called when a VoIP push is received
-// ⚠️ CRITICAL: Must report a new incoming call to CallKit here
-// Apple will terminate the app if you receive a VoIP push without showing CallKit UI
 - (void)pushRegistry:(PKPushRegistry *)registry didReceiveIncomingPushWithPayload:(PKPushPayload *)payload forType:(PKPushType)type withCompletionHandler:(void (^)(void))completion {
-  
-  // Extract call data from the push payload
   NSString *uuid = payload.dictionaryPayload[@"callId"] ?: payload.dictionaryPayload[@"uuid"] ?: [[NSUUID UUID] UUIDString];
   NSString *callerName = payload.dictionaryPayload[@"callerName"] ?: @"Unknown Caller";
   NSString *handle = payload.dictionaryPayload[@"callerId"] ?: @"unknown";
   BOOL hasVideo = [payload.dictionaryPayload[@"callType"] isEqualToString:@"video"];
   
-  // Report the incoming call to CallKit IMMEDIATELY
-  // This MUST happen before the completion handler is called
-  [RNCallKeep reportNewIncomingCall:uuid
-                             handle:handle
-                         handleType:@"generic"
-                           hasVideo:hasVideo
-                localizedCallerName:callerName
-                    supportsHolding:YES
-                       supportsDTMF:YES
-                   supportsGrouping:YES
-                 supportsUngrouping:YES
-                        fromPushKit:YES
-                            payload:payload.dictionaryPayload
-              withCompletionHandler:completion];
-  
-  // Also notify the JS side via RNVoipPushNotification
+  [RNCallKeep reportNewIncomingCall:uuid handle:handle handleType:@"generic" hasVideo:hasVideo localizedCallerName:callerName supportsHolding:YES supportsDTMF:YES supportsGrouping:YES supportsUngrouping:YES fromPushKit:YES payload:payload.dictionaryPayload withCompletionHandler:completion];
   [RNVoipPushNotificationManager didReceiveIncomingPushWithPayload:payload forType:(NSString *)type];
 }
-
-// Called when the device invalidates push credentials
-- (void)pushRegistry:(PKPushRegistry *)registry didInvalidatePushTokenForType:(PKPushType)type {
-  // Handle token invalidation if needed
-}
 `;
-      
-      // Insert before @end
-      config.modResults.contents = config.modResults.contents.replace(
-        '@end',
-        delegateMethodsCode + '\n@end'
-      );
-    }
-    
-    // Add PushKit registration in didFinishLaunchingWithOptions
-    if (!appDelegate.includes('PKPushRegistry')) {
-      config.modResults.contents = config.modResults.contents.replace(
-        'return [super application:application didFinishLaunchingWithOptions:launchOptions];',
-        `// Register for VoIP pushes
-  [RNVoipPushNotificationManager voipRegistration];
-  
-  // Setup CallKeep
-  [RNCallKeep setup:@{
-    @"appName": @"SoulSync",
-    @"maximumCallGroups": @1,
-    @"maximumCallsPerCallGroup": @1,
-    @"supportsVideo": @YES,
-  }];
-  
-  return [super application:application didFinishLaunchingWithOptions:launchOptions];`
-      );
-    }
-    
-    // Add PKPushRegistryDelegate to the class declaration
-    if (!appDelegate.includes('PKPushRegistryDelegate')) {
-      config.modResults.contents = config.modResults.contents.replace(
-        '@interface AppDelegate',
-        '@interface AppDelegate <PKPushRegistryDelegate>'
-      );
-    }
-    
-    return config;
-  });
+    contents = contents.replace('@end', methods + '\n@end');
+  }
 
-  return config;
+  return contents;
 }
 
 module.exports = withCallKitPlugin;

@@ -26,7 +26,7 @@ import type { IncomingCallPayload } from './NativeCallService';
 
 // ─── Feature Flag ────────────────────────────────────────────────────────────
 // Set to true AFTER installing the native modules and uncommenting the requires.
-const VOIP_PUSH_ENABLED = false;
+const VOIP_PUSH_ENABLED = true;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -73,9 +73,7 @@ class VoIPPushService {
   // ─── iOS: VoIP Push (PushKit) ────────────────────────────────────────────
 
   private async initializeIOS(): Promise<void> {
-    // ⚠️ UNCOMMENT the line below AFTER installing react-native-voip-push-notification:
-    // const VoipPushNotification = require('react-native-voip-push-notification').default;
-    const VoipPushNotification: any = null; // Remove this line when uncommenting above
+    const VoipPushNotification = require('react-native-voip-push-notification').default;
 
     if (!VoipPushNotification) {
       console.log('[VoIPPushService] iOS VoIP push module not loaded');
@@ -124,11 +122,8 @@ class VoIPPushService {
   // ─── Android: FCM High-Priority Data Messages ────────────────────────────
 
   private async initializeAndroid(): Promise<void> {
-    // ⚠️ UNCOMMENT the lines below AFTER installing @react-native-firebase/messaging:
-    // const firebaseModule = require('@react-native-firebase/messaging').default;
-    // const messaging = firebaseModule();
-    const firebaseModule: any = null; // Remove this line when uncommenting above
-    const messaging: any = null; // Remove this line when uncommenting above
+    const firebaseModule = require('@react-native-firebase/messaging').default;
+    const messaging = firebaseModule();
 
     if (!messaging) {
       console.log('[VoIPPushService] Android FCM module not loaded');

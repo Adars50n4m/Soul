@@ -4,10 +4,10 @@ import { useRouter, useNavigation } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
-import Animated, { 
-  useSharedValue, 
-  useAnimatedStyle, 
-  withSpring, 
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
   withTiming,
   LinearTransition,
   FadeIn,
@@ -17,7 +17,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { storageService } from '../../services/StorageService';
 
 import { useApp } from '../../context/AppContext';
@@ -27,9 +27,7 @@ import { MediaPickerSheet } from '../../components/MediaPickerSheet';
 import { Contact, Story } from '../../types';
 import { NoteBubble } from '../../components/NoteBubble';
 import { NoteCreatorModal } from '../../components/NoteCreatorModal';
-import SingleChatScreen from '../chat/[id]';
-
-const DEFAULT_AVATAR = 'https://via.placeholder.com/150';
+const DEFAULT_AVATAR = '';
 
 const resolveStatusAssetUri = async (asset: ImagePicker.ImagePickerAsset): Promise<string> => {
   let resolvedUri = asset.uri;
@@ -62,8 +60,24 @@ const resolveStatusAssetUri = async (asset: ImagePicker.ImagePickerAsset): Promi
 
 // ─── Stable style objects (extracted to avoid inline object creation in render) ──
 const typingStyle = { color: '#22c55e', fontWeight: '700' as const };
-const hiddenStyle = { opacity: 0 };
 const chevronColor = 'rgba(255,255,255,0.3)';
+const hiddenStyle = { opacity: 0 };
+const formatTime = (ts: string) => {
+  if (!ts) return '';
+  try {
+    const date = new Date(ts);
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    
+    if (isToday) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } else {
+      return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    }
+  } catch (e) {
+    return ts;
+  }
+};
 
 interface ChatListItemProps {
   item: Contact;
@@ -112,24 +126,37 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
       disabled={isHidden}
     >
       <Animated.View style={[styles.chatPillContainer, animatedStyle]}>
-        <View style={styles.pillBackground} />
-        <BlurView intensity={40} tint="dark" style={styles.pillBlur} />
-
-        <View style={styles.pillContent}>
+        
+        {/* The solid flying morph background. Isolated with NO CHILDREN to avoid Reanimated capture bugs. */}
+        <Animated.View
+            {...{ sharedTransitionTag: `chat-pill-${item.id}` } as any}
+            style={[StyleSheet.absoluteFill, { borderRadius: 36, backgroundColor: '#151515', borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.08)' }]}
+        />
+            
+        {/* Content rendered safely as an overlay, decoupled from Reanimated's snapshot engine */}
+        <View style={[styles.pillContent, { position: 'absolute', width: '100%', height: '100%', paddingHorizontal: 16 }]} pointerEvents="box-none">
           <View style={styles.avatarContainer}>
-            <Image source={{ uri: item.avatar || DEFAULT_AVATAR }} style={styles.avatar} />
+            <Animated.Image
+              {...{ sharedTransitionTag: `chat-avatar-${item.id}` } as any}
+              source={{ uri: item.avatar || DEFAULT_AVATAR }}
+              style={styles.avatar}
+            />
             {item.status === 'online' && <View style={styles.onlineIndicator} />}
           </View>
 
           <View style={styles.chatContent}>
-            <Text style={styles.contactName}>{item.name}</Text>
+            <View>
+              <Text style={styles.contactName}>
+                {item.name}
+              </Text>
+            </View>
             <Text numberOfLines={1} style={isTyping ? [styles.lastMessage, typingStyle] : styles.lastMessage}>
               {isTyping ? 'Typing...' : (lastMsg.text || 'Start a conversation')}
             </Text>
           </View>
 
           <View style={styles.rightSide}>
-            {lastMsg.timestamp && <Text style={styles.timestamp}>{lastMsg.timestamp}</Text>}
+            {lastMsg.timestamp && <Text style={styles.timestamp}>{formatTime(lastMsg.timestamp)}</Text>}
             <MaterialIcons name="chevron-right" size={20} color={chevronColor} />
           </View>
         </View>
@@ -151,6 +178,8 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
   );
 });
 
+ChatListItem.displayName = 'ChatListItem';
+
 export default function HomeScreen() {
   const {
     contacts,
@@ -166,23 +195,7 @@ export default function HomeScreen() {
     addStatusView,
   } = useApp();
   const navigation = useNavigation();
-  const [selectedUser, setSelectedUser] = useState<Contact | null>(null);
-  const [sourceY, setSourceY] = useState<number | undefined>(undefined);
-  const [hiddenUserId, setHiddenUserId] = useState<string | null>(null);
-
-  // Hide Tab Bar when Chat is open
-  React.useLayoutEffect(() => {
-    navigation.setOptions({
-      tabBarStyle: selectedUser ? { display: 'none' } : undefined
-    });
-  }, [navigation, selectedUser]);
-
-  // Ensure hidden item reappears if selectedUser is cleared externally
-  React.useEffect(() => {
-    if (!selectedUser && hiddenUserId) {
-      setHiddenUserId(null);
-    }
-  }, [selectedUser, hiddenUserId]);
+  const router = useRouter();
 
   // Status Handlers
   const [selectedStatusContact, setSelectedStatusContact] = useState<Contact | null>(null);
@@ -216,12 +229,15 @@ export default function HomeScreen() {
   );
 
   const visibleContacts = useMemo(() => {
+    // Hide the current user from their own contact list
+    const otherContacts = contacts.filter(c => c.id !== currentUser?.id);
+    
     const legacyIds = new Set(['shri', 'hari']);
-    const hasRealContacts = contacts.some(c => !legacyIds.has(c.id));
+    const hasRealContacts = otherContacts.some(c => !legacyIds.has(c.id));
 
-    if (!hasRealContacts) return contacts;
+    if (!hasRealContacts) return otherContacts;
 
-    return contacts.filter(contact => {
+    return otherContacts.filter(contact => {
       if (!legacyIds.has(contact.id)) return true;
 
       const hasMessages = (messages[contact.id]?.length || 0) > 0;
@@ -232,7 +248,7 @@ export default function HomeScreen() {
       // Hide legacy placeholder contacts when real contacts exist and placeholder has no activity.
       return hasMessages || hasStatus || hasMeaningfulLastMessage;
     });
-  }, [contacts, messages, statuses]);
+  }, [contacts, messages, statuses, currentUser]);
 
   const contactsWithStories = useMemo(() => {
      return visibleContacts.filter(c => contactStoriesMap.has(c.id)).map(c => ({
@@ -321,10 +337,14 @@ export default function HomeScreen() {
   };
 
   const handleUserSelect = useCallback((contact: Contact, y: number) => {
-    setSourceY(y);
-    setSelectedUser(contact);
-    setHiddenUserId(contact.id);
-  }, []);
+    router.push({
+      pathname: '/chat/[id]',
+      params: { 
+        id: contact.id,
+        sourceY: y.toString(),
+      }
+    });
+  }, [router]);
 
   // Pre-compute last messages map to avoid recalculating in renderItem
   const lastMessagesMap = useMemo(() => {
@@ -348,16 +368,12 @@ export default function HomeScreen() {
           lastMsg={lastMsg} 
           onSelect={handleUserSelect} 
           isTyping={isTyping} 
-          isHidden={hiddenUserId === item.id}
       />
     );
-  }, [lastMessagesMap, typingUsers, handleUserSelect, hiddenUserId]);
+  }, [lastMessagesMap, typingUsers, handleUserSelect]);
 
   // Stable keyExtractor for FlashList
   const keyExtractor = useCallback((item: Contact) => item.id, []);
-
-  // Render header component
-
 
   return (
     <Animated.View 
@@ -394,7 +410,7 @@ export default function HomeScreen() {
                           <Image source={{ uri: myStoryPreviewUrl }} style={styles.myStatusPreviewBg} />
                         )}
                         <View style={styles.myStatusAvatarContainer}>
-                          <Image source={{ uri: currentUser?.avatar || 'https://via.placeholder.com/150' }} style={styles.myStatusAvatar} />
+                          <Image source={{ uri: currentUser?.avatar || '' }} style={styles.myStatusAvatar} />
                           {myStories.length === 0 && (
                             <View style={styles.myStatusAddBadge}><MaterialIcons name="add" size={16} color="#fff" /></View>
                           )}
@@ -496,29 +512,12 @@ export default function HomeScreen() {
         visible={isNoteModalVisible}
         onClose={() => setIsNoteModalVisible(false)}
       />
-
-      {selectedUser && (
-        <Animated.View 
-          style={[styles.fullScreenContent, StyleSheet.absoluteFill, { zIndex: 100 }]}
-        >
-          <SingleChatScreen 
-            user={selectedUser} 
-            sourceY={sourceY} 
-            onBackStart={() => setHiddenUserId(null)}
-            onBack={() => {
-                setSelectedUser(null);
-                setHiddenUserId(null); // Safety clear
-            }} 
-          />
-        </Animated.View>
-      )}
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  fullScreenContent: { flex: 1, backgroundColor: 'transparent' },
   statusRail: { marginTop: 60, marginBottom: 0, overflow: 'visible' },
   statusContent: { paddingHorizontal: 20, paddingVertical: 12, paddingTop: 8, gap: 12, overflow: 'visible' },
   statusCard: { width: 110, height: 140, borderRadius: 28, backgroundColor: '#1a1a1a', zIndex: 10 },
@@ -543,7 +542,8 @@ const styles = StyleSheet.create({
       alignItems: 'center',
       zIndex: 100,
   },
-  chatPillContainer: { flex: 1, borderRadius: 36, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)', overflow: 'hidden' },
+  // Removed overflow: 'hidden' to let shared elements escape during flight
+  chatPillContainer: { flex: 1, borderRadius: 36, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.08)' },
   pillBackground: { ...StyleSheet.absoluteFillObject, backgroundColor: '#151515', opacity: 0.95 },
   pillBlur: { ...StyleSheet.absoluteFillObject },
   pillContent: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 12 },
@@ -553,6 +553,6 @@ const styles = StyleSheet.create({
   chatContent: { flex: 1, justifyContent: 'center' },
   contactName: { color: '#fff', fontSize: 17, fontWeight: '700', letterSpacing: 0.5 },
   lastMessage: { color: 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: '500' },
-  rightSide: { alignItems: 'flex-end', justifyContent: 'center', paddingRight: 4, gap: 4, top: 8 },
+  rightSide: { alignItems: 'flex-end', justifyContent: 'center', paddingRight: 4, gap: 4 },
   timestamp: { color: 'rgba(255,255,255,0.5)', fontSize: 11, fontWeight: '600' },
 });

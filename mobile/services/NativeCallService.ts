@@ -44,14 +44,13 @@ export type NativeCallEventHandler = (action: NativeCallAction, callId: string, 
  * 
  * For development without the package, set NATIVE_CALLING_ENABLED = false.
  */
-const NATIVE_CALLING_ENABLED = false; // Set to true after installing react-native-callkeep
+const NATIVE_CALLING_ENABLED = true; // Set to true after installing react-native-callkeep
 
 function loadCallKeep(): any {
   if (!NATIVE_CALLING_ENABLED) return null;
   try {
     // Uncomment the line below AFTER running: npx expo install react-native-callkeep
-    // return require('react-native-callkeep').default;
-    return null;
+    return require('react-native-callkeep').default;
   } catch (e) {
     console.log('[NativeCallService] react-native-callkeep not available');
     return null;
@@ -62,6 +61,7 @@ function loadCallKeep(): any {
 
 class NativeCallService {
   private initialized = false;
+  private isReady = false;
   private RNCallKeep: any = null;
   private activeCallUUID: string | null = null;
   private pendingIncomingCall: IncomingCallPayload | null = null;
@@ -121,8 +121,11 @@ class NativeCallService {
       AppState.addEventListener('change', this.handleAppStateChange);
 
       this.initialized = true;
+      this.isReady = true;
       console.log('[NativeCallService] Initialized successfully');
     } catch (error) {
+      this.initialized = true; // Still marked as initialized to avoid re-entry
+      this.isReady = false;
       console.error('[NativeCallService] Setup failed:', error);
     }
   }
@@ -131,33 +134,58 @@ class NativeCallService {
    * Display the native incoming call UI.
    */
   displayIncomingCall(payload: IncomingCallPayload): void {
-    if (!this.RNCallKeep) return;
+    if (!this.RNCallKeep || !this.isReady) {
+      console.log('[NativeCallService] Ignoring displayIncomingCall - not ready');
+      return;
+    }
 
     const { callId, callerName, callType } = payload;
+    
+    if (Platform.OS === 'ios' && !this.isValidUUID(callId)) {
+        console.warn(`[NativeCallService] 🛑 Invalid UUID for CallKit: ${callId}. Skipping to prevent native crash.`);
+        return;
+    }
+
     this.activeCallUUID = callId;
     this.pendingIncomingCall = payload;
 
     console.log(`[NativeCallService] Displaying incoming ${callType} call from ${callerName} (${callId})`);
 
-    this.RNCallKeep.displayIncomingCall(
-      callId,
-      payload.callerId,
-      callerName,
-      'generic',
-      callType === 'video',
-    );
+    try {
+      this.RNCallKeep.displayIncomingCall(
+        callId,
+        payload.callerId,
+        callerName,
+        'generic',
+        callType === 'video',
+      );
+    } catch (e) {
+      console.error('[NativeCallService] Native displayIncomingCall crash prevented:', e);
+    }
   }
 
   /**
    * Report that an outgoing call has started connecting.
    */
   startOutgoingCall(callId: string, callerName: string, callType: 'audio' | 'video'): void {
-    if (!this.RNCallKeep) return;
+    if (!this.RNCallKeep || !this.isReady) {
+      console.log('[NativeCallService] Ignoring startOutgoingCall - not ready');
+      return;
+    }
+
+    if (Platform.OS === 'ios' && !this.isValidUUID(callId)) {
+        console.warn(`[NativeCallService] 🛑 Invalid UUID for CallKit: ${callId}. Skipping to prevent native crash.`);
+        return;
+    }
 
     this.activeCallUUID = callId;
 
-    this.RNCallKeep.startCall(callId, callerName, callerName, 'generic', callType === 'video');
-    this.RNCallKeep.reportConnectingOutgoingCallWithUUID(callId);
+    try {
+      this.RNCallKeep.startCall(callId, callerName, callerName, 'generic', callType === 'video');
+      this.RNCallKeep.reportConnectingOutgoingCallWithUUID(callId);
+    } catch (e) {
+      console.error('[NativeCallService] Native startOutgoingCall crash prevented:', e);
+    }
   }
 
   /**
@@ -233,7 +261,12 @@ class NativeCallService {
   }
 
   isAvailable(): boolean {
-    return !!this.RNCallKeep && this.initialized;
+    return !!this.RNCallKeep && this.initialized && this.isReady;
+  }
+
+  private isValidUUID(uuid: string): boolean {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(uuid);
   }
 
   addEventHandler(handler: NativeCallEventHandler): void {
@@ -259,7 +292,6 @@ class NativeCallService {
     this.RNCallKeep.addEventListener('didPerformDTMFAction', this.onDTMF);
     this.RNCallKeep.addEventListener('didResetProvider', this.onProviderReset);
     this.RNCallKeep.addEventListener('checkReachability', this.onCheckReachability);
-    this.RNCallKeep.addEventListener('showIncomingCallUi', this.onShowIncomingCallUi);
 
     console.log('[NativeCallService] Event listeners registered');
   }
@@ -330,9 +362,7 @@ class NativeCallService {
     }
   };
 
-  private onShowIncomingCallUi = ({ callUUID, handle, name }: any) => {
-    console.log(`[NativeCallService] Android showing incoming call UI: ${name} (${callUUID})`);
-  };
+  // Note: 'showIncomingCallUi' is not supported by the installed RNCallKeep version
 
   private handleAppStateChange = (nextAppState: AppStateStatus) => {
     this.appState = nextAppState;
@@ -360,7 +390,6 @@ class NativeCallService {
       this.RNCallKeep.removeEventListener('didPerformDTMFAction');
       this.RNCallKeep.removeEventListener('didResetProvider');
       this.RNCallKeep.removeEventListener('checkReachability');
-      this.RNCallKeep.removeEventListener('showIncomingCallUi');
     }
     this.eventHandlers.clear();
     this.activeCallUUID = null;

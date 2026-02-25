@@ -14,7 +14,7 @@ import {
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
-import { Video } from 'expo-av';
+import { Video, ResizeMode } from 'expo-av';
 
 interface MediaPreviewModalProps {
   visible: boolean;
@@ -90,7 +90,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                 ref={videoRef}
                 source={{ uri: mediaUri }}
                 style={styles.mediaImage}
-                resizeMode="contain"
+                resizeMode={ResizeMode.CONTAIN}
                 useNativeControls={true}
                 isLooping={false}
               />
@@ -98,7 +98,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           )}
           {mediaType === 'audio' && (
             <View style={styles.audioPreview}>
-              <MaterialIcons name="graphic-eq" size={80} color="#F50057" />
+              <MaterialIcons name="graphic-eq" size={80} color="#BC002A" />
               <MaterialIcons name="play-circle-filled" size={60} color="#fff" />
             </View>
           )}
@@ -121,7 +121,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
         {/* Send Button */}
         <View style={styles.sendButtonContainer}>
           <LinearGradient
-            colors={['#F50057', '#c40046']}
+            colors={['#BC002A', '#c40046']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={styles.sendButtonGradient}
@@ -219,7 +219,7 @@ const styles = StyleSheet.create({
     width: 60,
     height: 60,
     borderRadius: 30,
-    shadowColor: '#F50057',
+    shadowColor: '#BC002A',
     shadowOpacity: 0.5,
     shadowRadius: 10,
     elevation: 5,

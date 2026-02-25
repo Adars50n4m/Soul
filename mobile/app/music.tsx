@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
 import {
     View, Text, Image, TextInput, Pressable, StyleSheet, StatusBar,
     FlatList, Dimensions, ActivityIndicator, ImageBackground,
@@ -36,6 +36,145 @@ interface Song {
     url: string;
     duration?: number;
 }
+
+// Memoized Song Item for performance
+const SongItem = memo(({ 
+    item, 
+    isCurrent, 
+    isFavorite, 
+    onPress, 
+    magentaColor 
+}: { 
+    item: Song; 
+    isCurrent: boolean; 
+    isFavorite: boolean; 
+    onPress: (song: Song) => void;
+    magentaColor: string;
+}) => {
+    return (
+        <Animated.View layout={Layout.springify()}>
+            <Pressable 
+                onPress={() => onPress(item)}
+                style={[styles.songItem, isCurrent && styles.songItemActive]}
+            >
+                <Image source={{ uri: item.image }} style={styles.songThumb} />
+                <View style={styles.songInfo}>
+                    <Text style={styles.songName} numberOfLines={1}>{item.name}</Text>
+                    <Text style={styles.songArtistName} numberOfLines={1}>{item.artist}</Text>
+                </View>
+                <View style={styles.songAction}>
+                    <MaterialIcons 
+                        name="favorite" 
+                        size={18} 
+                        color={isFavorite ? magentaColor : 'rgba(255,255,255,0.1)'} 
+                    />
+                </View>
+            </Pressable>
+        </Animated.View>
+    );
+});
+
+// Memoized Header to fix keyboard dismissal
+const ListHeader = memo(({ 
+    currentSong, 
+    isPlaying, 
+    progress, 
+    playbackMs, 
+    onTogglePlay, 
+    onSeek, 
+    searchQuery, 
+    onSearchChange, 
+    activeTab,
+    isKeyboardVisible,
+    formatClock 
+}: any) => {
+    return (
+        <View style={[styles.overlayHeader, isKeyboardVisible && { paddingBottom: 0 }]}>
+            <View style={[styles.playerInfoRow, isKeyboardVisible && { marginBottom: 16 }]}>
+                <View style={[styles.artworkWrapper, isKeyboardVisible && { width: 60, height: 60, borderRadius: 12 }]}>
+                    {currentSong ? (
+                        <Image source={{ uri: currentSong.image }} style={styles.artwork} />
+                    ) : (
+                        <View style={[styles.artwork, { backgroundColor: '#1a1a1a', alignItems: 'center', justifyContent: 'center' }]}>
+                            <MaterialIcons name="music-note" size={isKeyboardVisible ? 30 : 60} color="rgba(255,255,255,0.1)" />
+                        </View>
+                    )}
+                    <LinearGradient colors={['transparent', 'rgba(255,0,128,0.2)']} style={StyleSheet.absoluteFill} />
+                    {currentSong && !isKeyboardVisible && (
+                        <View style={styles.artworkBadge}>
+                            <MaterialIcons name="equalizer" size={16} color="#fff" />
+                        </View>
+                    )}
+                </View>
+
+                <View style={styles.playerTextContainer}>
+                    <Text style={[styles.overlayTrackTitle, isKeyboardVisible && { fontSize: 16 }]} numberOfLines={1}>
+                        {currentSong?.name || "Choose a song"}
+                    </Text>
+                    <Text style={[styles.overlayTrackArtist, isKeyboardVisible && { fontSize: 12 }]} numberOfLines={1}>
+                        {currentSong?.artist || "Search to start listening"}
+                    </Text>
+                    
+                    {!isKeyboardVisible && (
+                        <View style={styles.progressBarWrapper}>
+                            <Pressable onPress={onSeek} hitSlop={{ top: 10, bottom: 10 }}>
+                                <View style={styles.progressBarBg}>
+                                    <View style={[styles.progressBarFill, { width: `${progress}%` }]} />
+                                </View>
+                            </Pressable>
+                            <View style={styles.timeLabels}>
+                                <Text style={styles.timeText}>{formatClock(playbackMs / 1000)}</Text>
+                                <Text style={styles.timeText}>
+                                    {currentSong ? formatClock(currentSong.duration || 0) : "No Media"}
+                                </Text>
+                            </View>
+                        </View>
+                    )}
+                </View>
+            </View>
+
+            {!isKeyboardVisible && (
+                <View style={styles.controlsRow}>
+                    <Pressable><MaterialIcons name="skip-previous" size={36} color="rgba(255,255,255,0.4)" /></Pressable>
+                    <Pressable 
+                        onPress={() => currentSong ? onTogglePlay() : null} 
+                        style={[styles.playButton, !currentSong && { opacity: 0.5 }]}
+                    >
+                        <MaterialIcons name={isPlaying ? "pause" : "play-arrow"} size={44} color="#000" />
+                    </Pressable>
+                    <Pressable><MaterialIcons name="skip-next" size={36} color="rgba(255,255,255,0.4)" /></Pressable>
+                </View>
+            )}
+
+            <View style={[styles.searchSection, isKeyboardVisible && { marginBottom: 12 }]}>
+                <BlurView intensity={20} tint="light" style={styles.searchBar}>
+                    <MaterialIcons name="search" size={20} color="rgba(255,0,128,0.8)" />
+                    <TextInput
+                        style={styles.searchInput}
+                        placeholder="Search songs, artists..."
+                        placeholderTextColor="rgba(255,255,255,0.3)"
+                        value={searchQuery}
+                        onChangeText={onSearchChange}
+                        returnKeyType="search"
+                        autoCorrect={false}
+                        autoCapitalize="none"
+                    />
+                </BlurView>
+            </View>
+
+            {!isKeyboardVisible && (
+                <View style={styles.listHeader}>
+                    <Text style={styles.listTitle}>
+                        {activeTab === 'music' 
+                            ? (searchQuery ? `RESULTS FOR "${searchQuery.toUpperCase()}"` : 'TRENDING HINDI SONGS') 
+                            : 'FAVORITES'}
+                    </Text>
+                    <MaterialIcons name="filter-list" size={18} color="rgba(255,255,255,0.2)" />
+                </View>
+            )}
+        </View>
+    );
+});
 
 export default function MusicScreen() {
     const router = useRouter();
@@ -179,7 +318,7 @@ export default function MusicScreen() {
         }
     };
 
-    const searchSongs = async (query: string, newSearch = true) => {
+    const searchSongs = useCallback(async (query: string, newSearch = true) => {
         try {
             if (!query.trim()) {
                 if (isMountedRef.current) setSongs([]);
@@ -290,7 +429,7 @@ export default function MusicScreen() {
                 setIsLoading(false);
             }
         }
-    };
+    }, [page]);
 
     const loadMore = () => {
         if (!isLoading && hasMore && searchQuery.trim()) {
@@ -299,7 +438,7 @@ export default function MusicScreen() {
     };
 
     // Debounced search as user types (like Saavn app)
-    const handleSearchInput = (text: string) => {
+    const handleSearchInput = useCallback((text: string) => {
         setSearchQuery(text);
 
         // Clear previous timeout
@@ -314,14 +453,14 @@ export default function MusicScreen() {
             abortControllerRef.current = null;
         }
 
-        // Debounce search - trigger after 800ms of user stopping typing
+        // Debounce search - trigger after 500ms of user stopping typing
         if (text.trim().length >= 2) {
             setIsLoading(true);
             searchTimeoutRef.current = setTimeout(() => {
                 if (isMountedRef.current) {
                     searchSongs(text, true);
                 }
-            }, 800);
+            }, 500);
         } else if (text.trim().length === 0) {
             // Clear results if search is empty
             setSongs([]);
@@ -330,9 +469,9 @@ export default function MusicScreen() {
             // Less than 2 characters
             setIsLoading(false);
         }
-    };
+    }, [searchSongs]);
 
-    const handleSongInteraction = (song: Song) => {
+    const handleSongInteraction = useCallback((song: Song) => {
         const now = Date.now();
         const lastTime = lastClickTime.current[song.id] || 0;
         if (now - lastTime < 300) {
@@ -341,12 +480,15 @@ export default function MusicScreen() {
             playSong(song);
         }
         lastClickTime.current[song.id] = now;
-    };
+    }, [playSong, toggleFavoriteSong]);
 
-    const isFavorite = (songId: string) => musicState.favorites.some(s => s.id === songId);
+    const isFavorite = useCallback((songId: string) => 
+        musicState.favorites.some(s => s.id === songId)
+    , [musicState.favorites]);
+
     const displaySongs = activeTab === 'favorites' ? musicState.favorites : songs;
 
-    const handleSeek = (e: any) => {
+    const handleSeek = useCallback((e: any) => {
         const { locationX } = e.nativeEvent;
         const barWidth = width - 48; // Screen width - padding (24 * 2)
         const percent = Math.max(0, Math.min(1, locationX / barWidth));
@@ -355,7 +497,7 @@ export default function MusicScreen() {
         seekTo(targetMs);
         setProgress(percent * 100);
         setPlaybackMs(targetMs);
-    };
+    }, [musicState.currentSong?.duration, seekTo]);
 
     const formatClock = (seconds: number) => {
         const safe = Math.max(0, Math.floor(seconds));
@@ -364,118 +506,31 @@ export default function MusicScreen() {
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
-    const renderOverlayHeader = () => (
-        <View style={styles.overlayHeader}>
-            {/* Player Info Row */}
-            <View style={styles.playerInfoRow}>
-                <View style={styles.artworkWrapper}>
-                    {musicState.currentSong ? (
-                        <Image
-                            source={{ uri: musicState.currentSong.image }}
-                            style={styles.artwork}
-                        />
-                    ) : (
-                        <View style={[styles.artwork, { backgroundColor: '#1a1a1a', alignItems: 'center', justifyContent: 'center' }]}>
-                            <MaterialIcons name="music-note" size={60} color="rgba(255,255,255,0.1)" />
-                        </View>
-                    )}
-                    <LinearGradient colors={['transparent', 'rgba(255,0,128,0.2)']} style={StyleSheet.absoluteFill} />
-                    {musicState.currentSong && (
-                        <View style={styles.artworkBadge}>
-                            <MaterialIcons name="equalizer" size={16} color="#fff" />
-                        </View>
-                    )}
-                </View>
+    const memoizedHeader = useMemo(() => (
+        <ListHeader 
+            currentSong={musicState.currentSong}
+            isPlaying={musicState.isPlaying}
+            progress={progress}
+            playbackMs={playbackMs}
+            onTogglePlay={togglePlayMusic}
+            onSeek={handleSeek}
+            searchQuery={searchQuery}
+            onSearchChange={handleSearchInput}
+            activeTab={activeTab}
+            isKeyboardVisible={keyboardVisible}
+            formatClock={formatClock}
+        />
+    ), [musicState.currentSong, musicState.isPlaying, progress, playbackMs, searchQuery, activeTab, keyboardVisible]);
 
-                <View style={styles.playerTextContainer}>
-                    <Text style={styles.overlayTrackTitle} numberOfLines={1}>
-                        {musicState.currentSong?.name || "Choose a song"}
-                    </Text>
-                    <Text style={styles.overlayTrackArtist} numberOfLines={1}>
-                        {musicState.currentSong?.artist || "Search to start listening"}
-                    </Text>
-                    
-                    <View style={styles.progressBarWrapper}>
-                        <Pressable onPress={handleSeek} hitSlop={{ top: 10, bottom: 10 }}>
-                            <View style={styles.progressBarBg}>
-                                <View style={[styles.progressBarFill, { width: `${progress}%` }]} />
-                            </View>
-                        </Pressable>
-                        <View style={styles.timeLabels}>
-                            <Text style={styles.timeText}>{formatClock(playbackMs / 1000)}</Text>
-                            <Text style={styles.timeText}>
-                                {musicState.currentSong
-                                    ? formatClock(musicState.currentSong.duration || 0)
-                                    : "No Media"}
-                            </Text>
-                        </View>
-                    </View>
-                </View>
-            </View>
-
-            {/* Controls Row */}
-            <View style={styles.controlsRow}>
-                <Pressable><MaterialIcons name="skip-previous" size={36} color="rgba(255,255,255,0.4)" /></Pressable>
-                <Pressable 
-                    onPress={() => musicState.currentSong ? togglePlayMusic() : null} 
-                    style={[styles.playButton, !musicState.currentSong && { opacity: 0.5 }]}
-                >
-                    <MaterialIcons name={musicState.isPlaying ? "pause" : "play-arrow"} size={44} color="#000" />
-                </Pressable>
-                <Pressable><MaterialIcons name="skip-next" size={36} color="rgba(255,255,255,0.4)" /></Pressable>
-            </View>
-
-            {/* Search Section */}
-            <View style={styles.searchSection}>
-                <BlurView intensity={20} tint="light" style={styles.searchBar}>
-                    <MaterialIcons name="search" size={20} color="rgba(255,0,128,0.8)" />
-                    <TextInput
-                        style={styles.searchInput}
-                        placeholder="Search songs, artists..."
-                        placeholderTextColor="rgba(255,255,255,0.3)"
-                        value={searchQuery}
-                        onChangeText={handleSearchInput}
-                        returnKeyType="search"
-                        autoCorrect={false}
-                        autoCapitalize="none"
-                    />
-                </BlurView>
-            </View>
-
-            <View style={styles.listHeader}>
-                <Text style={styles.listTitle}>{activeTab === 'music' ? (searchQuery ? `RESULTS FOR "${searchQuery.toUpperCase()}"` : 'TRENDING HINDI SONGS') : 'FAVORITES'}</Text>
-                <MaterialIcons name="filter-list" size={18} color="rgba(255,255,255,0.2)" />
-            </View>
-        </View>
-    );
-
-    const renderSongItem = ({ item, index }: { item: Song, index: number }) => {
-        const isCurrent = musicState.currentSong?.id === item.id;
-        return (
-            <Animated.View 
-                // entering={FadeInDown.delay(index * 60).springify().damping(14)} // Removed bounce per user request
-                layout={Layout.springify()}
-            >
-                <Pressable 
-                    onPress={() => handleSongInteraction(item)}
-                    style={[styles.songItem, isCurrent && styles.songItemActive]}
-                >
-                    <Image source={{ uri: item.image }} style={styles.songThumb} />
-                    <View style={styles.songInfo}>
-                        <Text style={styles.songName} numberOfLines={1}>{item.name}</Text>
-                        <Text style={styles.songArtistName} numberOfLines={1}>{item.artist}</Text>
-                    </View>
-                    <View style={styles.songAction}>
-                        {isFavorite(item.id) ? (
-                            <MaterialIcons name="favorite" size={18} color={MAGENTA} />
-                        ) : (
-                            <MaterialIcons name="favorite" size={18} color="rgba(255,255,255,0.1)" />
-                        )}
-                    </View>
-                </Pressable>
-            </Animated.View>
-        );
-    };
+    const renderSongItem = useCallback(({ item }: { item: Song }) => (
+        <SongItem 
+            item={item}
+            isCurrent={musicState.currentSong?.id === item.id}
+            isFavorite={isFavorite(item.id)}
+            onPress={handleSongInteraction}
+            magentaColor={MAGENTA}
+        />
+    ), [musicState.currentSong?.id, musicState.favorites, handleSongInteraction]);
 
     return (
         <View style={styles.container}>
@@ -496,13 +551,18 @@ export default function MusicScreen() {
                         <FlatList
                             data={displaySongs}
                             renderItem={renderSongItem}
-                            keyExtractor={(item, index) => item.id || index.toString()}
-                            ListHeaderComponent={renderOverlayHeader}
+                            keyExtractor={(item) => item.id}
+                            ListHeaderComponent={memoizedHeader}
                             contentContainerStyle={styles.listContent}
                             showsVerticalScrollIndicator={false}
                             keyboardShouldPersistTaps="handled"
                             onEndReached={loadMore}
                             onEndReachedThreshold={0.5}
+                            initialNumToRender={10}
+                            maxToRenderPerBatch={10}
+                            windowSize={5}
+                            removeClippedSubviews={Platform.OS === 'android'}
+                            updateCellsBatchingPeriod={50}
                             ListFooterComponent={
                                 <View style={{ height: 120, alignItems: 'center', paddingTop: 20 }}>
                                     {isLoading && songs.length > 0 && <ActivityIndicator color={MAGENTA} />}

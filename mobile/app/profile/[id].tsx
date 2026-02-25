@@ -52,7 +52,7 @@ export default function ProfileScreen() {
     const { id } = useLocalSearchParams<{ id: string }>();
     const router = useRouter();
     const navigation = useNavigation();
-    const { currentUser, otherUser, messages, activeTheme } = useApp();
+    const { currentUser, otherUser, messages, activeTheme, clearChatMessages, isCloudConnected } = useApp();
 
     // Determine which user's profile to show
     const isOwnProfile = id === currentUser?.id;
@@ -71,6 +71,53 @@ export default function ProfileScreen() {
 
     const fadeAnim = useRef(new Animated.Value(0)).current;
     const slideAnim = useRef(new Animated.Value(30)).current;
+
+    const bgMorphStyle = useAnimatedStyle(() => ({
+        opacity: morphProgress.value,
+        backgroundColor: 'black' as any
+    }));
+
+    const galleryStyle = useAnimatedStyle(() => ({
+        opacity: isReady.value ? 1 : 0
+    }));
+
+    const morphImageStyle = useAnimatedStyle(() => {
+        const p = morphProgress.value;
+        if (isReady.value) return { opacity: 0 };
+        
+        const targetW = width;
+        const targetH = height * 0.8;
+        
+        const gridCenterX = origin.value.x + (origin.value.width / 2);
+        const gridCenterY = origin.value.y + (origin.value.height / 2);
+        const screenCenterX = width / 2;
+        const screenCenterY = height / 2;
+
+        const initialScaleX = origin.value.width / targetW || 1;
+        const initialScaleY = origin.value.height / targetH || 1;
+
+        return {
+            width: targetW,
+            height: targetH,
+            top: (height - targetH) / 2,
+            left: 0,
+            transform: [
+                { translateX: interpolate(p, [0, 1], [gridCenterX - screenCenterX, 0]) },
+                { translateY: interpolate(p, [0, 1], [gridCenterY - screenCenterY, 0]) },
+                { scaleX: interpolate(p, [0, 1], [initialScaleX, 1]) },
+                { scaleY: interpolate(p, [0, 1], [initialScaleY, 1]) }
+            ],
+            borderRadius: interpolate(p, [0, 1], [18 / initialScaleX, 0]),
+            opacity: interpolate(p, [0, 0.05], [0, 1]),
+            shadowOpacity: interpolate(p, [0, 0.5, 1], [0, 0.5, 0]),
+            shadowRadius: interpolate(p, [0, 1], [0, 20]),
+        };
+    });
+
+    const controlsStyle = useAnimatedStyle(() => ({
+        opacity: isReady.value ? 1 : 0,
+        transform: [{ translateY: interpolate(morphProgress.value, [0, 1], [20, 0]) }]
+    }));
 
     const chatMessages = (messages[id as string] || []).filter(m => m.media);
 
@@ -136,6 +183,25 @@ export default function ProfileScreen() {
         } catch (error) {
             console.error(error);
         }
+    };
+
+    const handleClearChat = () => {
+        if (!profileUser) return;
+        
+        Alert.alert(
+            'Clear All Chat',
+            `Are you sure you want to delete all messages and media with ${profileUser.name}? This action cannot be undone.`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                { 
+                    text: 'Clear All', 
+                    style: 'destructive',
+                    onPress: async () => {
+                        await clearChatMessages(profileUser.id);
+                    }
+                }
+            ]
+        );
     };
 
     useEffect(() => {
@@ -390,6 +456,18 @@ export default function ProfileScreen() {
                         <MaterialIcons name="favorite" size={18} color={activeTheme.primary} />
                         <Text style={styles.infoText}>Synced forever</Text>
                     </View>
+
+                    {!isOwnProfile && (
+                        <Pressable 
+                            style={styles.clearChatBtn}
+                            onPress={handleClearChat}
+                        >
+                            <BlurView intensity={20} tint="dark" style={styles.clearChatContent}>
+                                <MaterialIcons name="delete-sweep" size={20} color="#ff4444" />
+                                <Text style={styles.clearChatText}>CLEAR ALL CHAT</Text>
+                            </BlurView>
+                        </Pressable>
+                    )}
                 </BlurView>
             </ScrollView>
 
@@ -401,17 +479,12 @@ export default function ProfileScreen() {
                 onRequestClose={closeViewer}
             >
                 <View style={[styles.viewerContainer, { backgroundColor: 'transparent' }]}>
-                    <Animated2.View style={[StyleSheet.absoluteFill, useAnimatedStyle(() => ({
-                        opacity: morphProgress.value,
-                        backgroundColor: 'black'
-                    }))]}>
+                    <Animated2.View style={[StyleSheet.absoluteFill, bgMorphStyle]}>
                         <BlurView intensity={90} tint="dark" style={StyleSheet.absoluteFill} />
                     </Animated2.View>
                     
                     {/* Integrated Gallery & Transition Layer */}
-                    <Animated2.View style={[StyleSheet.absoluteFill, useAnimatedStyle(() => ({
-                        opacity: isReady.value ? 1 : 0
-                    }))]}>
+                    <Animated2.View style={[StyleSheet.absoluteFill, galleryStyle]}>
                         <FlatList
                             data={sharedMedia}
                             horizontal
@@ -449,43 +522,7 @@ export default function ProfileScreen() {
 
                     {/* Morphing Overlay (GPU-Accelerated Butter-Smooth Transition) */}
                     <Animated2.View 
-                        pointerEvents="none"
-                        style={[styles.morphingImageContainer, useAnimatedStyle(() => {
-                            const p = morphProgress.value;
-                            if (isReady.value) return { opacity: 0 };
-                            
-                            // Cinematic target dimensions
-                            const targetW = width;
-                            const targetH = height * 0.8;
-                            
-                            // Calculate centers for translating
-                            const gridCenterX = origin.value.x + (origin.value.width / 2);
-                            const gridCenterY = origin.value.y + (origin.value.height / 2);
-                            const screenCenterX = width / 2;
-                            const screenCenterY = height / 2;
-
-                            // Scale factors from grid to full
-                            const initialScaleX = origin.value.width / targetW;
-                            const initialScaleY = origin.value.height / targetH;
-
-                            return {
-                                width: targetW,
-                                height: targetH,
-                                top: (height - targetH) / 2,
-                                left: 0,
-                                transform: [
-                                    { translateX: interpolate(p, [0, 1], [gridCenterX - screenCenterX, 0]) },
-                                    { translateY: interpolate(p, [0, 1], [gridCenterY - screenCenterY, 0]) },
-                                    { scaleX: interpolate(p, [0, 1], [initialScaleX, 1]) },
-                                    { scaleY: interpolate(p, [0, 1], [initialScaleY, 1]) }
-                                ],
-                                borderRadius: interpolate(p, [0, 1], [18 / initialScaleX, 0]),
-                                opacity: interpolate(p, [0, 0.05], [0, 1]),
-                                shadowOpacity: interpolate(p, [0, 0.5, 1], [0, 0.5, 0]),
-                                shadowRadius: interpolate(p, [0, 1], [0, 20]),
-                                shadowColor: '#000',
-                            };
-                        })]}
+                        style={[styles.morphingImageContainer, morphImageStyle]}
                     >
                         <Image 
                             source={{ uri: sharedMedia[selectedIndex]?.url }} 
@@ -495,10 +532,7 @@ export default function ProfileScreen() {
                     </Animated2.View>
 
                     {/* Header/Footer Controls */}
-                    <Animated2.View style={[styles.viewerControlsContainer, useAnimatedStyle(() => ({
-                        opacity: isReady.value ? 1 : 0,
-                        transform: [{ translateY: interpolate(morphProgress.value, [0, 1], [20, 0]) }]
-                    }))]}>
+                    <Animated2.View style={[styles.viewerControlsContainer, controlsStyle]}>
                         <View style={styles.viewerHeader}>
                             <Pressable onPress={closeViewer} style={styles.viewerHeaderBtn}>
                                 <Ionicons name="close" size={28} color="#fff" />
@@ -808,9 +842,30 @@ const styles = StyleSheet.create({
         gap: 14,
     },
     infoText: {
-        color: 'rgba(255,255,255,0.5)',
-        fontSize: 15,
+        color: 'rgba(255,255,255,0.6)',
+        fontSize: 14,
         fontWeight: '500',
+    },
+    clearChatBtn: {
+        marginTop: 24,
+        width: '100%',
+        borderRadius: 16,
+        overflow: 'hidden',
+        borderWidth: 1,
+        borderColor: 'rgba(255,68,68,0.2)',
+    },
+    clearChatContent: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingVertical: 14,
+        gap: 8,
+    },
+    clearChatText: {
+        color: '#ff4444',
+        fontSize: 13,
+        fontWeight: '900',
+        letterSpacing: 2,
     },
     errorText: {
         color: '#ef4444',
@@ -921,5 +976,29 @@ const styles = StyleSheet.create({
         fontSize: 14,
         fontWeight: '800',
         letterSpacing: 1,
+    },
+    connectionBadge: {
+        marginTop: 12,
+        alignSelf: 'center',
+        borderRadius: 20,
+        overflow: 'hidden',
+    },
+    connectionBadgeGlass: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 6,
+        paddingHorizontal: 16,
+        gap: 8,
+    },
+    statusDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+    },
+    connectionText: {
+        color: 'rgba(255,255,255,0.7)',
+        fontSize: 12,
+        fontWeight: '600',
+        letterSpacing: 0.5,
     },
 });

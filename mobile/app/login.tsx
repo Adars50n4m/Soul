@@ -7,6 +7,7 @@ import { useRouter } from 'expo-router';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
+import { SoulSyncLogo } from '../components/SoulSyncLogo';
 
 const { width, height } = Dimensions.get('window');
 
@@ -92,9 +93,6 @@ export default function LoginScreen() {
         <View style={styles.container}>
             <StatusBar barStyle="light-content" />
 
-            {/* Animated Background Glow */}
-            <Animated.View style={[styles.bgGlow, { transform: [{ scale: pulseAnim }] }]} />
-
             <KeyboardAvoidingView
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
                 style={styles.content}
@@ -113,11 +111,7 @@ export default function LoginScreen() {
                 >
                     {/* Logo */}
                     <View style={styles.logoContainer}>
-                        <Animated.View style={[styles.logoCircle, { transform: [{ scale: pulseAnim }] }]}>
-                            <Text style={styles.logoEmoji}>💫</Text>
-                        </Animated.View>
-                        <Text style={styles.appName}>SOULSYNC</Text>
-                        <Text style={styles.tagline}>NEURAL BOND PROTOCOL</Text>
+                        <SoulSyncLogo width={180} height={180} />
                     </View>
 
                     {/* Login Form */}

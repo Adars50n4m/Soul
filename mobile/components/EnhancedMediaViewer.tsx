@@ -11,6 +11,7 @@ import {
     Platform,
     StatusBar,
     ActivityIndicator,
+    Modal,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -26,6 +27,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { Video, ResizeMode } from 'expo-av';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MORPH_EASING, MORPH_OUT_EASING } from '../constants/transitions';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -74,6 +76,11 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
     onShare,
     userInfo,
 }) => {
+    const insets = useSafeAreaInsets();
+    const bottomOffset =
+        Platform.OS === 'ios'
+            ? Math.max(insets.bottom - 14, 6)
+            : Math.max(insets.bottom, 12);
     const [isFullyOpen, setIsFullyOpen] = useState(false);
     const [comment, setComment] = useState('');
     const [showMenu, setShowMenu] = useState(false);
@@ -202,12 +209,20 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
     if (!visible || !media || !sourceLayout) return null;
 
     return (
-        <View style={StyleSheet.absoluteFill} pointerEvents="auto">
-            <Animated.View style={[StyleSheet.absoluteFill, animatedContainerStyle]}>
-                <BlurView intensity={75} tint="dark" style={StyleSheet.absoluteFill} />
-                <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} />
-                <Pressable style={StyleSheet.absoluteFill} onPress={handleClose} />
-            </Animated.View>
+        <Modal
+            visible={visible}
+            transparent
+            presentationStyle="overFullScreen"
+            statusBarTranslucent
+            animationType="none"
+            onRequestClose={handleClose}
+        >
+            <View style={StyleSheet.absoluteFill} pointerEvents="auto">
+                <Animated.View style={[StyleSheet.absoluteFill, animatedContainerStyle]}>
+                    <BlurView intensity={95} tint="dark" style={StyleSheet.absoluteFill} />
+                    <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.15)' }]} />
+                    <Pressable style={StyleSheet.absoluteFill} onPress={handleClose} />
+                </Animated.View>
 
             <GestureDetector gesture={Gesture.Exclusive(panGesture, longPressGesture)}>
                 <Animated.View style={animatedMediaStyle}>
@@ -251,7 +266,10 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
             {/* Bottom Keyboard Area */}
             <KeyboardAvoidingView
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                style={styles.bottomArea}
+                style={[
+                    styles.bottomArea,
+                    { bottom: bottomOffset }
+                ]}
             >
                 <Animated.View style={[styles.inputContainer, animatedOverlayStyle]}>
                     <View style={styles.inputPill}>
@@ -277,7 +295,7 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
             {showMenu && (
                 <View style={styles.menuOverlay}>
                     <Pressable style={StyleSheet.absoluteFill} onPress={() => {
-                        menuProgress.value = withTiming(0, { duration: 150 }, () => setShowMenu(false));
+                        menuProgress.value = withTiming(0, { duration: 150 }, () => runOnJS(setShowMenu)(false));
                     }} />
                     <Animated.View style={[styles.menuContainer, menuStyle]}>
                         <BlurView intensity={95} tint="dark" style={styles.menuBlur}>
@@ -291,7 +309,7 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
                             <View style={styles.menuDivider} />
                             <Pressable style={styles.menuItem} onPress={() => {
                                 onReply?.();
-                                menuProgress.value = withTiming(0, { duration: 150 }, () => setShowMenu(false));
+                                menuProgress.value = withTiming(0, { duration: 150 }, () => runOnJS(setShowMenu)(false));
                             }}>
                                 <MaterialIcons name="reply" size={22} color="white" />
                                 <Text style={styles.menuItemText}>Reply</Text>
@@ -299,7 +317,7 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
                             <View style={styles.menuDivider} />
                             <Pressable style={styles.menuItem} onPress={() => {
                                 onForward?.();
-                                menuProgress.value = withTiming(0, { duration: 150 }, () => setShowMenu(false));
+                                menuProgress.value = withTiming(0, { duration: 150 }, () => runOnJS(setShowMenu)(false));
                             }}>
                                 <MaterialIcons name="forward" size={22} color="white" />
                                 <Text style={styles.menuItemText}>Forward</Text>
@@ -307,7 +325,7 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
                             <View style={styles.menuDivider} />
                             <Pressable style={styles.menuItem} onPress={() => {
                                 onDownload?.();
-                                menuProgress.value = withTiming(0, { duration: 150 }, () => setShowMenu(false));
+                                menuProgress.value = withTiming(0, { duration: 150 }, () => runOnJS(setShowMenu)(false));
                             }}>
                                 <MaterialIcons name="file-download" size={22} color="white" />
                                 <Text style={styles.menuItemText}>Save to Gallery</Text>
@@ -317,6 +335,7 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
                 </View>
             )}
         </View>
+        </Modal>
     );
 };
 
@@ -388,7 +407,6 @@ const styles = StyleSheet.create({
         bottom: 0,
         left: 0,
         right: 0,
-        paddingBottom: Platform.OS === 'ios' ? 400 : 350, // Sky-High positioning (v8)
         backgroundColor: 'transparent',
     },
     inputContainer: {
@@ -398,9 +416,10 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'center',
         backgroundColor: '#1c1c1e',
-        borderRadius: 30,
-        paddingHorizontal: 4,
-        paddingVertical: 6,
+        borderRadius: 26,
+        minHeight: 52,
+        paddingHorizontal: 8,
+        paddingVertical: 8,
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.05)',
     },
@@ -420,16 +439,20 @@ const styles = StyleSheet.create({
         color: 'white',
         fontSize: 15,
         maxHeight: 100,
-        paddingVertical: 8,
+        paddingVertical: 0,
+        paddingHorizontal: 10,
     },
     sendIconBtn: {
         paddingHorizontal: 12,
+        height: '100%',
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     sendButton: {
         width: 36,
         height: 36,
         borderRadius: 18,
-        backgroundColor: '#F50057',
+        backgroundColor: '#BC002A',
         alignItems: 'center',
         justifyContent: 'center',
         marginLeft: 10,

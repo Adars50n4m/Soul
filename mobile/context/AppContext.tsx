@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { Message, Contact, StatusUpdate, CallLog, ActiveCall, Song, MusicState } from '../types';
@@ -17,11 +18,12 @@ import { nativeCallBridge } from '../services/NativeCallBridge';
 import { nativeCallService } from '../services/NativeCallService';
 import { supabase } from '../config/supabase';
 import { offlineService } from '../services/LocalDBService';
+import { storageService } from '../services/StorageService';
 
 if (!offlineService) {
     console.warn('[AppContext] LocalDBService failed to load. Check native modules.');
 }
-import { AppState, Alert, Image } from 'react-native';
+import { AppState, Alert, Image, Platform } from 'react-native';
 import { socket } from '../src/webrtc/socket';
 
 export type ThemeName = 'midnight' | 'liquid-blue' | 'sunset' | 'emerald' | 'cyber' | 'amethyst';
@@ -33,9 +35,9 @@ interface ThemeConfig {
 }
 
 export const THEMES: Record<ThemeName, ThemeConfig> = {
-    'midnight': { primary: '#f43f5e', accent: '#a855f7', bg: '#09090b' },
+    'midnight': { primary: '#BC002A', accent: '#a855f7', bg: '#09090b' },
     'liquid-blue': { primary: '#135bec', accent: '#00f2ff', bg: '#020408' },
-    'sunset': { primary: '#f43f5e', accent: '#fb923c', bg: '#120202' },
+    'sunset': { primary: '#BC002A', accent: '#fb923c', bg: '#120202' },
     'emerald': { primary: '#10b981', accent: '#2dd4bf', bg: '#02120e' },
     'cyber': { primary: '#d4ff00', accent: '#00e5ff', bg: '#050505' },
     'amethyst': { primary: '#d946ef', accent: '#6366f1', bg: '#0a050f' },
@@ -82,6 +84,7 @@ interface AppContextType {
     otherUser: User | null;
     isLoggedIn: boolean;
     isReady: boolean;
+    isCloudConnected: boolean;
     login: (username: string, password: string) => Promise<boolean>;
     logout: () => Promise<void>;
 
@@ -125,6 +128,7 @@ interface AppContextType {
     sendTyping: (isTyping: boolean) => void;
     saveNote: (text: string) => Promise<void>;
     deleteNote: () => Promise<void>;
+    clearChatMessages: (partnerId: string) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -142,6 +146,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const [theme, setThemeState] = useState<ThemeName>('midnight');
     const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
     const [isReady, setIsReady] = useState(false);
+    const [isCloudConnected, setIsCloudConnected] = useState(true);
     const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
     const [typingUsers, setTypingUsers] = useState<string[]>([]);
 
@@ -262,6 +267,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Initialize Music Sync
     useEffect(() => {
         if (currentUser) {
+            // Check realtime connectivity before initializing
+            import('../config/supabase').then(({ checkRealtimeConnectivity }) => {
+                checkRealtimeConnectivity().then((result) => {
+                    if (!result.ok) {
+                        console.warn('[MusicSync] Realtime unavailable, sync will not work:', result.error);
+                    }
+                });
+            });
+            
             musicSyncService.initialize(currentUser.id, async (remoteState) => {
                 try {
                     const currentMusicState = musicStateRef.current;
@@ -416,7 +430,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         id: incomingMessage.id,
                         sender: isFromMe ? 'me' : 'them',
                         text: incomingMessage.text,
-                        timestamp: new Date(incomingMessage.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        // Keep ISO timestamp so sorting/deduplication works with fetchMessagesFromSupabase
+                        timestamp: incomingMessage.timestamp,
                         status: isFromMe ? 'sent' : 'delivered',
                         media: incomingMessage.media,
                     };
@@ -454,6 +469,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                             };
                         });
                     }
+                },
+                (online: boolean) => {
+                    setIsCloudConnected(online);
                 }
             );
         }
@@ -490,7 +508,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 .limit(50);
 
             if (error) {
-                console.error("Supabase Call Fetch Error:", error);
+                console.warn("Supabase Call Fetch Error:", error);
                 return;
             }
 
@@ -517,15 +535,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 
                 setCalls(mappedCalls);
             }
-        } catch (e) { console.error('Fetch calls error:', e); }
+        } catch (e) { console.warn('Fetch calls error:', e); }
     };
 
     // Helper to add messages with deduplication
-    const addMessageSafely = useCallback((partnerId: string, message: Message) => {
+    const addMessageSafely = useCallback((partnerId: string, msg: Message) => {
         setMessages(prev => {
-            const chatMessages = prev[partnerId] || [];
-            if (chatMessages.some(m => m.id === message.id)) return prev;
-            return { ...prev, [partnerId]: [...chatMessages, message] };
+            const current = prev[partnerId] || [];
+            if (current.find(m => m.id === msg.id)) return prev;
+            
+            const newList = [...current, { ...msg, timestamp: msg.timestamp || new Date().toISOString() }];
+            return {
+                ...prev,
+                [partnerId]: newList.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            };
         });
     }, []);
 
@@ -595,7 +618,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         id: newMsg.id.toString(),
                         sender: newMsg.sender === currentUser.id ? 'me' : 'them',
                         text: newMsg.text,
-                        timestamp: new Date(newMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        // Keep ISO timestamp for consistent sorting/deduplication
+                        timestamp: newMsg.created_at,
                         status: newMsg.status || 'sent',
                         media: newMsg.media_url ? { type: newMsg.media_type, url: newMsg.media_url, caption: newMsg.media_caption } : undefined,
                         replyTo: newMsg.reply_to_id
@@ -693,6 +717,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 .eq('id', userId)
                 .single();
 
+            if (error) {
+                console.warn('[AppContext] fetchProfile error:', error);
+            }
+
             if (data && !error) {
                 setCurrentUser(prev => prev ? {
                     ...prev,
@@ -703,28 +731,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     noteTimestamp: data.note_timestamp || prev.noteTimestamp
                 } : null);
             }
-        } catch (e) { }
+        } catch (e) {
+            console.warn('[AppContext] fetchProfile exception:', e);
+        }
     };
 
     const fetchOtherUserProfile = async (userId: string) => {
         try {
             const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
             if (data) {
-                const updatedContact = {
-                    id: userId,
-                    name: data.name,
-                    avatar: data.avatar_url,
-                    about: data.bio,
-                    status: 'offline' as 'online' | 'offline', // Default, will be updated by socket
-                    unreadCount: 0,
-                    lastMessage: ''
-                };
-                
-                // Update Local and State
-                if (offlineService) {
-                    await offlineService.saveContact(updatedContact);
-                }
-
+                // Update Memory State first
                 setOtherUser(prev => prev ? { ...prev, name: data.name, avatar: data.avatar_url, bio: data.bio } : null);
                 setContacts(prev => prev.map(c => c.id === userId ? {
                     ...c,
@@ -732,8 +748,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     avatar: data.avatar_url,
                     about: data.bio
                 } : c));
+
+                // Then Save to Local DB
+                if (offlineService) {
+                    const updatedContact = {
+                        id: userId,
+                        name: data.name,
+                        avatar: data.avatar_url,
+                        about: data.bio,
+                        status: 'offline' as 'online' | 'offline', // Default, will be updated by socket
+                        unreadCount: 0,
+                        lastMessage: ''
+                    };
+                    offlineService.saveContact(updatedContact).catch(e => console.warn('[AppContext] saveContact err:', e));
+                }
             }
-        } catch (e) {}
+        } catch (e) {
+            console.warn('[AppContext] fetchOtherUserProfile error:', e);
+        }
     };
 
     const fetchMessagesFromSupabase = async (userId: string, partnerId: string) => {
@@ -749,23 +781,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     id: dbRow.id.toString(),
                     sender: dbRow.sender === userId ? 'me' : 'them',
                     text: dbRow.text,
-                    timestamp: new Date(dbRow.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    timestamp: dbRow.created_at, // Use ISO string for proper sorting and persistence
                     status: dbRow.status,
                     media: dbRow.media_url ? { type: dbRow.media_type || 'image', url: dbRow.media_url, caption: dbRow.media_caption } : undefined,
                     replyTo: dbRow.reply_to_id?.toString(),
                 }));
 
-                // Save to Local DB
+                setMessages(prev => {
+                    const existing = prev[partnerId] || [];
+                    const merged = [...existing];
+                    
+                    mappedMessages.forEach(newMsg => {
+                        const idx = merged.findIndex(m => m.id === newMsg.id);
+                        if (idx >= 0) merged[idx] = newMsg;
+                        else merged.push(newMsg);
+                    });
+
+                    return { 
+                        ...prev, 
+                        [partnerId]: merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+                    };
+                });
+
+                // Save to Local DB (non-blocking)
                 if (offlineService) {
-                    await Promise.all(mappedMessages.map(msg => offlineService.saveMessage(partnerId, msg)));
+                    Promise.all(mappedMessages.map(msg => offlineService.saveMessage(partnerId, msg)))
+                        .catch(e => console.warn('[AppContext] saveMessage err:', e));
                 }
 
-                // Dedup mapped messages before setting state
-                const uniqueMessages = Array.from(new Map(mappedMessages.map(m => [m.id, m])).values());
-                setMessages(prev => ({ ...prev, [partnerId]: uniqueMessages }));
-
                 // Update last message in specific contact
-                const lastMsg = uniqueMessages[uniqueMessages.length - 1];
+                const lastMsg = mappedMessages[mappedMessages.length - 1];
                 if (lastMsg) {
                      setContacts(prev => prev.map(c => 
                         c.id === partnerId ? {
@@ -1057,7 +1102,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 const { error } = await supabase.from('call_logs').insert(insertPayload);
                 
-                if (error) console.error("Supabase insert call log error:", error);
+                if (error) console.warn("Supabase insert call log error:", error);
                 else console.log("Call log inserted successfully");
             } catch (e) { console.warn('Failed to save call to DB (Non-fatal):', e); }
         }
@@ -1072,6 +1117,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     useEffect(() => { contactsRef.current = contacts; }, [contacts]);
     useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
     useEffect(() => { otherUserRef.current = otherUser; }, [otherUser]);
+
+    // Outgoing Call Timeout (1 Minute) - WhatsApp style
+    useEffect(() => {
+        let timer: any;
+        if (activeCall && !activeCall.isAccepted && !activeCall.isIncoming) {
+            timer = setTimeout(() => {
+                console.log('[AppContext] Call timeout reached (60s). Ending call.');
+                endCall();
+            }, 60000); 
+        }
+        return () => {
+             if (timer) clearTimeout(timer);
+        };
+    }, [activeCall?.callId, activeCall?.isAccepted]);
 
     useEffect(() => {
         notificationService.initialize(async (actionIdentifier, payload, userText) => {
@@ -1175,7 +1234,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     nativeCallService.reportCallConnected(callId);
                 },
                 onCallEnded: (callId) => {
-                    console.log('[AppContext] Native call ended:', callId);
+                    console.log('[AppContext] Native call ended callback:', callId);
+                    if (__DEV__ && Platform.OS === 'ios') {
+                        console.log('[AppContext] 🛡️ Dev mode: Ignoring native "end" callback to prevent UI cutoff');
+                        return;
+                    }
                     setActiveCall(null);
                 },
                 onMuteToggled: (muted) => {
@@ -1216,7 +1279,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                                 }
 
                                 // Show native CallKit/ConnectionService UI (for lock screen / killed state)
-                                if (nativeCallService.isAvailable()) {
+                                if (nativeCallService.isAvailable() && (Platform.OS !== 'ios' || !__DEV__)) {
                                     nativeCallService.displayIncomingCall({
                                         callId: signal.callId,
                                         callerId: signal.callerId,
@@ -1224,6 +1287,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                                         callType: signal.callType,
                                         roomId: signal.roomId || signal.callId,
                                     });
+                                } else if (__DEV__) {
+                                    console.log('[AppContext] Skipping native incoming call UI for Simulator/Dev mode');
                                 }
 
                                 // Also show the in-app notification (for foreground state)
@@ -1289,6 +1354,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const startCall = async (contactId: string, type: 'audio' | 'video') => {
         const contact = contacts.find(c => c.id === contactId);
         const callId = await callService.initiateCall(contactId, type);
+
         setActiveCall({
             callId: callId || undefined,
             contactId,
@@ -1301,26 +1367,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             callerName: contact?.name,
             callerAvatar: contact?.avatar
         });
+
+        if (callId) {
+            // ── Push Poke to Callee ──
+            nativeCallBridge.sendCallPush(
+                contactId, 
+                callId, 
+                currentUser?.name || "Someone", 
+                type
+            ).catch(e => console.warn('[AppContext] startCall: Push trigger failed:', e));
+
+            // Report outgoing call to native system
+            if (Platform.OS !== 'ios' || !__DEV__) { 
+                // In iOS Simulator, CallKit can be flaky for outgoing calls
+                nativeCallBridge.reportOutgoingCall(callId, contact?.name || 'Unknown', type);
+            } else {
+                console.log('[AppContext] Skipping native outgoing call report for Simulator/Dev mode');
+            }
+        }
+
         // PREFETCH AVATAR FOR SMOOTH TRANSITION
         if (contact?.avatar) {
             try { (Image as any).prefetch(contact.avatar); } catch (e) {}
         }
 
-        // Report outgoing call to native system (CallKit/ConnectionService)
-        if (callId) {
-            nativeCallBridge.reportOutgoingCall(callId, contact?.name || 'Unknown', type);
-        }
-
-        // Send push notification to wake the callee's device
-        // (for when their app is killed or phone is locked)
-        if (callId && currentUser) {
-            nativeCallBridge.sendCallPush(
-                contactId,
-                callId,
-                currentUser.name || 'SoulSync User',
-                type
-            ).catch(err => console.warn('[AppContext] Push send failed (non-fatal):', err));
-        }
+        router.push('/call');
     };
 
     const acceptCall = async () => {
@@ -1351,8 +1422,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 timestamp: new Date().toISOString(),
                 roomId: activeCall.callId
             };
-            await callService.rejectCall(signal);
-            await notificationService.dismissCallNotification(activeCall.callId);
+            callService.rejectCall(signal).catch(console.warn);
+            notificationService.dismissCallNotification(activeCall.callId).catch(console.warn);
             
             // Log rejection
             const contact = contacts.find(c => c.id === activeCall.contactId);
@@ -1377,11 +1448,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const endCall = async () => {
         if (activeCall) {
             if (activeCall.isIncoming && !activeCall.isAccepted) {
-                await rejectCall();
+                rejectCall().catch(console.warn);
                 return;
             }
             if (currentUser && activeCall.contactId) {
-                await callService.endCall();
+                // Don't await network call so UI updates instantly
+                callService.endCall().catch(console.warn);
             }
             
             // Log completion
@@ -1397,11 +1469,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             });
 
             const { webRTCService } = require('../services/WebRTCService');
+            // Cleanup webRTC locally
             webRTCService.endCall();
+            
+            // Set active call to null immediately to trigger UI unmount smoothly
             setActiveCall(null);
+            
             // End native call UI
-            nativeCallBridge.reportCallEnded(activeCall.callId);
-            await notificationService.dismissCallNotification(activeCall.callId);
+            if (activeCall.callId) {
+                nativeCallBridge.reportCallEnded(activeCall.callId);
+                notificationService.dismissCallNotification(activeCall.callId).catch(console.warn);
+            }
         }
     };
 
@@ -1441,11 +1519,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 });
                 
                 if (error) {
-                    console.error('Supabase status insert error:', error);
+                    console.warn('Supabase status insert error:', error);
                     Alert.alert('Error', 'Failed to save status to cloud.');
                 }
             } catch (e) { 
-                console.error('Failed to save status to DB:', e);
+                console.warn('Failed to save status to DB:', e);
                 Alert.alert('Error', 'Failed to save status to cloud.');
             }
         } else {
@@ -1564,15 +1642,59 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return () => { supabase.removeChannel(profileSubscription); };
     }, []);
 
+    const clearChatMessages = async (partnerId: string) => {
+        if (!currentUser) return;
+
+        try {
+            // 1. Identify media to delete
+            const chatMsgs = messages[partnerId] || [];
+            const mediaUrls = chatMsgs
+                .filter(m => m.media?.url)
+                .map(m => m.media!.url);
+
+            // 2. Delete from Supabase Storage
+            if (mediaUrls.length > 0) {
+                // Delete from both likely buckets
+                await Promise.all([
+                    storageService.deleteMedia(mediaUrls, 'status-media'),
+                    storageService.deleteMedia(mediaUrls, 'chat-media')
+                ]);
+            }
+
+            // 3. Delete from Supabase Database
+            await chatService.clearServerMessages(currentUser.id, partnerId);
+
+            // 4. Delete from Local DB
+            await offlineService.clearChat(partnerId);
+
+            // 5. Update State
+            setMessages(prev => {
+                const newMessages = { ...prev };
+                delete newMessages[partnerId];
+                return newMessages;
+            });
+
+            setContacts(prev => prev.map(c => 
+                c.id === partnerId ? { ...c, lastMessage: '', unreadCount: 0 } : c
+            ));
+
+            Alert.alert('Success', 'Chat history cleared successfully');
+        } catch (e) {
+            console.error('[AppContext] Clear chat failed:', e);
+            Alert.alert('Error', 'Failed to clear chat history. Please try again.');
+        }
+    };
+
     return (
         <AppContext.Provider value={{
             currentUser, otherUser, isLoggedIn: !!currentUser, login, logout,
-            contacts, messages, calls, statuses, theme, activeTheme: THEMES[theme], activeCall, musicState, isReady, onlineUsers,
+            contacts, messages, calls, statuses, theme, activeTheme: THEMES[theme], activeCall, musicState, isReady, isCloudConnected, onlineUsers,
             addMessage, updateMessage, updateMessageStatus, deleteMessage, addReaction, addCall, addStatus, deleteStatus, setTheme,
             startCall, acceptCall, endCall, toggleMinimizeCall, toggleMute, playSong, togglePlayMusic, toggleFavoriteSong,
             seekTo, getPlaybackPosition, sendChatMessage, updateProfile, addStatusView, toggleStatusLike,
             typingUsers, sendTyping,
-            saveNote, deleteNote
+            saveNote, deleteNote,
+            clearChatMessages
         }}>
             {children}
         </AppContext.Provider >

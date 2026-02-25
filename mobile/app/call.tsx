@@ -194,9 +194,15 @@ export default function CallScreen() {
             try {
                 webRTCService.initialize({
                     onStateChange: (state: CallState) => {
-                        console.log('WebRTC state changed:', state);
+                        console.log('[CallScreen] WebRTC state changed:', state);
                         if (state === 'connecting' && callState === 'connected') return;
                         setCallState(state);
+
+                        // If WebRTC ended internally (ICE/connection failure), trigger app-level end
+                        if (state === 'ended') {
+                            console.log('[CallScreen] WebRTC ended internally — triggering app-level endCall');
+                            if (endAppCallRef.current) endAppCallRef.current();
+                        }
                     },
                     onLocalStream: (stream: any) => {
                         console.log('Got local stream');
@@ -250,12 +256,19 @@ export default function CallScreen() {
         initCall();
 
         return () => {
+            console.log('[CallScreen] ⚠️ WebRTC useEffect CLEANUP triggered. isMinimizing:', isMinimizing.current);
             if (webRTCService) {
+                // Always detach callbacks to prevent stale state updates
+                // (callbacks point to this component's stale state setters)
+                try { webRTCService.setCallbacks(null); } catch (e) { }
+
                 if (isMinimizing.current) {
-                    // If minimizing, just detach callbacks but keep call alive
-                    try { webRTCService.setCallbacks(null); } catch (e) { }
+                    // Minimizing: keep call alive, just detach the UI callbacks (done above)
+                    console.log('[CallScreen] Minimizing — keeping call alive, callbacks detached');
                 } else {
-                    try { webRTCService.cleanup(); } catch (e) { }
+                    // Not minimizing: AppContext.endCall() already handled full teardown.
+                    // Just reset the audio mode. Do NOT call webRTCService.cleanup/endCall again.
+                    console.log('[CallScreen] Unmounting after call end — restoring audio mode only');
                     restoreMusicAudioMode();
                 }
             }
@@ -265,6 +278,8 @@ export default function CallScreen() {
     // Sync state with activeCall
     useEffect(() => {
         if (!activeCall) {
+            console.log('[CallScreen] ⚠️ activeCall became null — navigating back');
+            console.trace('[CallScreen] activeCall null trace:');
             if (navigation.canGoBack()) navigation.goBack();
             return;
         }
@@ -330,18 +345,18 @@ export default function CallScreen() {
     };
 
     const handleEndCall = useCallback(() => {
+        console.log('[CallScreen] 📴 handleEndCall() called by user');
         // 1. Clear streams immediately to prevent black screen/crash on unmount
         setLocalStream(null);
         setRemoteStream(null);
 
-        // 2. Cleanup WebRTC service
-        if (webRTCService) {
-            try { webRTCService.cleanup(); } catch (e) { }
-        }
+        // 2. Trigger app-level end call (which handles WebRTC cleanup + signaling + logging)
+        // Do NOT call webRTCService.cleanup() here separately — AppContext.endCall() does it
         if (endAppCallRef.current) endAppCallRef.current();
         restoreMusicAudioMode();
-        if (navigation.canGoBack()) navigation.goBack();
-    }, [navigation, restoreMusicAudioMode]);
+        // Do not call navigation.goBack() here. Let the useEffect that watches `!activeCall` handle it.
+    }, [restoreMusicAudioMode]);
+
 
     const handleToggleMute = () => {
         toggleAppMute();
@@ -470,8 +485,14 @@ export default function CallScreen() {
                             <View style={styles.avatarWrapper}>
                                 <Animated.View style={[styles.pulseRing, pulseStyle]} />
                                 <Animated.View style={[styles.pulseRing, pulseStyle, { animationDelay: '500ms' }]} />
-                                <View style={styles.avatarContainer}>
-                                    <Image source={{ uri: contact.avatar }} style={styles.avatar} />
+                                <View style={styles.avatarShadow}>
+                                    <View style={styles.avatarContainer}>
+                                        <Image 
+                                            source={{ uri: contact.avatar }} 
+                                            style={styles.avatar} 
+                                            resizeMode="cover"
+                                        />
+                                    </View>
                                 </View>
                             </View>
                         )}
@@ -631,26 +652,30 @@ const styles = StyleSheet.create({
         marginBottom: 30,
     },
     avatarContainer: {
-        width: 140,
-        height: 140,
-        borderRadius: 70,
+        width: 170,
+        height: 170,
+        borderRadius: 85,
         overflow: 'hidden',
-        borderWidth: 4,
-        borderColor: 'rgba(255,255,255,0.15)',
-        shadowColor: 'black',
-        shadowOpacity: 0.4,
-        shadowRadius: 20,
-        elevation: 10,
+        backgroundColor: '#000',
+        justifyContent: 'center',
+        alignItems: 'center',
     },
     avatar: {
         width: '100%',
         height: '100%',
     },
+    avatarShadow: {
+        shadowColor: 'black',
+        shadowOpacity: 0.5,
+        shadowRadius: 20,
+        shadowOffset: { width: 0, height: 10 },
+        elevation: 15,
+    },
     pulseRing: {
         position: 'absolute',
-        width: 140,
-        height: 140,
-        borderRadius: 70,
+        width: 170,
+        height: 170,
+        borderRadius: 85,
         borderWidth: 2,
         borderColor: 'rgba(255,255,255,0.5)',
         backgroundColor: 'rgba(255,255,255,0.05)',

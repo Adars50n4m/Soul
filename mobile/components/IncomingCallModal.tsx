@@ -174,12 +174,11 @@ const styles = StyleSheet.create({
         marginBottom: 30,
     },
     avatarContainer: {
-        width: 120,
-        height: 120,
-        borderRadius: 60,
+        width: 140, // Increased size slightly
+        height: 140,
+        borderRadius: 70,
         overflow: 'hidden',
-        borderWidth: 4,
-        borderColor: 'rgba(255,255,255,0.2)',
+        backgroundColor: 'transparent',
         shadowColor: 'black',
         shadowOpacity: 0.5,
         shadowRadius: 10,
@@ -188,12 +187,13 @@ const styles = StyleSheet.create({
     avatar: {
         width: '100%',
         height: '100%',
+        resizeMode: 'cover',
     },
     rippleRing: {
         position: 'absolute',
-        width: 120,
-        height: 120,
-        borderRadius: 60,
+        width: 140,
+        height: 140,
+        borderRadius: 70,
         borderWidth: 2,
         borderColor: 'rgba(255,255,255, 0.3)',
         backgroundColor: 'rgba(255,255,255, 0.1)',

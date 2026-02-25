@@ -20,6 +20,17 @@ import { useApp } from '../context/AppContext';
 
 const { width, height } = Dimensions.get('window');
 
+const StatusProgressBar = ({ idx, currentIndex, progress }: any) => {
+    const style = useAnimatedStyle(() => ({
+        width: idx < currentIndex
+            ? '100%'
+            : idx === currentIndex
+                ? `${progress.value * 100}%`
+                : '0%'
+    }));
+    return <Animated.View style={[styles.progressFill, style]} />;
+};
+
 export default function ViewStatusScreen() {
     const { id, index } = useLocalSearchParams<{ id: string; index: string }>();
     const router = useRouter();
@@ -204,15 +215,7 @@ export default function ViewStatusScreen() {
             <View style={styles.progressContainer}>
                 {userStatuses.map((status, idx) => (
                     <View key={status.id || idx} style={styles.progressBar}>
-                        <Animated.View
-                            style={[styles.progressFill, useAnimatedStyle(() => ({
-                                width: idx < currentIndex
-                                    ? '100%'
-                                    : idx === currentIndex
-                                        ? `${progress.value * 100}%`
-                                        : '0%'
-                            }))]}
-                        />
+                        <StatusProgressBar idx={idx} currentIndex={currentIndex} progress={progress} />
                     </View>
                 ))}
             </View>

@@ -94,7 +94,7 @@ export default function StorageManagementScreen() {
             // SQLite DB size
             const dbPath = `${FileSystem.documentDirectory}SQLite/soulsync.db`;
             try {
-                const dbInfo = await FileSystem.getInfoAsync(dbPath, { size: true });
+                const dbInfo = await FileSystem.getInfoAsync(dbPath);
                 if (dbInfo.exists && 'size' in dbInfo) {
                     dbSize = dbInfo.size || 0;
                 }
@@ -108,7 +108,7 @@ export default function StorageManagementScreen() {
                         files.map(async (file) => {
                             try {
                                 const info = await FileSystem.getInfoAsync(
-                                    `${FileSystem.cacheDirectory}${file}`, { size: true }
+                                    `${FileSystem.cacheDirectory}${file}`
                                 );
                                 return info.exists && 'size' in info ? (info.size || 0) : 0;
                             } catch { return 0; }

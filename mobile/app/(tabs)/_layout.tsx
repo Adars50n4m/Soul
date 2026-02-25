@@ -42,10 +42,6 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
   const { activeTheme } = useApp();
   const focusedOptions = descriptors[state.routes[state.index].key].options;
 
-  if (focusedOptions.tabBarStyle?.display === 'none') {
-    return null;
-  }
-
   const numTabs = state.routes.length;
   const tabWidth = (TAB_BAR_WIDTH - 24) / numTabs; // Padding considered
   
@@ -63,6 +59,10 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
     transform: [{ translateX: translateX.value }],
     backgroundColor: `${activeTheme.primary}1A`, // Restored to subtle 10% dark glass tone
   }));
+
+  if (focusedOptions.tabBarStyle?.display === 'none') {
+    return null;
+  }
 
   return (
     <View style={styles.tabBarContainer}>

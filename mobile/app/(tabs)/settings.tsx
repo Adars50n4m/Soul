@@ -1,33 +1,57 @@
-import React, { useState } from 'react';
-import { View, Text, ScrollView, Image, Pressable, StyleSheet, StatusBar, Alert } from 'react-native';
+import React, { useCallback, useRef, useState } from 'react';
+import { View, Text, Pressable, StyleSheet, StatusBar, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useApp, THEMES, ThemeName } from '../../context/AppContext';
 import { BlurView } from 'expo-blur';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Linking from 'expo-linking';
+import Animated, {
+    Easing,
+    Extrapolation,
+    interpolate,
+    runOnJS,
+    useAnimatedScrollHandler,
+    useAnimatedStyle,
+    useSharedValue,
+    withTiming,
+} from 'react-native-reanimated';
 
-const ProgressiveBlur = ({ position = 'bottom', height = 180, intensity = 100, steps = 20 }: { position?: 'top' | 'bottom', height?: number, intensity?: number, steps?: number }) => {
+const ProgressiveBlur = ({
+    position = 'bottom',
+    height = 180,
+    intensity = 100,
+    steps = 200,
+}: {
+    position?: 'top' | 'bottom';
+    height?: number;
+    intensity?: number;
+    steps?: number;
+}) => {
     return (
-        <View style={{
-            position: 'absolute',
-            [position]: 0,
-            left: 0,
-            right: 0,
-            height,
-            zIndex: position === 'top' ? 90 : 50,
-            overflow: 'hidden',
-        }} pointerEvents="none">
+        <View
+            style={{
+                position: 'absolute',
+                [position]: 0,
+                left: 0,
+                right: 0,
+                height,
+                zIndex: position === 'top' ? 90 : 50,
+                overflow: 'hidden',
+            }}
+            pointerEvents="none"
+        >
             {Array.from({ length: steps }).map((_, i) => {
-                // Use a parabolic ratio for a more natural cinematic falloff
-                // The blur will be more dense at the bottom and fade out smoothly as it goes up
                 const ratio = (i + 1) / steps;
                 const layerHeight = height * ratio;
-                
+                const fade = Math.pow(1 - ratio, 1.4);
+                const opacity = Math.max(0, Math.min(1, fade));
+
                 return (
                     <BlurView
                         key={i}
-                        intensity={intensity / steps} // Cumulative intensity distribution
+                        intensity={intensity / steps}
                         tint="dark"
                         style={{
                             position: 'absolute',
@@ -35,8 +59,7 @@ const ProgressiveBlur = ({ position = 'bottom', height = 180, intensity = 100, s
                             left: 0,
                             right: 0,
                             height: layerHeight,
-                            // Subtly reduce opacity of higher layers to ensure the clear-to-blur transition is invisible
-                            opacity: 1 - (i / (steps * 1.3)),
+                            opacity,
                         }}
                     />
                 );
@@ -48,6 +71,98 @@ export default function SettingsScreen() {
     const router = useRouter();
     const { currentUser, logout, theme, activeTheme } = useApp();
     const [notifications, setNotifications] = useState(true);
+    const isNavigatingRef = useRef(false);
+    const scrollY = useSharedValue(0);
+    const openProgress = useSharedValue(0);
+    const onScroll = useAnimatedScrollHandler((event) => {
+        scrollY.value = event.contentOffset.y;
+    });
+
+    useFocusEffect(
+        useCallback(() => {
+            isNavigatingRef.current = false;
+            openProgress.value = withTiming(0, { duration: 120 });
+            return undefined;
+        }, [openProgress])
+    );
+
+    const profileImageAnimatedStyle = useAnimatedStyle(() => ({
+        transform: [
+            {
+                translateY: interpolate(scrollY.value, [-200, 0, 260, 520], [-52, 0, 66, 120], Extrapolation.CLAMP),
+            },
+            {
+                translateX: interpolate(scrollY.value, [-200, 0, 520], [-10, 0, 12], Extrapolation.CLAMP),
+            },
+            {
+                scale: interpolate(scrollY.value, [-200, 0, 260], [1.24, 1.08, 1], Extrapolation.CLAMP),
+            },
+        ],
+    }));
+
+    const overlayAnimatedStyle = useAnimatedStyle(() => ({
+        transform: [
+            {
+                translateY: interpolate(scrollY.value, [-140, 0, 320], [-8, 0, 26], Extrapolation.CLAMP),
+            },
+        ],
+    }));
+
+    const fadeAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: interpolate(scrollY.value, [0, 280], [1, 0.78], Extrapolation.CLAMP),
+    }));
+
+    const identityAnimatedStyle = useAnimatedStyle(() => ({
+        transform: [
+            {
+                translateY: interpolate(scrollY.value, [-160, 0, 300], [-10, 0, 34], Extrapolation.CLAMP),
+            },
+            {
+                scale: interpolate(scrollY.value, [-160, 0, 300], [1.03, 1, 0.95], Extrapolation.CLAMP),
+            },
+        ],
+    }));
+
+    const dobAnimatedStyle = useAnimatedStyle(() => ({
+        transform: [
+            {
+                translateY: interpolate(scrollY.value, [-160, 0, 320], [-6, 0, 22], Extrapolation.CLAMP),
+            },
+        ],
+        opacity: interpolate(scrollY.value, [0, 320], [1, 0.86], Extrapolation.CLAMP),
+    }));
+
+    const editAnimatedStyle = useAnimatedStyle(() => ({
+        transform: [
+            {
+                translateY: interpolate(scrollY.value, [-160, 0, 320], [-10, 0, 18], Extrapolation.CLAMP),
+            },
+            {
+                scale: interpolate(scrollY.value, [-160, 0, 320], [1.04, 1, 0.93], Extrapolation.CLAMP),
+            },
+        ],
+        opacity: interpolate(scrollY.value, [0, 320], [1, 0.88], Extrapolation.CLAMP),
+    }));
+
+    const openingCardStyle = useAnimatedStyle(() => ({
+        transform: [
+            { scale: interpolate(openProgress.value, [0, 1], [1, 0.985], Extrapolation.CLAMP) },
+            { translateY: interpolate(openProgress.value, [0, 1], [0, -8], Extrapolation.CLAMP) },
+        ],
+        opacity: interpolate(openProgress.value, [0, 1], [1, 0.94], Extrapolation.CLAMP),
+    }));
+
+    const openProfileEdit = () => {
+        if (isNavigatingRef.current) return;
+        isNavigatingRef.current = true;
+        openProgress.value = withTiming(
+            1,
+            { duration: 180, easing: Easing.out(Easing.cubic) },
+            (finished) => {
+                if (finished) runOnJS(router.push)('/profile-edit' as any);
+            }
+        );
+    };
 
     const handleLogout = () => {
         Alert.alert(
@@ -114,51 +229,89 @@ export default function SettingsScreen() {
             <StatusBar barStyle="light-content" />
 
 
-            <ScrollView
+            <Animated.ScrollView
                 style={styles.scrollView}
                 contentContainerStyle={styles.scrollContent}
                 showsVerticalScrollIndicator={false}
+                onScroll={onScroll}
+                scrollEventThrottle={16}
             >
                 {/* Cinematic Profile Card */}
-                <Pressable 
-                    style={styles.profileCard} 
-                    onPress={() => router.push('/profile-edit' as any)}
+                <Animated.View
+                    style={openingCardStyle}
+                    collapsable={false}
                 >
-                    <Image 
+                    <Pressable 
+                        style={styles.profileCard} 
+                        onPress={openProfileEdit}
+                    >
+                    <Animated.Image
                         source={{ uri: currentUser?.avatar }} 
-                        style={styles.profileCardImage} 
+                        style={[
+                            styles.profileCardImage,
+                            profileImageAnimatedStyle,
+                        ]}
                     />
                     
-                    <ProgressiveBlur position="bottom" height={310} intensity={180} steps={25} />
+                    <ProgressiveBlur position="bottom" height={120} intensity={190} steps={30} />
+                    <Animated.View style={fadeAnimatedStyle}>
+                        <LinearGradient
+                            colors={['transparent', 'rgba(0,0,0,0.16)', 'rgba(0,0,0,0.34)']}
+                            locations={[0, 0.6, 1]}
+                            style={styles.profileBottomFade}
+                            pointerEvents="none"
+                        />
+                    </Animated.View>
                     
-                    <View style={styles.profileCardOverlay}>
-                        <View style={styles.profileHeaderRow}>
-                            <Text style={styles.profileCardName}>{currentUser?.name || 'User'}</Text>
-                            <MaterialIcons name="verified" size={20} color="#fff" style={styles.verifiedBadge} />
-                        </View>
-                        
-                        <Text style={styles.profileCardBio} numberOfLines={2}>
-                            {currentUser?.bio || 'No bio yet. Tap to add one.'}
-                        </Text>
+                    <Animated.View
+                        style={[
+                            styles.profileCardOverlay,
+                            overlayAnimatedStyle,
+                        ]}
+                    >
+                        <Animated.View
+                            style={[
+                                styles.profileIdentityBlock,
+                                identityAnimatedStyle,
+                            ]}
+                        >
+                            <View style={styles.profileHeaderRow}>
+                                <Animated.Text style={styles.profileCardName}>
+                                    {currentUser?.name || 'User'}
+                                </Animated.Text>
+                                <MaterialIcons name="verified" size={20} color="#fff" style={styles.verifiedBadge} />
+                            </View>
+                            
+                            <Animated.Text style={styles.profileCardBio} numberOfLines={2}>
+                                {currentUser?.bio || 'No bio yet. Tap to add one.'}
+                            </Animated.Text>
+                        </Animated.View>
 
                         <View style={styles.profileFooterRow}>
-                            <View style={styles.profileStats}>
-                                <View style={styles.statItem}>
-                                    <MaterialIcons name="cake" size={16} color="rgba(255,255,255,0.7)" />
-                                    <Text style={styles.statValue}>{currentUser?.birthdate || 'Not set'}</Text>
+                            <Animated.View style={dobAnimatedStyle}>
+                                <View style={styles.profileStats}>
+                                    <View style={styles.statItem}>
+                                        <MaterialIcons name="cake" size={16} color="rgba(255,255,255,0.7)" />
+                                        <Animated.Text style={styles.statValue}>
+                                            {currentUser?.birthdate || 'Not set'}
+                                        </Animated.Text>
+                                    </View>
                                 </View>
-                            </View>
+                            </Animated.View>
 
-                            <Pressable 
-                                style={styles.editButton}
-                                onPress={() => router.push('/profile-edit' as any)}
-                            >
-                                <Text style={styles.editButtonText}>Edit Profile</Text>
-                                <Ionicons name="pencil" size={14} color="#000" />
-                            </Pressable>
+                            <Animated.View style={editAnimatedStyle}>
+                                <Pressable
+                                    style={styles.editButton}
+                                    onPress={openProfileEdit}
+                                >
+                                    <Text style={styles.editButtonText}>Edit Profile</Text>
+                                    <Ionicons name="pencil" size={14} color="#000" />
+                                </Pressable>
+                            </Animated.View>
                         </View>
-                    </View>
-                </Pressable>
+                    </Animated.View>
+                    </Pressable>
+                </Animated.View>
 
                 {/* Theme Section - Navigates to Theme Screen */}
                 <View style={styles.section}>
@@ -271,7 +424,7 @@ export default function SettingsScreen() {
                     <Text style={styles.appName}>SoulSync</Text>
                     <Text style={styles.appVersion}>Made with ❤️</Text>
                 </View>
-            </ScrollView>
+            </Animated.ScrollView>
         </View>
     );
 }
@@ -307,14 +460,26 @@ const styles = StyleSheet.create({
         left: 0,
         right: 0,
         padding: 24,
-        paddingBottom: 28,
+        paddingTop: 56,
+        paddingBottom: 20,
         zIndex: 100, // Ensure content is above blur
+    },
+    profileBottomFade: {
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        height: 300,
+        zIndex: 80,
+    },
+    profileIdentityBlock: {
+        marginTop: 24,
     },
     profileHeaderRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 8,
-        marginBottom: 8,
+        gap: 5,
+        marginBottom: 4,
     },
     profileCardName: {
         color: '#ffffff',

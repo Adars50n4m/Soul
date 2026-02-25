@@ -16,6 +16,7 @@ try {
     console.log('[WebRTCService] Native modules not available');
 }
 
+import { Platform } from 'react-native';
 import { callService, CallSignal } from './CallService';
 
 // STUN/TURN servers for NAT traversal
@@ -152,13 +153,12 @@ class WebRTCService {
             // Create peer connection
             await this.createPeerConnection();
 
-            // We do NOT call createOffer() here anymore.
             // We wait for 'call-accepted' from the partner.
-            console.log('Call initiated, waiting for partner to accept...');
+            console.log('[WebRTCService] ✅ Call initiated, waiting for partner to accept...');
         } catch (error: any) {
-            console.error('Failed to start call:', error);
+            console.error('[WebRTCService] ❌ Failed to start call:', error);
             this.callbacks?.onError(`Failed to start call: ${error.message}`);
-            this.endCall();
+            this.endCall('start-failed');
         }
     }
 
@@ -166,10 +166,13 @@ class WebRTCService {
      * Triggered when the initiator receives 'call-accepted'
      */
     async onCallAccepted(): Promise<void> {
+        console.log(`[WebRTCService] onCallAccepted called. peerConnection: ${!!this.peerConnection}, isInitiator: ${this.isInitiator}`);
         if (this.isInitiator && this.peerConnection) {
-            console.log('Partner accepted call, creating offer...');
+            console.log('[WebRTCService] Partner accepted call, creating offer...');
             this.setState('connecting');
             await this.createOffer();
+        } else if (this.isInitiator) {
+            console.warn('[WebRTCService] ⚠️ Partner accepted but peerConnection is not ready yet');
         }
     }
 
@@ -204,11 +207,12 @@ class WebRTCService {
 
             // Create and send answer
             await this.createAnswer();
+            console.log('[WebRTCService] ✅ Call answered successfully');
 
         } catch (error: any) {
-            console.error('Failed to answer call:', error);
+            console.error('[WebRTCService] ❌ Failed to answer call:', error);
             this.callbacks?.onError(`Failed to answer call: ${error.message}`);
-            this.endCall();
+            this.endCall('answer-failed');
         }
     }
 
@@ -273,8 +277,17 @@ class WebRTCService {
     /**
      * End the current call
      */
-    endCall(): void {
-        console.log('Ending call...');
+    endCall(reason: string = 'manual'): void {
+        console.log(`[WebRTCService] 🚨 endCall() called. Reason: ${reason}. Current state: ${this.callState}`);
+
+        // Guard: prevent double-end
+        if (this.callState === 'ended' || this.callState === 'idle') {
+            console.log(`[WebRTCService] endCall() ignored (reason: ${reason}) - already ${this.callState}`);
+            return;
+        }
+
+        // Mark state FIRST to prevent re-entrant calls
+        this.setState('ended');
 
         // Stop local tracks
         if (this.localStream) {
@@ -299,8 +312,9 @@ class WebRTCService {
             this.callbacks.onRemoteStream(null);
         }
 
-        // Send end signal
-        callService.endCall();
+        // NOTE: Do NOT call callService.endCall() here.
+        // The endCall signal is sent by AppContext.endCall() to avoid
+        // a double-signal loop (AppContext -> webRTCService.endCall() -> callService.endCall() -> signal loop).
 
         this.setState('ended');
 
@@ -386,8 +400,21 @@ class WebRTCService {
             console.log('Local stream obtained successfully');
 
         } catch (error: any) {
-            console.error('Failed to get media stream:', error);
-            throw new Error(`Camera/Mic access denied: ${error.message}`);
+            console.warn('[WebRTCService] ⚠️ getMediaStream failed:', error.message);
+            
+            // Simulator Fallback: If camera fails but it's a simulator, don't crash
+            if (Platform.OS === 'ios' && error.message?.includes('found')) {
+                console.log('[WebRTCService] 🛡️ Simulator detected or no camera found, proceeding with audio-only or black stream');
+                // Try audio only as last resort
+                try {
+                    this.localStream = await mediaDevices.getUserMedia({ audio: true, video: false }) as MediaStream;
+                    this.callbacks?.onLocalStream(this.localStream);
+                    return;
+                } catch (e) {
+                    console.error('[WebRTCService] ❌ Audio also failed:', e);
+                }
+            }
+            throw new Error(`Media access denied: ${error.message}`);
         }
     }
 
@@ -434,16 +461,22 @@ class WebRTCService {
         // Handle connection state changes
         pc.addEventListener('connectionstatechange', () => {
             const state = pc.connectionState;
-            console.log('Connection state:', state);
+            console.log('[WebRTCService] Connection state:', state);
 
             switch (state) {
                 case 'connected':
                     this.setState('connected');
                     break;
                 case 'disconnected':
+                    // 'disconnected' is a TRANSIENT, recoverable state.
+                    // WebRTC will attempt to reconnect. Do NOT end the call here.
+                    console.warn('[WebRTCService] Connection transiently disconnected. Waiting for recovery...');
+                    break;
                 case 'failed':
                 case 'closed':
-                    this.endCall();
+                    // 'failed' and 'closed' are final states indicating the connection is truly lost.
+                    console.warn(`[WebRTCService] Connection permanently ${state}. Ending call.`);
+                    this.endCall(`pc-state-${state}`);
                     break;
             }
         });
@@ -451,11 +484,17 @@ class WebRTCService {
         // Handle ICE connection state
         pc.addEventListener('iceconnectionstatechange', () => {
             const iceState = pc.iceConnectionState;
-            console.log('ICE state:', iceState);
+            console.log('[WebRTCService] ICE state:', iceState);
             if (iceState === 'connected' || iceState === 'completed') {
                 this.setState('connected');
-            } else if (iceState === 'failed' || iceState === 'closed') {
-                console.warn('ICE connection failed. If you are on 4G/5G, you likely need a TURN server.');
+            } else if (iceState === 'disconnected') {
+                // 'disconnected' is transient – ICE will attempt to repair. Do NOT end call.
+                console.warn('[WebRTCService] ICE transiently disconnected. Waiting for recovery...');
+            } else if (iceState === 'failed') {
+                console.error('[WebRTCService] ICE failed permanently. If on 4G/5G, a TURN server is required.');
+                this.endCall();
+            } else if (iceState === 'closed') {
+                console.log('[WebRTCService] ICE closed.');
                 this.endCall();
             }
         });

@@ -7,7 +7,7 @@
 
 import * as BackgroundFetch from 'expo-background-fetch';
 import * as TaskManager from 'expo-task-manager';
-import * as Notifications from 'expo-notifications';
+// import * as Notifications from 'expo-notifications';
 import { supabase } from '../config/supabase';
 import { offlineService } from './LocalDBService';
 
@@ -155,6 +155,7 @@ async function updateContactLastMessage(contactId: string, msg: any): Promise<vo
  */
 async function showSyncNotification(count: number): Promise<void> {
   try {
+    const Notifications = require('expo-notifications');
     await Notifications.scheduleNotificationAsync({
       content: {
         title: 'SoulSync',
@@ -285,7 +286,7 @@ export async function forceSyncNow(): Promise<number> {
  * Handle silent push notification
  * Called when a silent push is received
  */
-export async function handleSilentPush(notification: Notifications.Notification): Promise<void> {
+export async function handleSilentPush(notification: any): Promise<void> {
   console.log('[BackgroundSync] Silent push received');
   
   // Check if this is a content-available notification (silent)
@@ -300,11 +301,15 @@ export async function handleSilentPush(notification: Notifications.Notification)
  * Setup notification listener for silent pushes
  */
 export function setupSilentPushListener(): () => void {
-  const subscription = Notifications.addNotificationReceivedListener(handleSilentPush);
-  
-  return () => {
-    subscription.remove();
-  };
+  try {
+    const Notifications = require('expo-notifications');
+    const subscription = Notifications.addNotificationReceivedListener(handleSilentPush);
+    return () => {
+      subscription.remove();
+    };
+  } catch {
+    return () => {};
+  }
 }
 
 export const backgroundSyncService = {
