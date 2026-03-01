@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, Modal, Pressable, Image, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, Modal, Pressable, Image, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
 import Animated, {
@@ -12,7 +12,6 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useApp } from '../context/AppContext';
 
-const { width } = Dimensions.get('window');
 
 /**
  * IncomingCallModal - A smart global overlay for handling incoming calls.
@@ -145,6 +144,15 @@ export const IncomingCallModal = () => {
     );
 };
 
+const incomingCallNameTextShadow = Platform.select({
+  ios: {
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 4,
+  },
+  default: undefined,
+});
+
 const styles = StyleSheet.create({
     container: {
         flex: 1,
@@ -204,9 +212,7 @@ const styles = StyleSheet.create({
         fontWeight: '200',
         marginBottom: 8,
         letterSpacing: 1,
-        textShadowColor: 'rgba(0,0,0,0.5)',
-        textShadowOffset: { width: 0, height: 2 },
-        textShadowRadius: 4,
+        ...incomingCallNameTextShadow,
     },
     status: {
         color: 'rgba(255,255,255,0.7)',

@@ -5,12 +5,16 @@ import {
   StyleSheet,
   Pressable,
   Image,
-  SafeAreaView,
-  StatusBar,
   FlatList,
-  Platform,
   Alert,
+  StatusBar,
+  ScrollView,
+  TextInput,
+  RefreshControl,
+  Platform,
+  Dimensions,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
@@ -97,28 +101,41 @@ export default function MyStatusScreen() {
       const safeUri = item.uri;
       let mediaUrl = safeUri;
 
-      if (safeUri.startsWith('file://')) {
-        const uploadedUrl = await storageService.uploadImage(safeUri, 'status-media', currentUser.id);
-        if (uploadedUrl) mediaUrl = uploadedUrl;
-      }
-
       const expiresAt = new Date();
       expiresAt.setHours(expiresAt.getHours() + 24);
       
-      addStatus({
-        userId: currentUser.id,
-        mediaUrl,
-        mediaType: item.type === 'video' ? 'video' : 'image',
-        timestamp: new Date().toISOString(),
-        expiresAt: expiresAt.toISOString(),
-        caption: caption || '',
-      });
+      const mediaType = item.type === 'video' ? 'video' : 'image';
+      const timestamp = new Date().toISOString();
+      const expiresAtString = expiresAt.toISOString();
+      const statusCaption = caption || '';
+
+      try {
+        if (safeUri.startsWith('file://')) {
+          const uploadedUrl = await storageService.uploadImage(safeUri, 'status-media', currentUser.id);
+          if (uploadedUrl) mediaUrl = uploadedUrl;
+        }
+
+        addStatus({
+          userId: currentUser.id,
+          mediaUrl,
+          mediaType,
+          timestamp,
+          expiresAt: expiresAtString,
+          caption: statusCaption,
+        });
       
-      setStatusMediaPreview(null);
+        setStatusMediaPreview(null);
+        setIsUploadingStatus(false);
+        setIsMediaPickerVisible(false);
+      } catch (error) {
+        console.error('Failed to upload status:', error);
+        Alert.alert('Error', 'Failed to upload status. Please try again.');
+        setIsUploadingStatus(false);
+        setIsMediaPickerVisible(false);
+      }
     } catch (error) {
       console.error('Failed to upload status:', error);
       Alert.alert('Error', 'Failed to upload status. Please try again.');
-    } finally {
       setIsUploadingStatus(false);
       setIsMediaPickerVisible(false);
     }
@@ -226,11 +243,6 @@ export default function MyStatusScreen() {
     );
   };
 
-  const handleDeleteStatus = () => {
-    // This function would typically handle deleting a status,
-    // but for this context, it's a placeholder as per the instruction.
-    Alert.alert("Delete Status", "This functionality is not yet implemented.");
-  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -295,7 +307,14 @@ export default function MyStatusScreen() {
         onSelectCamera={handleSelectCamera}
         onSelectGallery={() => handleSelectGallery()}
         onSelectAsset={handleSelectGallery}
-        onDelete={handleDeleteStatus}
+        onSelectAudio={() => {
+            setIsMediaPickerVisible(false);
+            Alert.alert("SoulSync Audio", "Audio status coming soon!");
+        }}
+        onSelectNote={() => {
+            setIsMediaPickerVisible(false);
+            Alert.alert("SoulSync Notes", "Leave a note from the Home screen!");
+        }}
       />
 
       <MediaPreviewModal

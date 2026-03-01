@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Image,
@@ -9,8 +9,8 @@ import {
   StatusBar,
   GestureResponderEvent,
   PanResponder,
-  Dimensions,
-  Alert,
+    useWindowDimensions,
+    Alert,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -32,20 +32,23 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   caption,
   onClose,
 }) => {
-  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const fadeAnim = useMemo(() => new Animated.Value(0), []);
   const videoRef = useRef<Video>(null);
   const [isPlaying, setIsPlaying] = useState(mediaType === 'image' ? false : true);
   const [duration, setDuration] = useState(0);
   const [position, setPosition] = useState(0);
   const [showControls, setShowControls] = useState(true);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | number | null>(null);
-  const { width, height } = Dimensions.get('window');
+  const { width, height } = useWindowDimensions();
 
   // Pinch-to-zoom state for images
   const [scale, setScale] = useState(1);
-  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const scaleAnim = useMemo(() => new Animated.Value(1), []);
+  const [lastScale, setLastScale] = useState(1);
+  const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const lastTranslate = useRef({ x: 0, y: 0 });
 
-  const panResponder = useRef(
+  const panResponder = useMemo(() => 
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => scale > 1,
@@ -63,8 +66,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           setScale(1);
         }
       },
-    })
-  ).current;
+    }), [scale, scaleAnim]);
 
   useEffect(() => {
     if (visible) {

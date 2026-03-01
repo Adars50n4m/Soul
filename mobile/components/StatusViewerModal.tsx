@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -6,13 +6,13 @@ import {
   StyleSheet,
   Modal,
   Pressable,
-  Dimensions,
-  SafeAreaView,
+  useWindowDimensions,
   StatusBar as RNStatusBar,
   TextInput,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -30,7 +30,6 @@ import Animated, {
 import { Story } from '../types';
 import { useApp } from '../context/AppContext';
 
-const { width, height } = Dimensions.get('window');
 
 interface StatusViewerModalProps {
   visible: boolean;
@@ -95,6 +94,7 @@ export const StatusViewerModal = ({
   onClose,
   onComplete,
 }: StatusViewerModalProps) => {
+  const { width, height } = useWindowDimensions();
   const { activeTheme, contacts, currentUser } = useApp();
   const insets = useSafeAreaInsets();
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -105,23 +105,31 @@ export const StatusViewerModal = ({
   const [isLongPressActive, setIsLongPressActive] = useState(false);
   const [isLiked, setIsLiked] = useState(false);
   const [showViewers, setShowViewers] = useState(false);
+  const [prevVisible, setPrevVisible] = useState(visible);
+
+  // Use render-time state reset to avoid cascading renders in useEffect
+  if (visible !== prevVisible) {
+      if (visible) {
+          setCurrentIndex(0);
+          setReplyText('');
+          setMediaLoadFailed(false);
+          setShowViewers(false);
+      }
+      setPrevVisible(visible);
+  }
   
   const heartScale = useSharedValue(1);
-  const viewersTranslateY = useSharedValue(height);
+  const viewersTranslateY = useSharedValue(0); // Initialize with 0, will update in useEffect
   const backdropOpacity = useSharedValue(0);
-  const currentStory = stories[currentIndex];
-  const isOwnStatus = !!currentUserId && statusOwnerId === currentUserId;
+  const currentStory = stories[currentIndex] || stories[0] || null;
+  const isOwnStatus = !!currentUserId && !!statusOwnerId && statusOwnerId === currentUserId;
 
   useEffect(() => {
     if (visible) {
-      setCurrentIndex(0);
-      setReplyText('');
-      setMediaLoadFailed(false);
-      setShowViewers(false);
       viewersTranslateY.value = height;
       backdropOpacity.value = 0;
     }
-  }, [visible]);
+  }, [visible, height]);
 
   useEffect(() => {
     setMediaLoadFailed(false);
@@ -192,17 +200,23 @@ export const StatusViewerModal = ({
     return userIds.map(id => {
       if (id === currentUser?.id) return { id: currentUser.id, name: currentUser.name, avatar: currentUser.avatar };
       const contact = contacts.find(u => u.id === id);
-      return contact || { id, name: 'Unknown User', avatar: '' };
+  return contact || { id, name: 'Unknown User', avatar: '' };
     });
   };
 
-  if (!visible || !currentStory) return null;
+
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (visible) {
+      setNow(Date.now());
+    }
+  }, [visible]);
 
   const formatStoryTime = (value?: string) => {
     if (!value) return '';
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return value;
-    const now = Date.now();
     const diffMs = now - parsed.getTime();
     const diffMin = Math.floor(diffMs / 60000);
     if (diffMin < 1) return 'now';
@@ -238,6 +252,8 @@ export const StatusViewerModal = ({
     setIsUIVisible(true);
   };
 
+  if (!visible || !currentStory) return null;
+
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <View style={styles.container}>
@@ -270,12 +286,12 @@ export const StatusViewerModal = ({
           {currentStory.type === 'image' && !mediaLoadFailed ? (
             <Image
               source={{ uri: currentStory.url }}
-              style={styles.media}
+              style={[styles.media, { width: width }]}
               resizeMode="contain"
               onError={handleMediaError}
             />
           ) : (
-            <View style={[styles.media, styles.videoPlaceholder]}>
+            <View style={[styles.media, styles.videoPlaceholder, { width: width }]}>
               <MaterialIcons
                 name={currentStory.type === 'video' ? 'play-circle-filled' : 'broken-image'}
                 size={58}
@@ -316,7 +332,7 @@ export const StatusViewerModal = ({
                           <>
                             <Text style={styles.metaDivider}> • </Text>
                             <Ionicons name="musical-notes" size={12} color="rgba(255,255,255,0.6)" />
-                            <Text style={styles.musicText} numberOfLines={1}>
+                            <Text style={[styles.musicText, { maxWidth: width * 0.4 }]} numberOfLines={1}>
                               {currentStory.music.artist} {currentStory.music.name}
                             </Text>
                             <MaterialIcons name="chevron-right" size={16} color="rgba(255,255,255,0.6)" />
@@ -426,7 +442,7 @@ export const StatusViewerModal = ({
               <Pressable style={{ flex: 1 }} onPress={() => toggleViewers(false)} />
             </Animated.View>
             
-            <Animated.View style={[styles.viewersDrawer, viewersAnimatedStyle]}>
+            <Animated.View style={[styles.viewersDrawer, { height: height * 0.45 }, viewersAnimatedStyle]}>
               <View style={styles.drawerHeader}>
                 <View style={styles.drawerHandle} />
                 <View style={styles.drawerTitleRow}>
@@ -471,6 +487,15 @@ export const StatusViewerModal = ({
   );
 };
 
+const captionTextShadow = Platform.select({
+  ios: {
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  default: undefined,
+});
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -491,7 +516,6 @@ const styles = StyleSheet.create({
     transform: [{ scale: 1.08 }],
   },
   media: {
-    width: width,
     height: '100%',
     borderRadius: 0,
   },
@@ -565,7 +589,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     marginLeft: 4,
-    maxWidth: width * 0.4,
   },
   avatar: {
     width: 44,
@@ -665,9 +688,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
     marginBottom: 16,
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+    ...captionTextShadow,
   },
   captionDivider: {
     width: '100%',
@@ -725,7 +746,6 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    height: height * 0.45,
     backgroundColor: '#1a1a1a',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,

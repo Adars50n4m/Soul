@@ -1,5 +1,5 @@
-import React, { useRef, useEffect, useState } from 'react';
-import { View, Pressable, StyleSheet, Animated, PanResponder, Dimensions, FlatList, Image, Text, ActivityIndicator, Platform } from 'react-native';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
+import { View, Pressable, StyleSheet, Animated, PanResponder, useWindowDimensions, FlatList, Image, Text, ActivityIndicator, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import * as MediaLibrary from 'expo-media-library';
@@ -25,9 +25,9 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
   onSelectNote,
   onSelectAsset,
 }) => {
-  const slideAnim = useRef(new Animated.Value(0)).current;
-  const opacityAnim = useRef(new Animated.Value(0)).current;
-  const { height: screenHeight, width: screenWidth } = Dimensions.get('window');
+  const slideAnim = useMemo(() => new Animated.Value(0), []);
+  const opacityAnim = useMemo(() => new Animated.Value(0), []);
+  const { height: screenHeight, width: screenWidth } = useWindowDimensions();
   // Taller sheet for grid view
   const sheetHeight = screenHeight * 0.85; 
 
@@ -38,7 +38,7 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  const panResponder = useRef(
+  const panResponder = useMemo(() => 
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
@@ -57,8 +57,7 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
           }).start();
         }
       },
-    })
-  ).current;
+    }), [slideAnim]);
 
   const loadPhotos = async (album?: MediaLibrary.Album) => {
       setIsLoading(true);
@@ -93,11 +92,14 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
 
   useEffect(() => {
     if (visible) {
-      if (viewMode === 'photos') {
+      // Defer state updates to avoid synchronous setState in effect warning
+      Promise.resolve().then(() => {
+        if (viewMode === 'photos') {
           loadPhotos(selectedAlbum || undefined);
-      } else {
+        } else {
           loadAlbums();
-      }
+        }
+      });
       Animated.parallel([
         Animated.spring(slideAnim, {
           toValue: 0,

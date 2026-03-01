@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
-    Dimensions, Platform, Alert
+    useWindowDimensions, Platform, Alert
 } from 'react-native';
 import { Camera } from 'expo-camera';
 import { Audio as ExpoAudio } from 'expo-av';
@@ -43,12 +43,13 @@ const webrtcModules = getWebRTCModules();
 const RTCView = webrtcModules.RTCView;
 const webRTCService = webrtcModules.webRTCService;
 
-const { width, height } = Dimensions.get('window');
+
 
 // CallState type
 type CallState = 'idle' | 'ringing' | 'connecting' | 'connected' | 'ended';
 
 export default function CallScreen() {
+    const { width, height } = useWindowDimensions();
     const router = useRouter();
     const navigation = useNavigation();
     const { activeCall, contacts, currentUser, otherUser, activeTheme, endCall: endAppCall, toggleMute: toggleAppMute, toggleMinimizeCall } = useApp();
@@ -402,7 +403,7 @@ export default function CallScreen() {
     return (
         <GestureHandlerRootView style={{ flex: 1 }}>
             <GestureDetector gesture={screenPanGesture}>
-            <Animated.View style={[styles.container, { backgroundColor: activeTheme?.bg || '#000' }, screenStyle]}>
+            <Animated.View style={[styles.container, { backgroundColor: activeTheme?.bg || '#000', width, height }, screenStyle]}>
                 <StatusBar hidden />
 
                 {/* Background Layer */}
@@ -419,7 +420,7 @@ export default function CallScreen() {
                         ) : (
                             <Image
                                 source={{ uri: contact.avatar }}
-                                style={styles.backgroundImage}
+                                style={[styles.backgroundImage, { width, height }]}
                                 blurRadius={50}
                             />
                         )}
@@ -435,7 +436,7 @@ export default function CallScreen() {
                     <View style={StyleSheet.absoluteFill}>
                         <Image
                             source={{ uri: contact.avatar }}
-                            style={styles.backgroundImage}
+                            style={[styles.backgroundImage, { width, height }]}
                             blurRadius={60}
                         />
                         <View style={styles.overlay} />
@@ -563,14 +564,21 @@ export default function CallScreen() {
     );
 }
 
+const callContactNameShadow = Platform.select({
+  ios: {
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 4,
+  },
+  default: undefined,
+});
+
 const styles = StyleSheet.create({
     container: {
         flex: 1,
         backgroundColor: '#000',
     },
     backgroundImage: {
-        width: width,
-        height: height,
         resizeMode: 'cover',
         opacity: 0.6,
     },
@@ -689,9 +697,7 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         marginBottom: 8,
         letterSpacing: 0.5,
-        textShadowColor: 'rgba(0,0,0,0.5)',
-        textShadowOffset: { width: 0, height: 2 },
-        textShadowRadius: 4,
+        ...callContactNameShadow,
     },
     callStatus: {
         color: 'rgba(255,255,255,0.7)',
@@ -731,5 +737,3 @@ const styles = StyleSheet.create({
         backgroundColor: '#ef4444',
     }
 });
-
-

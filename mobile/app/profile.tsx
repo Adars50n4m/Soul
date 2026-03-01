@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-    View, Text, Image, StyleSheet, StatusBar, Dimensions, Pressable
+    View, Text, Image, StyleSheet, StatusBar, Dimensions,    useWindowDimensions, Pressable
 } from 'react-native';
 import { useRouter, useNavigation } from 'expo-router';
 import { BlurView } from 'expo-blur';
@@ -21,7 +21,6 @@ import Animated, {
     Extrapolation,
 } from 'react-native-reanimated';
 
-const { width } = Dimensions.get('window');
 const HEADER_HEIGHT = 300;
 
 const MenuItem = ({ icon, title, subtitle, onPress, isLast, danger }: any) => (
@@ -45,6 +44,7 @@ const MenuItem = ({ icon, title, subtitle, onPress, isLast, danger }: any) => (
 );
 
 export default function ProfileScreen() {
+    const { width } = useWindowDimensions();
     const router = useRouter();
     const navigation = useNavigation();
     const { currentUser, logout, activeTheme } = useApp();

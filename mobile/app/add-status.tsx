@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-    View, Text, Image, TextInput, Pressable, StyleSheet, Dimensions,
+    View, Text, Image, TextInput, Pressable, StyleSheet, useWindowDimensions,
     StatusBar, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Keyboard, Modal, ScrollView
 } from 'react-native';
 import { useRouter, useNavigation } from 'expo-router';
@@ -15,10 +15,12 @@ import Animated, {
 import { Video, ResizeMode } from 'expo-av';
 import { useApp } from '../context/AppContext';
 import { storageService } from '../services/StorageService';
+import { CropImageModal } from '../components/CropImageModal';
 
-const { width, height } = Dimensions.get('window');
+
 
 export default function AddStatusScreen() {
+    const { width, height } = useWindowDimensions();
     const router = useRouter();
     const navigation = useNavigation();
     const { addStatus, activeTheme, currentUser } = useApp();
@@ -27,22 +29,7 @@ export default function AddStatusScreen() {
     const [uploading, setUploading] = useState(false);
     const [keyboardVisible, setKeyboardVisible] = useState(false);
     const [initialLaunch, setInitialLaunch] = useState(true);
-
-    useEffect(() => {
-        const showSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setKeyboardVisible(true));
-        const hideSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKeyboardVisible(false));
-        
-        // Auto-open gallery on first launch
-        if (initialLaunch) {
-            handlePickMedia();
-            setInitialLaunch(false);
-        }
-
-        return () => {
-            showSub.remove();
-            hideSub.remove();
-        };
-    }, []);
+    const [isCropModalVisible, setIsCropModalVisible] = useState(false);
 
     const handlePickMedia = async () => {
         const result = await ImagePicker.launchImageLibraryAsync({
@@ -63,6 +50,22 @@ export default function AddStatusScreen() {
             if (navigation.canGoBack()) navigation.goBack();
         }
     };
+
+    useEffect(() => {
+        const showSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setKeyboardVisible(true));
+        const hideSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKeyboardVisible(false));
+        
+        // Auto-open gallery on first launch
+        if (initialLaunch) {
+            Promise.resolve().then(() => handlePickMedia());
+            setInitialLaunch(false);
+        }
+
+        return () => {
+            showSub.remove();
+            hideSub.remove();
+        };
+    }, [initialLaunch]);
 
     const handleTakePhoto = async () => {
         const permission = await ImagePicker.requestCameraPermissionsAsync();
@@ -154,24 +157,36 @@ export default function AddStatusScreen() {
             {media.type === 'video' ? (
                 <Video 
                     source={{ uri: media.uri }}
-                    style={styles.fullScreenImage}
+                    style={[styles.fullScreenImage, { width, height }]}
                     resizeMode={ResizeMode.CONTAIN}
                     shouldPlay
                     isLooping
                     isMuted={false}
                 />
             ) : (
-                <Image source={{ uri: media.uri }} style={styles.fullScreenImage} resizeMode="contain" />
+                <Image source={{ uri: media.uri }} style={[styles.fullScreenImage, { width, height }]} resizeMode="contain" />
             )}
             
             {/* Top Controls */}
             <LinearGradient colors={['rgba(0,0,0,0.6)', 'transparent']} style={styles.topGradient}>
                 <View style={styles.topBar}>
-                    <Pressable onPress={() => setMedia(null)} style={styles.iconButton}>
+                    <Pressable
+                        onPress={() => {
+                            setMedia(null);
+                            setIsCropModalVisible(false);
+                        }}
+                        style={styles.iconButton}
+                    >
                         <MaterialIcons name="close" size={28} color="white" />
                     </Pressable>
                     <View style={styles.topTools}>
-                        <Pressable style={styles.iconButton}>
+                        <Pressable
+                            style={styles.iconButton}
+                            onPress={() => {
+                                if (media?.type !== 'image' || uploading) return;
+                                setIsCropModalVisible(true);
+                            }}
+                        >
                             <MaterialIcons name="crop" size={24} color="white" />
                         </Pressable>
                         <Pressable style={styles.iconButton}>
@@ -222,6 +237,16 @@ export default function AddStatusScreen() {
                     </Pressable>
                 </Animated.View>
             </KeyboardAvoidingView>
+
+            <CropImageModal
+                visible={isCropModalVisible}
+                imageUri={media?.uri || ''}
+                onClose={() => setIsCropModalVisible(false)}
+                onCropComplete={(croppedUri) => {
+                    setIsCropModalVisible(false);
+                    setMedia(prev => (prev ? { ...prev, uri: croppedUri } : prev));
+                }}
+            />
         </View>
     );
 }
@@ -273,8 +298,6 @@ const styles = StyleSheet.create({
         fontSize: 14,
     },
     fullScreenImage: {
-        width: width,
-        height: height,
         backgroundColor: '#000',
     },
     topGradient: {

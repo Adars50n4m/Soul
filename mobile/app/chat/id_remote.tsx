@@ -1,8 +1,8 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
     View, Text, Image, FlatList, TextInput, Pressable,
     StyleSheet, StatusBar, KeyboardAvoidingView, Platform,
-    Modal, Animated as RNAnimated, Dimensions
+    Modal, Animated as RNAnimated,    useWindowDimensions,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
 import { BlurView } from 'expo-blur';
@@ -20,7 +20,6 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { useApp } from '../../context/AppContext';
 import { MusicPlayerOverlay } from '../../components/MusicPlayerOverlay';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // Sanitize song title - remove metadata like "(From ...)" or "[Album Name]"
 const sanitizeSongTitle = (title: string): string => {
@@ -193,7 +192,8 @@ const ReactionModal = ({ visible, onClose, onSelect }: any) => {
     );
 };
 
-export default function SingleChatScreen() {
+export default function RemoteChat() {
+    const { width: SCREEN_WIDTH } = useWindowDimensions();
     const { id } = useLocalSearchParams<{ id: string }>();
     const router = useRouter();
     const navigation = useNavigation();
@@ -205,7 +205,7 @@ export default function SingleChatScreen() {
     const [isTyping, setIsTyping] = useState(false);
     const [showMusicPlayer, setShowMusicPlayer] = useState(false);
     const flatListRef = useRef<FlatList>(null);
-    const modalAnim = useRef(new RNAnimated.Value(0)).current;
+    const modalAnim = useMemo(() => new RNAnimated.Value(0), []);
     const [callOptionsPosition, setCallOptionsPosition] = useState({ x: 0, y: 0 });
     const callButtonRef = useRef<View>(null);
 

@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "ios": {
       "appleTeamId": "NSQLLV82SH",
       "supportsTablet": true,
@@ -36,7 +36,6 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "supportsPictureInPicture": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.soulsync4.mobile",
       "permissions": [

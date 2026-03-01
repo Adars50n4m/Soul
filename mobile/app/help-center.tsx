@@ -1,14 +1,13 @@
 import React, { useState, useMemo } from 'react';
 import {
     View, Text, StyleSheet, ScrollView, TextInput,
-    Pressable, StatusBar, Dimensions, Animated, Platform, Modal
+    Pressable, StatusBar, useWindowDimensions, Animated, Platform, Modal
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
 
-const { width, height } = Dimensions.get('window');
 
 const HELP_DATA: Record<string, { title: string, content: string }> = {
     '1': {
@@ -64,7 +63,30 @@ const POPULAR_ARTICLES = [
     { id: 'a4', title: 'About ads in SoulSync Status and Channels' },
 ];
 
+const TopicItem = ({ topic, onOpen }: { topic: typeof HELP_TOPICS[0], onOpen: (id: string) => void }) => (
+    <Pressable style={styles.topicItem} onPress={() => onOpen(topic.id)}>
+        <View style={[styles.topicIconContainer, { backgroundColor: `${topic.color}20` }]}>
+            {topic.isIonicons ? (
+                <Ionicons name={topic.icon as any} size={20} color={topic.color} />
+            ) : (
+                <MaterialIcons name={topic.icon as any} size={20} color={topic.color} />
+            )}
+        </View>
+        <Text style={styles.topicTitle}>{topic.title}</Text>
+        <MaterialIcons name="chevron-right" size={24} color="rgba(255,255,255,0.2)" />
+    </Pressable>
+);
+
+const ArticleItem = ({ article, onOpen, primaryColor }: { article: typeof POPULAR_ARTICLES[0], onOpen: (id: string) => void, primaryColor: string }) => (
+    <Pressable style={styles.articleItem} onPress={() => onOpen(article.id)}>
+        <MaterialIcons name="description" size={20} color={primaryColor} style={styles.articleIcon} />
+        <Text style={styles.articleTitle}>{article.title}</Text>
+        <MaterialIcons name="chevron-right" size={20} color="rgba(255,255,255,0.2)" />
+    </Pressable>
+);
+
 export default function HelpCenterScreen() {
+    const { width, height } = useWindowDimensions();
     const router = useRouter();
     const { activeTheme } = useApp();
     const [searchQuery, setSearchQuery] = useState('');
@@ -86,28 +108,6 @@ export default function HelpCenterScreen() {
             setSelectedArticle({ id, ...data });
         }
     };
-
-    const TopicItem = ({ topic }: { topic: typeof HELP_TOPICS[0] }) => (
-        <Pressable style={styles.topicItem} onPress={() => openArticle(topic.id)}>
-            <View style={[styles.topicIconContainer, { backgroundColor: `${topic.color}20` }]}>
-                {topic.isIonicons ? (
-                    <Ionicons name={topic.icon as any} size={20} color={topic.color} />
-                ) : (
-                    <MaterialIcons name={topic.icon as any} size={20} color={topic.color} />
-                )}
-            </View>
-            <Text style={styles.topicTitle}>{topic.title}</Text>
-            <MaterialIcons name="chevron-right" size={24} color="rgba(255,255,255,0.2)" />
-        </Pressable>
-    );
-
-    const ArticleItem = ({ article }: { article: typeof POPULAR_ARTICLES[0] }) => (
-        <Pressable style={styles.articleItem} onPress={() => openArticle(article.id)}>
-            <MaterialIcons name="description" size={20} color={activeTheme.primary} style={styles.articleIcon} />
-            <Text style={styles.articleTitle}>{article.title}</Text>
-            <MaterialIcons name="chevron-right" size={20} color="rgba(255,255,255,0.2)" />
-        </Pressable>
-    );
 
     return (
         <View style={styles.container}>
@@ -158,7 +158,7 @@ export default function HelpCenterScreen() {
                         <BlurView intensity={10} tint="dark" style={styles.glassContainer} experimentalBlurMethod="dimezisBlurView">
                             {filteredTopics.map((topic, index) => (
                                 <View key={topic.id}>
-                                    <TopicItem topic={topic} />
+                                    <TopicItem topic={topic} onOpen={openArticle} />
                                     {index < filteredTopics.length - 1 && <View style={styles.separator} />}
                                 </View>
                             ))}
@@ -173,7 +173,7 @@ export default function HelpCenterScreen() {
                         <BlurView intensity={10} tint="dark" style={styles.glassContainer} experimentalBlurMethod="dimezisBlurView">
                             {filteredArticles.map((article, index) => (
                                 <View key={article.id}>
-                                    <ArticleItem article={article} />
+                                    <ArticleItem article={article} onOpen={openArticle} primaryColor={activeTheme.primary} />
                                     {index < filteredArticles.length - 1 && <View style={styles.separator} />}
                                 </View>
                             ))}
@@ -372,7 +372,7 @@ const styles = StyleSheet.create({
         justifyContent: 'flex-end',
     },
     modalContent: {
-        height: height * 0.7,
+        height: '70%',
         borderTopLeftRadius: 30,
         borderTopRightRadius: 30,
         overflow: 'hidden',

@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Pressable, Image, Modal, Dimensions, Platform } from 'react-native';
+import { View, Text, StyleSheet, Pressable, Image, Modal, useWindowDimensions, Alert, Platform, Vibration, Share, Linking } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
 
-const { width } = Dimensions.get('window');
+const MARGIN_BOTTOM = Platform.OS === 'ios' ? 44 : 24;
 
 interface FullPlayerModalProps {
     visible: boolean;
     onClose: () => void;
+    onBack?: () => void;
 }
 
 const FullPlayerModal: React.FC<FullPlayerModalProps> = ({ visible, onClose }) => {
+    const { width } = useWindowDimensions();
     const { musicState, togglePlayMusic, toggleFavoriteSong, seekTo, getPlaybackPosition } = useApp();
     const song = musicState.currentSong;
     const [position, setPosition] = useState(0);
@@ -56,7 +58,7 @@ const FullPlayerModal: React.FC<FullPlayerModalProps> = ({ visible, onClose }) =
                 </View>
 
                 <View style={styles.fullPlayerContent}>
-                    <Image source={{ uri: song.image }} style={styles.fullPlayerArt} />
+                    <Image source={{ uri: song.image }} style={[styles.fullPlayerArt, { width: width - 60, height: width - 60 }]} />
 
                     <View style={styles.fullPlayerInfo}>
                         <View style={{ flex: 1 }}>
@@ -125,8 +127,6 @@ const styles = StyleSheet.create({
         paddingHorizontal: 30,
     },
     fullPlayerArt: {
-        width: width - 60,
-        height: width - 60,
         borderRadius: 20,
         marginBottom: 40,
     },

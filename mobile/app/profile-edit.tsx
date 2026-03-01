@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
-    TextInput, ScrollView, Alert, Modal, Animated as RNAnimated, Dimensions,
-    KeyboardAvoidingView, Platform
+    TextInput, ScrollView, Alert, Modal, Animated as RNAnimated,
+    KeyboardAvoidingView, useWindowDimensions, Platform
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -16,9 +16,24 @@ import Animated, {
     withTiming,
 } from 'react-native-reanimated';
 
-const { width } = Dimensions.get('window');
+
+const SettingRow = ({ label, value, icon, onPress }: {
+    label: string;
+    value: string;
+    icon: string;
+    onPress: () => void;
+}) => (
+    <Pressable style={styles.settingRow} onPress={onPress}>
+        <View style={styles.settingContent}>
+            <Text style={styles.settingLabel}>{label}</Text>
+            <Text style={styles.settingValue} numberOfLines={1}>{value || 'Not set'}</Text>
+        </View>
+        <MaterialIcons name="chevron-right" size={24} color="rgba(255,255,255,0.3)" />
+    </Pressable>
+);
 
 export default function ProfileEditScreen() {
+    const { width } = useWindowDimensions();
     const router = useRouter();
     const { currentUser, updateProfile, activeTheme } = useApp();
 
@@ -190,20 +205,6 @@ export default function ProfileEditScreen() {
         setIsEditing(null);
     };
 
-    const SettingRow = ({ label, value, icon, onPress }: {
-        label: string;
-        value: string;
-        icon: string;
-        onPress: () => void;
-    }) => (
-        <Pressable style={styles.settingRow} onPress={onPress}>
-            <View style={styles.settingContent}>
-                <Text style={styles.settingLabel}>{label}</Text>
-                <Text style={styles.settingValue} numberOfLines={1}>{value || 'Not set'}</Text>
-            </View>
-            <MaterialIcons name="chevron-right" size={24} color="rgba(255,255,255,0.3)" />
-        </Pressable>
-    );
 
     return (
         <Animated.View 
@@ -262,7 +263,6 @@ export default function ProfileEditScreen() {
                                         onChangeText={setBio}
                                         placeholder="Enter your bio"
                                         placeholderTextColor="rgba(255,255,255,0.3)"
-                                        autoFocus
                                         maxLength={140}
                                         multiline
                                     />
@@ -297,7 +297,6 @@ export default function ProfileEditScreen() {
                                         onChangeText={setName}
                                         placeholder="Enter your name"
                                         placeholderTextColor="rgba(255,255,255,0.3)"
-                                        autoFocus
                                         maxLength={25}
                                     />
                                     <View style={styles.editActions}>
@@ -331,7 +330,6 @@ export default function ProfileEditScreen() {
                                         onChangeText={setBirthdate}
                                         placeholder="YYYY-MM-DD"
                                         placeholderTextColor="rgba(255,255,255,0.3)"
-                                        autoFocus
                                         maxLength={10}
                                     />
                                     <View style={styles.editActions}>
@@ -581,8 +579,7 @@ const styles = StyleSheet.create({
         alignItems: 'center',
     },
     fullImage: {
-        width: width,
-        height: width,
+        // Dynamic styles moved to inline or component
     },
     // Edit photo modal
     modalOverlay: {

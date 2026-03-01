@@ -26,7 +26,7 @@ export const storageService = {
             const fileName = `${folder ? folder + '/' : ''}${Date.now()}.${ext}`;
 
             // Determine content type
-            let contentType = `image/${ext}`;
+            let contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
             if (['mp4', 'mov', 'avi', 'mkv'].includes(ext)) {
                 contentType = `video/${ext === 'mov' ? 'quicktime' : ext}`;
             } else if (['m4a', 'mp3', 'wav', 'aac', 'caf'].includes(ext)) {

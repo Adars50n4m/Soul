@@ -15,18 +15,11 @@ function RootContent() {
   const router = useRouter();
   const segments = useSegments();
 
-  if (!context) {
-    return (
-      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#BC002A" />
-      </View>
-    );
-  }
-  const { activeCall, currentUser, isReady } = context;
+  const { activeCall, currentUser, isReady } = context || { activeCall: null, currentUser: null, isReady: false };
 
     // --- AUTH GUARD ---
     useEffect(() => {
-        if (!isReady) return;
+        if (!context || !isReady || !segments) return;
 
         const inAuthGroup = segments[0] === 'login';
 
@@ -41,7 +34,7 @@ function RootContent() {
 
     // --- TRAFFIC CONTROLLER FOR CALLS ---
     useEffect(() => {
-        if (!activeCall) return;
+        if (!activeCall || !segments) return;
 
         const inCallScreen = segments[0] === 'call';
 
@@ -52,7 +45,15 @@ function RootContent() {
             console.log('Call active & (Outgoing or Accepted) - Navigating to Call Screen');
             router.push('/call');
         }
-    }, [activeCall?.isAccepted, activeCall?.isIncoming, activeCall?.isMinimized, segments]);
+    }, [activeCall?.isAccepted, activeCall?.isIncoming, activeCall?.isMinimized, segments, context]);
+
+  if (!context) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color="#BC002A" />
+      </View>
+    );
+  }
 
   return (
     <View style={{ flex: 1 }}>
@@ -107,6 +108,11 @@ function RootContent() {
         }} />
         <Stack.Screen name="storage-management" options={{
           animation: 'ios_from_right',
+          headerShown: false,
+        }} />
+        <Stack.Screen name="add-status" options={{
+          presentation: 'fullScreenModal',
+          animation: 'fade',
           headerShown: false,
         }} />
         <Stack.Screen name="+not-found" />

@@ -47,10 +47,11 @@ const ProgressiveBlur = ({
                 const layerHeight = height * ratio;
                 const fade = Math.pow(1 - ratio, 1.4);
                 const opacity = Math.max(0, Math.min(1, fade));
+                const key = `${position}-${i}`;
 
                 return (
                     <BlurView
-                        key={i}
+                        key={key}
                         intensity={intensity / steps}
                         tint="dark"
                         experimentalBlurMethod="dimezisBlurView"
@@ -68,6 +69,19 @@ const ProgressiveBlur = ({
         </View>
     );
 };
+const SettingItem = ({ icon, title, subtitle, onPress, rightElement, danger, activeTheme }: any) => (
+    <Pressable style={styles.settingItem} onPress={onPress}>
+        <View style={[styles.settingIcon, { backgroundColor: danger ? 'rgba(239,68,68,0.1)' : `${activeTheme.primary}20` }]}>
+            <MaterialIcons name={icon} size={22} color={danger ? '#ef4444' : activeTheme.primary} />
+        </View>
+        <View style={styles.settingInfo}>
+            <Text style={[styles.settingTitle, danger && { color: '#ef4444' }]}>{title}</Text>
+            {subtitle && <Text style={styles.settingSubtitle}>{subtitle}</Text>}
+        </View>
+        {rightElement || <MaterialIcons name="chevron-right" size={24} color="rgba(255,255,255,0.3)" />}
+    </Pressable>
+);
+
 export default function SettingsScreen() {
     const router = useRouter();
     const { currentUser, logout, theme, activeTheme } = useApp();
@@ -212,18 +226,6 @@ export default function SettingsScreen() {
         );
     };
 
-    const SettingItem = ({ icon, title, subtitle, onPress, rightElement, danger }: any) => (
-        <Pressable style={styles.settingItem} onPress={onPress}>
-            <View style={[styles.settingIcon, { backgroundColor: danger ? 'rgba(239,68,68,0.1)' : `${activeTheme.primary}20` }]}>
-                <MaterialIcons name={icon} size={22} color={danger ? '#ef4444' : activeTheme.primary} />
-            </View>
-            <View style={styles.settingInfo}>
-                <Text style={[styles.settingTitle, danger && { color: '#ef4444' }]}>{title}</Text>
-                {subtitle && <Text style={styles.settingSubtitle}>{subtitle}</Text>}
-            </View>
-            {rightElement || <MaterialIcons name="chevron-right" size={24} color="rgba(255,255,255,0.3)" />}
-        </Pressable>
-    );
 
     return (
         <View style={styles.container}>
@@ -344,18 +346,21 @@ export default function SettingsScreen() {
                             title="Privacy"
                             subtitle="Last seen, profile photo, status"
                             onPress={() => Alert.alert('Privacy', 'Privacy settings coming soon')}
+                            activeTheme={activeTheme}
                         />
                         <SettingItem
                             icon="security"
                             title="Security"
                             subtitle="Two-step verification, fingerprint"
                             onPress={() => Alert.alert('Security', 'Security settings coming soon')}
+                            activeTheme={activeTheme}
                         />
                         <SettingItem
                             icon="notifications"
                             title="Notifications"
                             subtitle={notifications ? 'Enabled' : 'Disabled'}
                             onPress={() => setNotifications(!notifications)}
+                            activeTheme={activeTheme}
                             rightElement={
                                 <View style={[styles.toggle, notifications && { backgroundColor: activeTheme.primary }]}>
                                     <View style={[styles.toggleKnob, notifications && styles.toggleKnobActive]} />
@@ -374,12 +379,14 @@ export default function SettingsScreen() {
                             title="Storage Usage"
                             subtitle="Manage storage and media"
                             onPress={() => router.push('/storage-management' as any)}
+                            activeTheme={activeTheme}
                         />
                         <SettingItem
                             icon="cleaning-services"
                             title="Clear Cache"
                             subtitle="Free up space"
                             onPress={handleClearCache}
+                            activeTheme={activeTheme}
                         />
                     </View>
                 </View>
@@ -392,17 +399,20 @@ export default function SettingsScreen() {
                             icon="help-outline"
                             title="Help Center"
                             onPress={() => router.push('/help-center' as any)}
+                            activeTheme={activeTheme}
                         />
                         <SettingItem
                             icon="bug-report"
                             title="Report a Problem"
                             onPress={handleReportProblem}
+                            activeTheme={activeTheme}
                         />
                         <SettingItem
                             icon="info-outline"
                             title="About"
                             subtitle="Version 1.0.0"
                             onPress={() => router.push('/about' as any)}
+                            activeTheme={activeTheme}
                         />
                     </View>
                 </View>
@@ -416,6 +426,7 @@ export default function SettingsScreen() {
                             danger
                             onPress={handleLogout}
                             rightElement={null}
+                            activeTheme={activeTheme}
                         />
                     </View>
                 </View>

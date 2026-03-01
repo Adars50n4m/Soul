@@ -1,5 +1,5 @@
-import React, { useRef } from 'react';
-import { View, Image, Pressable, Dimensions, Text, StyleSheet, Animated, PanResponder, Platform } from 'react-native';
+import React, { useRef, useMemo } from 'react';
+import { View, Image, Pressable, Text, StyleSheet, Animated, PanResponder, Platform, useWindowDimensions } from 'react-native';
 import { useRouter } from 'expo-router';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -16,21 +16,21 @@ try {
     console.log("WebRTC not available in PipOverlay");
 }
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const OVERLAY_WIDTH = 110;
 const OVERLAY_HEIGHT = 160;
 
 export default function PipOverlay() {
+    const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = useWindowDimensions();
     const router = useRouter();
     const { activeCall, contacts, toggleMinimizeCall, endCall } = useApp();
     const contact = contacts.find(c => c.id === activeCall?.contactId);
 
-    const position = useRef(new Animated.ValueXY({
+    const position = useMemo(() => new Animated.ValueXY({
         x: SCREEN_WIDTH - OVERLAY_WIDTH - 20,
         y: 100
-    })).current;
+    }), [SCREEN_WIDTH]);
 
-    const panResponder = useRef(
+    const panResponder = useMemo(() =>
         PanResponder.create({
             onStartShouldSetPanResponder: () => true,
             onMoveShouldSetPanResponder: () => true,
@@ -64,8 +64,7 @@ export default function PipOverlay() {
                     friction: 8,
                 }).start();
             },
-        })
-    ).current;
+        }), [position, SCREEN_WIDTH, SCREEN_HEIGHT]);
 
     const handlePress = () => {
         if (!activeCall || !contact) return;

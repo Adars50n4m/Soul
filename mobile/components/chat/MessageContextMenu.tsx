@@ -120,7 +120,7 @@ const MessageContextMenu = ({
                 </Animated.View>
 
                 <Animated.View style={[StyleSheet.absoluteFill, containerStyle]} pointerEvents="box-none">
-                    <View style={[{
+                    <View style={{
                         position: 'absolute',
                         top: emojiBarY,
                         [isMe ? 'right' : 'left']: isMe ? SCREEN_WIDTH - layout.x - layout.width : layout.x,
@@ -131,7 +131,7 @@ const MessageContextMenu = ({
                         shadowOpacity: 0.5,
                         shadowRadius: 15,
                         elevation: 10,
-                    }]}>
+                    }}>
                         <BlurView intensity={80} tint="dark" style={[ChatStyles.contextEmojiTail, { [isMe ? 'right' : 'left']: 20 }]} experimentalBlurMethod="dimezisBlurView" />
                         
                         <BlurView intensity={80} tint="dark" style={{ flex: 1, borderRadius: 27, overflow: 'hidden', backgroundColor: 'rgba(30,30,30,0.5)' }} experimentalBlurMethod="dimezisBlurView">
@@ -163,7 +163,7 @@ const MessageContextMenu = ({
                         />
                     </View>
 
-                    <View style={[{
+                    <View style={{
                         position: 'absolute',
                         top: actionMenuY,
                         [isMe ? 'right' : 'left']: isMe ? SCREEN_WIDTH - layout.x - layout.width : layout.x,
@@ -173,7 +173,7 @@ const MessageContextMenu = ({
                         shadowOpacity: 0.5,
                         shadowRadius: 15,
                         elevation: 10,
-                    }]}>
+                    }}>
                         <BlurView intensity={80} tint="dark" style={{ borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', backgroundColor: 'rgba(30,30,30,0.5)' }} experimentalBlurMethod="dimezisBlurView">
                             <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('reply'); handleClose(); }}>
                                 <MaterialIcons name="reply" size={20} color="#fff" />

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, Modal,
     Animated, ScrollView, ActivityIndicator, TextInput,
-    Dimensions, PanResponder, KeyboardAvoidingView, Platform, Keyboard
+    useWindowDimensions, PanResponder, KeyboardAvoidingView, Platform, Keyboard
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -10,7 +10,6 @@ import { getSaavnApiUrl } from '../config/api';
 import { useApp } from '../context/AppContext';
 import { Song } from '../types';
 
-const { width, height } = Dimensions.get('window');
 
 interface MusicPlayerOverlayProps {
     isOpen: boolean;
@@ -29,6 +28,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
     onClose,
     contactName
 }) => {
+    const { width, height } = useWindowDimensions();
     const { musicState, playSong, togglePlayMusic, toggleFavoriteSong, getPlaybackPosition, seekTo } = useApp();
     const [searchResults, setSearchResults] = useState<Song[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -168,10 +168,8 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
     });
 
 
-    if (!isOpen) return null;
-
     return (
-        <Modal transparent visible={isOpen} animationType="none" onRequestClose={onClose}>
+        <Modal transparent visible={!!isOpen} animationType="none" onRequestClose={onClose}>
             {/* Backdrop with Dynamic Transparency */}
             <Animated.View style={[StyleSheet.absoluteFill, { opacity: backdropOpacity }]}>
                 {Platform.OS === 'ios' && (

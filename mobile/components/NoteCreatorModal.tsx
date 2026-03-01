@@ -1,33 +1,41 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
     View, Text, StyleSheet, Modal, Pressable, TextInput, 
-    Image, Dimensions, KeyboardAvoidingView, Platform, Keyboard 
+    Image, KeyboardAvoidingView, Platform, Keyboard, useWindowDimensions,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import Animated, { FadeIn, SlideInDown, useAnimatedStyle, withSpring, useSharedValue } from 'react-native-reanimated';
 import { useApp } from '../context/AppContext';
 
-const { width, height } = Dimensions.get('window');
 
 interface NoteCreatorModalProps {
     visible: boolean;
     onClose: () => void;
+    onSave?: (note: string) => void; // Added onSave to interface
 }
 
-export const NoteCreatorModal: React.FC<NoteCreatorModalProps> = ({ visible, onClose }) => {
+export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalProps) => {
+    const { width, height } = useWindowDimensions();
     const { currentUser, saveNote, deleteNote, activeTheme } = useApp();
     const [noteText, setNoteText] = useState(currentUser?.note || '');
+    const [prevVisible, setPrevVisible] = useState(visible);
+
+    if (visible !== prevVisible) {
+        if (visible) {
+            setNoteText(currentUser?.note || '');
+        }
+        setPrevVisible(visible);
+    }
     const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
     const inputRef = useRef<TextInput>(null);
 
     useEffect(() => {
         if (visible) {
-            setNoteText(currentUser?.note || '');
             const timer = setTimeout(() => inputRef.current?.focus(), 500);
             return () => clearTimeout(timer);
         }
-    }, [visible, currentUser?.note]);
+    }, [visible]);
 
     useEffect(() => {
         const showSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setIsKeyboardVisible(true));
@@ -83,7 +91,7 @@ export const NoteCreatorModal: React.FC<NoteCreatorModalProps> = ({ visible, onC
                             {/* Note Bubble Preview */}
                             <Animated.View 
                                 entering={FadeIn.delay(300)}
-                                style={styles.previewBubble}
+                                style={[styles.previewBubble, { width: width * 0.7 }]}
                             >
                                 <TextInput
                                     ref={inputRef}
@@ -187,12 +195,17 @@ const styles = StyleSheet.create({
         borderWidth: 4,
         borderColor: '#1a1a1a',
     },
+    notePreview: {
+        height: 120,
+        borderRadius: 12,
+        marginBottom: 24,
+        overflow: 'hidden',
+    },
     previewBubble: {
         backgroundColor: '#262626',
         padding: 20,
         paddingHorizontal: 24,
         borderRadius: 30,
-        width: width * 0.7,
         marginBottom: 20,
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.1)',

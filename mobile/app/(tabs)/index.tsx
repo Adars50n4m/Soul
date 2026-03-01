@@ -206,12 +206,13 @@ export default function HomeScreen() {
   const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' } | null>(null);
   const [isUploadingStatus, setIsUploadingStatus] = useState(false);
 
-  // Hide tab bar when media picker is open
+  // Hide tab bar when fullscreen overlays are open
   useEffect(() => {
+    const shouldHideTabBar = isMediaPickerVisible || !!statusMediaPreview || isNoteModalVisible;
     navigation.setOptions({
-      tabBarStyle: { display: isMediaPickerVisible ? 'none' : 'flex' }
+      tabBarStyle: { display: shouldHideTabBar ? 'none' : 'flex' }
     });
-  }, [isMediaPickerVisible, navigation]);
+  }, [isMediaPickerVisible, statusMediaPreview, isNoteModalVisible, navigation]);
 
   const contactStoriesMap = useMemo(() => {
     const map = new Map<string, Story[]>();
@@ -305,36 +306,38 @@ export default function HomeScreen() {
 
   const handleSendStatus = async (mediaList: { uri: string; type: 'image' | 'video' | 'audio' }[], caption?: string) => {
     if (!currentUser || mediaList.length === 0) return;
-    setIsUploadingStatus(true);
-    
-    try {
-      // For now we just process the first item, but we could loop for multiple
-      const item = mediaList[0];
-      const safeUri = item.uri;
-      let mediaUrl = safeUri;
 
-      if (safeUri.startsWith('file://')) {
-        const uploadedUrl = await storageService.uploadImage(safeUri, 'status-media', currentUser.id);
-        if (uploadedUrl) mediaUrl = uploadedUrl;
-      }
+    const item = mediaList[0];
+    if (!item) return;
+
+    try {
+      setIsUploadingStatus(true);
+      const mediaUrl = await storageService.uploadImage(item.uri, 'status-media', currentUser.id);
+      if (!mediaUrl) throw new Error('Upload failed');
 
       const expiresAt = new Date();
       expiresAt.setHours(expiresAt.getHours() + 24);
       
+      const mediaType = item.type === 'video' ? 'video' : 'image';
+      const timestamp = new Date().toISOString();
+      const expiresAtString = expiresAt.toISOString();
+
       addStatus({
         userId: currentUser.id,
         mediaUrl,
-        mediaType: item.type === 'video' ? 'video' : 'image',
-        timestamp: new Date().toISOString(),
-        expiresAt: expiresAt.toISOString(),
+        mediaType,
+        timestamp,
+        expiresAt: expiresAtString,
         caption: caption || '',
       });
       
       setStatusMediaPreview(null);
+      setIsUploadingStatus(false);
+      setIsMediaPickerVisible(false);
     } catch (error) {
       console.error('Failed to upload status:', error);
       Alert.alert('Error', 'Failed to upload status. Please try again.');
-    } finally {
+      setStatusMediaPreview(null);
       setIsUploadingStatus(false);
       setIsMediaPickerVisible(false);
     }

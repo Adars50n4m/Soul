@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import {
   View,
   Image,
@@ -11,7 +11,7 @@ import {
   StatusBar,
   ActivityIndicator,
   Animated,
-  Dimensions,
+  useWindowDimensions,
   Alert,
 } from 'react-native';
 import { MaterialIcons, Ionicons, FontAwesome5 } from '@expo/vector-icons';
@@ -20,6 +20,7 @@ import { useApp } from '../context/AppContext';
 import * as ImagePicker from 'expo-image-picker';
 import Svg, { Path } from 'react-native-svg';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
+import { CropImageModal } from './CropImageModal';
 
 interface MediaPreviewModalProps {
   visible: boolean;
@@ -31,6 +32,37 @@ interface MediaPreviewModalProps {
   mode?: 'chat' | 'status';
 }
 
+interface CanvasTextInputProps {
+  t: { id: string; text: string; x: number; y: number; color?: string };
+  activeTextId: string | null;
+  setActiveTextId: (id: string | null) => void;
+  setTextOverlays: any;
+  textOverlays: any[];
+}
+
+const CanvasTextInput = ({ t, activeTextId, setActiveTextId, setTextOverlays, textOverlays }: CanvasTextInputProps) => {
+  const inputRef = useRef<TextInput>(null);
+
+  useEffect(() => {
+    if (activeTextId === t.id) {
+      inputRef.current?.focus();
+    }
+  }, [activeTextId, t.id]);
+
+  return (
+    <TextInput
+      ref={inputRef}
+      style={[styles.canvasText, { color: t.color || '#FFFFFF' }]}
+      value={t.text}
+      onChangeText={(v) => setTextOverlays(textOverlays.map(x => x.id === t.id ? { ...x, text: v } : x))}
+      onBlur={() => setActiveTextId(null)}
+      multiline
+      editable={activeTextId === t.id}
+      pointerEvents={activeTextId === t.id ? 'auto' : 'none'}
+    />
+  );
+};
+
 export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   visible,
   mediaUri,
@@ -40,18 +72,22 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   isUploading = false,
   mode = 'chat',
 }) => {
+  const { width } = useWindowDimensions();
   const [caption, setCaption] = useState('');
   const [isTrimming, setIsTrimming] = useState(false);
   
   // Media List state for multi-sending
   const [mediaItems, setMediaItems] = useState<{ uri: string; type: 'image' | 'video' | 'audio' }[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
+  
+  // Crop modal state
+  const [showCropModal, setShowCropModal] = useState(false);
 
   const currentMedia = mediaItems[currentIndex] || { uri: mediaUri, type: mediaType };
   const currentUri = currentMedia.uri;
   const currentType = currentMedia.type;
 
-  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const fadeAnim = useMemo(() => new Animated.Value(0), []);
   const videoRef = useRef<Video>(null);
   const viewShotRef = useRef<View>(null);
   const { activeTheme } = useApp();
@@ -66,11 +102,15 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const [activeTextId, setActiveTextId] = useState<string | null>(null);
   const dragStartPos = useRef({ x: 0, y: 0 });
 
+
   useEffect(() => {
-    setMediaItems([{ uri: mediaUri, type: mediaType }]);
-    setCurrentIndex(0);
-    setPaths([]);
-    setTextOverlays([]);
+    Promise.resolve().then(() => {
+        setMediaItems([{ uri: mediaUri, type: mediaType }]);
+        setCaption('');
+        setCurrentIndex(0);
+        setPaths([]);
+        setTextOverlays([]);
+    });
   }, [mediaUri, mediaType]);
 
   useEffect(() => {
@@ -144,18 +184,28 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
     }
   };
 
-  const handleCrop = async () => {
-    if (currentType !== 'image') return;
-    Alert.alert(
-      'Crop Image',
-      'The crop feature requires a native rebuild of the app (npx expo run:ios) to install the crop library.'
+  const handleCrop = () => {
+    if (currentType !== 'image' || isUploading) return;
+    setShowCropModal(true);
+  };
+
+  const handleCropComplete = (croppedUri: string) => {
+    setMediaItems(prev =>
+      prev.map((item, idx) =>
+        idx === currentIndex ? { uri: croppedUri, type: 'image' as const } : item
+      )
     );
+    setShowCropModal(false);
+  };
+
+  const handleCropClose = () => {
+    setShowCropModal(false);
   };
 
   const handleTrimVideo = async () => {
     if (currentType !== 'video' || isUploading || isTrimming) return;
+    setIsTrimming(true);
     try {
-      setIsTrimming(true);
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Videos,
         allowsEditing: true,
@@ -171,10 +221,10 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             : item
         )));
       }
-    } catch (error) {
-      Alert.alert('Trim Failed', 'Could not trim video. Please try again.');
-    } finally {
       setIsTrimming(false);
+    } catch (error) {
+      setIsTrimming(false);
+      Alert.alert('Trim Failed', 'Could not trim video. Please try again.');
     }
   };
 
@@ -184,9 +234,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   };
 
   const handleUndoPen = () => {
-    if (paths.length > 0) {
-      setPaths(paths.slice(0, -1));
-    }
+    setPaths(prev => prev.slice(0, -1));
   };
 
   const handleRemoveCurrentMedia = () => {
@@ -207,7 +255,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const handleAddText = () => {
     setIsDrawingMode(false);
     const newId = Date.now().toString();
-    setTextOverlays([...textOverlays, { id: newId, text: 'Tap to edit', x: Dimensions.get('window').width / 2.5, y: 150, color: '#FFFFFF' }]);
+    setTextOverlays(prev => [...prev, { id: newId, text: 'Tap to edit', x: width / 2.5, y: 150, color: '#FFFFFF' }]);
     setActiveTextId(newId);
   };
 
@@ -249,7 +297,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
     if (!isDrawingMode) return;
     if (e.nativeEvent.state === State.END || e.nativeEvent.state === State.CANCELLED) {
       if (currentPath) {
-        setPaths([...paths, { path: currentPath, color: activeTheme.primary, strokeWidth: 5 }]);
+        setPaths(prev => [...prev, { path: currentPath, color: activeTheme.primary, strokeWidth: 5 }]);
         setCurrentPath('');
       }
     }
@@ -331,15 +379,12 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                               onPress={() => setActiveTextId(t.id)} 
                               onLongPress={() => handleCycleTextColor(t.id)}
                             >
-                              <TextInput
-                                style={[styles.canvasText, { color: t.color || '#FFFFFF' }]}
-                                value={t.text}
-                                onChangeText={(v) => setTextOverlays(textOverlays.map(x => x.id === t.id ? { ...x, text: v } : x))}
-                                onBlur={() => setActiveTextId(null)}
-                                autoFocus={activeTextId === t.id}
-                                multiline
-                                editable={activeTextId === t.id}
-                                pointerEvents={activeTextId === t.id ? 'auto' : 'none'}
+                              <CanvasTextInput
+                                t={t}
+                                activeTextId={activeTextId}
+                                setActiveTextId={setActiveTextId}
+                                setTextOverlays={setTextOverlays}
+                                textOverlays={textOverlays}
                               />
                             </Pressable>
                           </Animated.View>
@@ -429,9 +474,26 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           </View>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Crop Image Modal */}
+      <CropImageModal
+        visible={showCropModal}
+        imageUri={currentUri}
+        onClose={handleCropClose}
+        onCropComplete={handleCropComplete}
+      />
     </Animated.View>
   );
 };
+
+const canvasTextShadow = Platform.select({
+  ios: {
+    textShadowColor: 'rgba(0,0,0,0.75)',
+    textShadowOffset: { width: -1, height: 1 },
+    textShadowRadius: 10,
+  },
+  default: undefined,
+});
 
 const styles = StyleSheet.create({
   container: {
@@ -506,10 +568,8 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 28,
     fontWeight: 'bold',
-    textShadowColor: 'rgba(0,0,0,0.75)',
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 10,
     minWidth: 100,
+    ...canvasTextShadow,
   },
   iconActive: {
     backgroundColor: 'rgba(255,255,255,0.2)',

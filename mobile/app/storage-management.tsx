@@ -132,15 +132,18 @@ export default function StorageManagementScreen() {
                 appCacheSize,
                 dbSize,
             });
+            setLoading(false);
         } catch (e) {
             console.error('Failed to get storage info:', e);
-        } finally {
             setLoading(false);
         }
     }, []);
 
     useEffect(() => {
-        fetchStorageInfo();
+        // Defer to avoid synchronous setState warning
+        Promise.resolve().then(() => {
+            fetchStorageInfo();
+        });
     }, [fetchStorageInfo]);
 
     // Per-chat storage computation
@@ -256,9 +259,9 @@ export default function StorageManagementScreen() {
                             }
                             Alert.alert('Done', 'Cache cleared successfully');
                             fetchStorageInfo();
+                            setClearingCache(false);
                         } catch {
                             Alert.alert('Error', 'Failed to clear cache');
-                        } finally {
                             setClearingCache(false);
                         }
                     },

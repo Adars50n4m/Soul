@@ -5,7 +5,7 @@ import {
     Image,
     Pressable,
     StyleSheet,
-    Dimensions,
+    useWindowDimensions,
     TextInput,
     KeyboardAvoidingView,
     Platform,
@@ -30,7 +30,6 @@ import { Video, ResizeMode } from 'expo-av';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MORPH_EASING, MORPH_OUT_EASING } from '../constants/transitions';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 interface LayoutRect {
     x: number;
@@ -76,6 +75,7 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
     onShare,
     userInfo,
 }) => {
+    const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = useWindowDimensions();
     const insets = useSafeAreaInsets();
     const bottomOffset =
         Platform.OS === 'ios'

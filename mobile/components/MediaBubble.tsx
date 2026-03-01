@@ -16,7 +16,7 @@ import {
   Pressable,
   ActivityIndicator,
   StyleSheet,
-  Dimensions,
+  useWindowDimensions,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -26,8 +26,6 @@ import { mediaDownloadService, formatBytes } from '../services/MediaDownloadServ
 import { offlineService, MediaStatus } from '../services/LocalDBService';
 import { Message } from '../types';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const MAX_MEDIA_WIDTH = SCREEN_WIDTH * 0.65;
 
 interface MediaBubbleProps {
   message: Message;
@@ -46,6 +44,9 @@ export const MediaBubble: React.FC<MediaBubbleProps> = ({
   onMediaTap,
   theme = { primary: '#007AFF', background: '#1C1C1E', text: '#FFFFFF' }
 }) => {
+  const { width: SCREEN_WIDTH } = useWindowDimensions();
+  const MAX_MEDIA_WIDTH = SCREEN_WIDTH * 0.65;
+
   const [mediaStatus, setMediaStatus] = useState<MediaStatus>(message.mediaStatus || 'not_downloaded');
   const [localUri, setLocalUri] = useState<string | null>(message.localFileUri || null);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -101,14 +102,15 @@ export const MediaBubble: React.FC<MediaBubbleProps> = ({
       if (result.success && result.localUri) {
         setLocalUri(result.localUri);
         setMediaStatus('downloaded');
+        setIsDownloading(false);
       } else {
         setMediaStatus('download_failed');
         setError(result.error || 'Download failed');
+        setIsDownloading(false);
       }
     } catch (err) {
       setMediaStatus('download_failed');
       setError(err instanceof Error ? err.message : 'Download failed');
-    } finally {
       setIsDownloading(false);
     }
   }, [message.id, media?.url, isDownloading]);

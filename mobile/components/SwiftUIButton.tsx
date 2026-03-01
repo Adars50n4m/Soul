@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useMemo } from 'react';
 import { Animated, Pressable, Text, StyleSheet, ViewStyle, TextStyle, Platform, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { BlurView } from 'expo-blur';
@@ -22,7 +22,7 @@ export const SwiftUIButton: React.FC<SwiftUIButtonProps> = ({
     textStyle
 }) => {
     // Spring Animation Value
-    const scaleAnim = useRef(new Animated.Value(1)).current;
+    const scaleAnim = useMemo(() => new Animated.Value(1), []);
 
     const handlePressIn = () => {
         // Light haptic feedback exactly like iOS

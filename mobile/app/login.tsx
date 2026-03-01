@@ -1,7 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
     View, Text, TextInput, Pressable, StyleSheet, StatusBar,
-    Animated, Dimensions, KeyboardAvoidingView, Platform
+    Animated, KeyboardAvoidingView, Platform, useWindowDimensions
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { BlurView } from 'expo-blur';
@@ -9,9 +9,9 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
 import { SoulSyncLogo } from '../components/SoulSyncLogo';
 
-const { width, height } = Dimensions.get('window');
 
 export default function LoginScreen() {
+    const { width, height } = useWindowDimensions();
     const router = useRouter();
     const { login, currentUser } = useApp();
     const [username, setUsername] = useState('');
@@ -20,10 +20,10 @@ export default function LoginScreen() {
     const [showPassword, setShowPassword] = useState(false);
 
     // Animations
-    const fadeAnimRef = useRef(new Animated.Value(0));
-    const slideAnimRef = useRef(new Animated.Value(50));
-    const pulseAnimRef = useRef(new Animated.Value(1));
-    const shakeAnimRef = useRef(new Animated.Value(0));
+    const fadeAnim = useMemo(() => new Animated.Value(0), []);
+    const slideAnim = useMemo(() => new Animated.Value(50), []);
+    const pulseAnim = useMemo(() => new Animated.Value(1), []);
+    const shakeAnim = useMemo(() => new Animated.Value(0), []);
 
     useEffect(() => {
         // If already logged in, redirect
@@ -34,12 +34,12 @@ export default function LoginScreen() {
 
         // Entry animations
         Animated.parallel([
-            Animated.timing(fadeAnimRef.current, {
+            Animated.timing(fadeAnim, {
                 toValue: 1,
                 duration: 800,
                 useNativeDriver: true,
             }),
-            Animated.spring(slideAnimRef.current, {
+            Animated.spring(slideAnim, {
                 toValue: 0,
                 tension: 50,
                 friction: 8,
@@ -50,12 +50,12 @@ export default function LoginScreen() {
         // Pulse animation for logo
         Animated.loop(
             Animated.sequence([
-                Animated.timing(pulseAnimRef.current, {
+                Animated.timing(pulseAnim, {
                     toValue: 1.05,
                     duration: 2000,
                     useNativeDriver: true,
                 }),
-                Animated.timing(pulseAnimRef.current, {
+                Animated.timing(pulseAnim, {
                     toValue: 1,
                     duration: 2000,
                     useNativeDriver: true,
@@ -66,10 +66,10 @@ export default function LoginScreen() {
 
     const shake = () => {
         Animated.sequence([
-            Animated.timing(shakeAnimRef.current, { toValue: 10, duration: 50, useNativeDriver: true }),
-            Animated.timing(shakeAnimRef.current, { toValue: -10, duration: 50, useNativeDriver: true }),
-            Animated.timing(shakeAnimRef.current, { toValue: 10, duration: 50, useNativeDriver: true }),
-            Animated.timing(shakeAnimRef.current, { toValue: 0, duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
         ]).start();
     };
 
@@ -91,6 +91,16 @@ export default function LoginScreen() {
 
     return (
         <View style={styles.container}>
+            <View style={{
+                position: 'absolute',
+                top: height * 0.1,
+                left: width * 0.5 - 150,
+                width: 300,
+                height: 300,
+                borderRadius: 150,
+                backgroundColor: 'rgba(244, 63, 94, 0.15)',
+                opacity: 0.6,
+            }} />
             <StatusBar barStyle="light-content" />
 
             <KeyboardAvoidingView
@@ -101,10 +111,10 @@ export default function LoginScreen() {
                     style={[
                         styles.formContainer,
                         {
-                            opacity: fadeAnimRef.current,
+                            opacity: fadeAnim,
                             transform: [
-                                { translateY: slideAnimRef.current },
-                                { translateX: shakeAnimRef.current }
+                                { translateY: slideAnim },
+                                { translateX: shakeAnim }
                             ]
                         }
                     ]}
@@ -180,16 +190,6 @@ const styles = StyleSheet.create({
     container: {
         flex: 1,
         backgroundColor: '#09090b',
-    },
-    bgGlow: {
-        position: 'absolute',
-        top: height * 0.1,
-        left: width * 0.5 - 150,
-        width: 300,
-        height: 300,
-        borderRadius: 150,
-        backgroundColor: 'rgba(244, 63, 94, 0.15)',
-        opacity: 0.6,
     },
     content: {
         flex: 1,

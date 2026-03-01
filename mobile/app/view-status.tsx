@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     View, Text, Image, StyleSheet, StatusBar,
-    Dimensions, Platform, Pressable, Alert, TextInput, Keyboard, Modal, KeyboardAvoidingView, ScrollView
+    useWindowDimensions, Platform, Pressable, Alert, TextInput, Keyboard, Modal, KeyboardAvoidingView, ScrollView
 } from 'react-native';
 import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -18,7 +18,7 @@ import Animated, {
 import { Video, ResizeMode } from 'expo-av';
 import { useApp } from '../context/AppContext';
 
-const { width, height } = Dimensions.get('window');
+
 
 const StatusProgressBar = ({ idx, currentIndex, progress }: any) => {
     const style = useAnimatedStyle(() => ({
@@ -32,6 +32,7 @@ const StatusProgressBar = ({ idx, currentIndex, progress }: any) => {
 };
 
 export default function ViewStatusScreen() {
+    const { width, height } = useWindowDimensions();
     const { id, index } = useLocalSearchParams<{ id: string; index: string }>();
     const router = useRouter();
     const { statuses, contacts, currentUser, deleteStatus, addStatusView, sendChatMessage, toggleStatusLike, activeTheme } = useApp();
@@ -214,7 +215,7 @@ export default function ViewStatusScreen() {
             {/* Progress Bars */}
             <View style={styles.progressContainer}>
                 {userStatuses.map((status, idx) => (
-                    <View key={status.id || idx} style={styles.progressBar}>
+                    <View key={status.id} style={styles.progressBar}>
                         <StatusProgressBar idx={idx} currentIndex={currentIndex} progress={progress} />
                     </View>
                 ))}
@@ -250,7 +251,7 @@ export default function ViewStatusScreen() {
                     {currentStatus.mediaType === 'video' ? (
                         <Video
                             source={{ uri: currentStatus.mediaUrl }}
-                            style={styles.media}
+                            style={[styles.media, { width, height: height * 0.6 }]}
                             resizeMode={ResizeMode.CONTAIN}
                             shouldPlay
                             isLooping={false}
@@ -263,7 +264,7 @@ export default function ViewStatusScreen() {
                     ) : (
                         <Image
                             source={{ uri: currentStatus.mediaUrl }}
-                            style={styles.media}
+                            style={[styles.media, { width, height: height * 0.6 }]}
                             resizeMode="contain"
                         />
                     )}
@@ -336,11 +337,11 @@ export default function ViewStatusScreen() {
                 onRequestClose={() => setModalVisible(false)}
             >
                 <Pressable style={styles.modalOverlay} onPress={() => setModalVisible(false)}>
-                    <View style={styles.modalContent}>
+                    <View style={[styles.modalContent, { maxHeight: height * 0.6 }]}>
                         <Text style={styles.modalTitle}>Viewed By</Text>
                         <ScrollView>
-                            {viewers.length > 0 ? viewers.map((viewer, index) => (
-                                <View key={index} style={styles.viewerRow}>
+                            {viewers.length > 0 ? viewers.map((viewer: any) => (
+                                <View key={viewer.id} style={styles.viewerRow}>
                                     <Image source={{ uri: viewer.avatar }} style={styles.viewerAvatar} />
                                     <Text style={styles.viewerName}>{viewer.name}</Text>
                                 </View>
@@ -421,8 +422,6 @@ const styles = StyleSheet.create({
         alignItems: 'center',
     },
     media: {
-        width: width,
-        height: height * 0.6,
     },
     captionContainer: {
         paddingHorizontal: 24,
@@ -514,7 +513,6 @@ const styles = StyleSheet.create({
         borderTopLeftRadius: 20,
         borderTopRightRadius: 20,
         padding: 24,
-        maxHeight: height * 0.6,
     },
     modalTitle: {
         color: '#fff',

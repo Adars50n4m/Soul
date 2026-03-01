@@ -348,7 +348,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const modalAnim = useRef(new RNAnimated.Value(0)).current;
 
     // Refs
-    const flatListRef = useRef<FlatList>(null);
+    const flatListRef = useRef<any>(null);
     const hasScrolledInitial = useRef(false);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     // Derived State
@@ -511,7 +511,6 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                     playsInSilentModeIOS: true,
                 });
             } catch {}
-        } finally {
             isPreparingRecordingRef.current = false;
         }
     };
@@ -539,9 +538,16 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             if (shouldSend && uri) {
                 handleSendAudio(uri);
             }
+            await Audio.setAudioModeAsync({
+                allowsRecordingIOS: false,
+                playsInSilentModeIOS: true,
+            });
+            setIsRecordingCancelled(false);
+            recordingTranslateX.value = 0;
+            pendingStopAfterPrepareRef.current = null;
+            isStoppingRecordingRef.current = false;
         } catch (err) {
             console.error('Failed to stop recording', err);
-        } finally {
             await Audio.setAudioModeAsync({
                 allowsRecordingIOS: false,
                 playsInSilentModeIOS: true,
@@ -557,22 +563,21 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         if (!id) return;
         setIsUploading(true);
         try {
-            const publicUrl = await storageService.uploadImage(
-                uri,
-                'chat-media',
-                currentUser?.id || ''
-            );
-            if (!publicUrl) throw new Error('Upload failed');
-
             const media: Message['media'] = {
                 type: 'audio',
-                url: publicUrl,
+                url: '', // will be set after upload
             };
-
-            sendChatMessage(id, '', media);
+            try {
+                const publicUrl = await storageService.uploadImage(uri, 'chat-media', currentUser?.id || '');
+                if (!publicUrl) throw new Error('Upload failed');
+                media.url = publicUrl;
+                sendChatMessage(id, '', media);
+            } catch (err) {
+                throw err; // Re-throw to be caught by outer catch
+            }
+            setIsUploading(false);
         } catch (error: any) {
             Alert.alert('Upload Failed', error.message || 'Please try again.');
-        } finally {
             setIsUploading(false);
         }
     };
@@ -898,6 +903,28 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             onSelectToggle={handleSelectToggle}
         />
     ), [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle]);
+    
+    const renderCollectionItem = useCallback(({ item, index }: { item: any, index: number }) => (
+        <Pressable
+            style={styles.mediaCollectionTile}
+            onPress={() => {
+                if (!mediaCollection) return;
+                setMediaCollection(null);
+                setMediaViewer({
+                    messageId: mediaCollection.messageId,
+                    items: mediaCollection.items,
+                    index,
+                });
+            }}
+        >
+            <Image source={{ uri: item.url }} style={styles.mediaCollectionImage} />
+            {item.type === 'video' && (
+                <View style={styles.mediaCollectionVideoBadge}>
+                    <MaterialIcons name="play-arrow" size={18} color="#fff" />
+                </View>
+            )}
+        </Pressable>
+    ), [mediaCollection]);
 
     // Stable keyExtractor for FlatList - prevents inline function recreation
     const keyExtractor = useCallback((item: any) => item.id, []);
@@ -951,30 +978,27 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         try {
             for (let i = 0; i < mediaList.length; i++) {
                 const item = mediaList[i];
-                let publicUrl: string | null = null;
-                if (item.type === 'video') {
-                    // fallbacks handling if video
-                    publicUrl = await storageService.uploadImage(item.uri, 'chat-media', currentUser?.id || '');
-                } else if (item.type === 'audio') {
-                    publicUrl = await storageService.uploadImage(item.uri, 'chat-media', currentUser?.id || '');
-                } else {
-                    publicUrl = await storageService.uploadImage(item.uri, 'chat-media', currentUser?.id || '');
-                }
                 
-                if (!publicUrl) throw new Error('Upload failed');
-
                 const media: Message['media'] = {
                     type: item.type,
-                    url: publicUrl,
+                    url: '', // will be set after upload
                     caption: i === 0 ? caption || undefined : undefined,
                 };
+                const msgText = i === 0 ? (caption || '') : '';
 
-                await sendChatMessage(id, i === 0 ? (caption || '') : '', media);
+                try {
+                    const publicUrl = await storageService.uploadImage(item.uri, 'chat-media', currentUser?.id || '');
+                    if (!publicUrl) throw new Error('Upload failed');
+                    media.url = publicUrl;
+                    await sendChatMessage(id, msgText, media);
+                } catch (err) {
+                    throw err; // Re-throw to be caught by outer catch
+                }
             }
             setMediaPreview(null);
+            setIsUploading(false);
         } catch (error: any) {
             Alert.alert('Upload Failed', error.message || 'Please try again.');
-        } finally {
             setIsUploading(false);
         }
     };
@@ -1005,7 +1029,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                     <View style={{ flex: 1 }}>
                         <Animated.View style={[{ flex: 1 }, messagesContainerAnimatedStyle]}>
                             {/* Messages - Switched to FlatList for better inverted support on Fabric */}
-                            <FlatList
+                            <Animated.FlatList
                                 ref={flatListRef as any}
                                 data={reversedMessages}
                                 keyExtractor={keyExtractor}
@@ -1027,8 +1051,8 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
 
                             {/* iOS-style Progressive Blur Effects */}
-                            <ProgressiveBlur position="top" height={280} intensity={120} steps={28} />
-                            <ProgressiveBlur position="bottom" height={200} intensity={120} steps={28} />
+                            <ProgressiveBlur position="top" height={280} intensity={120} />
+                            <ProgressiveBlur position="bottom" height={200} intensity={120} />
 
                             {/* Typing Indicator — animated 3-dot bubble */}
                             {isTyping && (
@@ -1383,27 +1407,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                         keyExtractor={(item, index) => `${item.url}-${index}`}
                         numColumns={3}
                         contentContainerStyle={styles.mediaCollectionGrid}
-                        renderItem={({ item, index }) => (
-                            <Pressable
-                                style={styles.mediaCollectionTile}
-                                onPress={() => {
-                                    if (!mediaCollection) return;
-                                    setMediaCollection(null);
-                                    setMediaViewer({
-                                        messageId: mediaCollection.messageId,
-                                        items: mediaCollection.items,
-                                        index,
-                                    });
-                                }}
-                            >
-                                <Image source={{ uri: item.url }} style={styles.mediaCollectionImage} />
-                                {item.type === 'video' && (
-                                    <View style={styles.mediaCollectionVideoBadge}>
-                                        <MaterialIcons name="play-arrow" size={18} color="#fff" />
-                                    </View>
-                                )}
-                            </Pressable>
-                        )}
+                        renderItem={renderCollectionItem}
                     />
 
                     {!!mediaCollection?.messageId && (

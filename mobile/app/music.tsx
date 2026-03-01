@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
 import {
     View, Text, Image, TextInput, Pressable, StyleSheet, StatusBar,
-    FlatList, Dimensions, ActivityIndicator, ImageBackground,
+    FlatList, useWindowDimensions, ActivityIndicator, ImageBackground,
     KeyboardAvoidingView, Platform, Keyboard, ScrollView
 } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
@@ -22,7 +22,7 @@ import Animated, {
 import { useApp } from '../context/AppContext';
 import { getSaavnApiUrl } from '../config/api';
 
-const { width, height } = Dimensions.get('window');
+
 
 // Constants from Mockup
 const MAGENTA = '#ff0080';
@@ -176,6 +176,7 @@ const ListHeader = memo(({
 });
 
 export default function MusicScreen() {
+    const { width, height } = useWindowDimensions();
     const router = useRouter();
     const { musicState, currentUser, playSong, togglePlayMusic, toggleFavoriteSong, startCall, getPlaybackPosition, seekTo } = useApp();
 
@@ -401,7 +402,7 @@ export default function MusicScreen() {
                 if (uniqueResults.length < limit) {
                     setHasMore(false);
                 } else {
-                    setPage(currentPage + 1);
+                    setPage(prev => prev + 1);
                 }
             } else {
                 console.log('[Music] API returned success=false or no data');
@@ -418,7 +419,6 @@ export default function MusicScreen() {
             if (isMountedRef.current && newSearch && error?.name !== 'AbortError') {
                 setSongs([]);
             }
-        } finally {
             if (isMountedRef.current) {
                 setIsLoading(false);
             }
@@ -563,27 +563,30 @@ export default function MusicScreen() {
                     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
                         <View style={styles.dragHandle} />
 
-                        <FlashList
-                            data={displaySongs}
-                            renderItem={renderSongItem}
-                            keyExtractor={(item) => item.id}
-                            ListHeaderComponent={memoizedHeader}
-                            contentContainerStyle={styles.listContent}
-                            showsVerticalScrollIndicator={false}
-                            keyboardShouldPersistTaps="handled"
-                            onEndReached={loadMore}
-                            onEndReachedThreshold={0.5}
-                            estimatedItemSize={75}
-                            removeClippedSubviews={Platform.OS === 'android'}
-                            ListFooterComponent={
-                                <View style={{ height: 120, alignItems: 'center', paddingTop: 20 }}>
-                                    {isLoading && songs.length > 0 && <ActivityIndicator color={MAGENTA} />}
-                                </View>
-                            }
-                            ListEmptyComponent={isLoading && songs.length === 0 ? (
-                                <ActivityIndicator color={MAGENTA} style={{ marginTop: 20 }} />
-                            ) : null}
-                        />
+                        {FlashList && (
+                            <FlashList
+                                data={displaySongs}
+                                renderItem={renderSongItem}
+                                estimatedItemSize={80}
+                                initialNumToRender={10}
+                                keyExtractor={(item) => item.id}
+                                ListHeaderComponent={memoizedHeader}
+                                contentContainerStyle={styles.listContent}
+                                showsVerticalScrollIndicator={false}
+                                keyboardShouldPersistTaps="handled"
+                                onEndReached={loadMore}
+                                onEndReachedThreshold={0.5}
+                                removeClippedSubviews={Platform.OS === 'android'}
+                                ListFooterComponent={
+                                    <View style={{ height: 120, alignItems: 'center', paddingTop: 20 }}>
+                                        {isLoading && songs.length > 0 && <ActivityIndicator color={MAGENTA} />}
+                                    </View>
+                                }
+                                ListEmptyComponent={isLoading && songs.length === 0 ? (
+                                    <ActivityIndicator color={MAGENTA} style={{ marginTop: 20 }} />
+                                ) : null}
+                            />
+                        )}
 
 
                         {/* Liquid Tabs Navigation */}

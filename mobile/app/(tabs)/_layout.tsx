@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { Tabs } from 'expo-router';
-import { View, Pressable, StyleSheet, Dimensions, Platform } from 'react-native';
+import { View, Pressable, StyleSheet, Platform, useWindowDimensions } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -11,9 +11,6 @@ import Animated, {
   withTiming 
 } from 'react-native-reanimated';
 import { useApp } from '../../context/AppContext';
-
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const TAB_BAR_WIDTH = SCREEN_WIDTH - 32;
 
 const TabIcon = ({ name, focused, size = 24 }: { name: any; focused: boolean; size?: number }) => {
   const { activeTheme } = useApp();
@@ -39,6 +36,8 @@ const TabIcon = ({ name, focused, size = 24 }: { name: any; focused: boolean; si
 };
 
 const TabBar = ({ state, descriptors, navigation }: any) => {
+  const { width: SCREEN_WIDTH } = useWindowDimensions();
+  const TAB_BAR_WIDTH = SCREEN_WIDTH - 32;
   const { activeTheme } = useApp();
   const focusedOptions = descriptors[state.routes[state.index].key].options;
 
@@ -74,9 +73,11 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
           style={[StyleSheet.absoluteFill, { backgroundColor: 'transparent' }]}
           experimentalBlurMethod="dimezisBlurView"
         />
-        <View style={[
-          styles.tabBarOverlay,
-          { backgroundColor: Platform.OS === 'android'
+        <Animated.View style={[
+        StyleSheet.absoluteFill, // Keep it filling the container
+        {
+          width: SCREEN_WIDTH - 32, // This will be overridden by absoluteFill's left/right
+          backgroundColor: Platform.OS === 'android'
             ? 'rgba(21,21,21,0.35)'
             : 'rgba(21,21,21,0.75)' }
         ]} />
@@ -170,7 +171,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   tabBarGlassContainer: {
-    width: TAB_BAR_WIDTH,
+    width: '100%',
     borderRadius: 40,
     overflow: 'hidden',
     borderWidth: 1.5,

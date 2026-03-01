@@ -320,8 +320,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                                 try {
                                     isSeekingRef.current = true;
                                     await soundRef.current.setPositionAsync(remoteState.position);
-                                } finally {
                                     isSeekingRef.current = false;
+                                } catch (seekError) {
+                                    isSeekingRef.current = false;
+                                    // Let outer catch handle reporting if needed, or ignore seeking-interrupted
                                 }
                             }
                         }
@@ -416,9 +418,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 
             } catch (e) {
                 console.warn('[AppContext] Failed to load session', e);
-            } finally {
-                setIsReady(true);
             }
+            setIsReady(true);
         };
         loadSession();
     }, []);
@@ -606,11 +607,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Listen for new STATUSES (Sync)
         const statusSub = supabase
             .channel('public:statuses')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'statuses' }, (payload) => {
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'statuses' }, async (payload) => {
                 if (payload.eventType === 'INSERT') {
                     const newStatus = payload.new;
                     // Verify if active
                     if (new Date(newStatus.expires_at) > new Date()) {
+                        // Ensure the status owner exists in the contact list so Home can render it
+                        // next to "My status" immediately.
+                        const statusOwnerId = newStatus.user_id as string | undefined;
+                        if (statusOwnerId && currentUser?.id && statusOwnerId !== currentUser.id) {
+                            setContacts(prev => {
+                                if (prev.some(c => c.id === statusOwnerId)) return prev;
+                                return [
+                                    ...prev,
+                                    {
+                                        id: statusOwnerId,
+                                        name: 'Unknown',
+                                        avatar: '',
+                                        status: 'offline',
+                                        lastMessage: 'Start a conversation',
+                                        unreadCount: 0,
+                                    },
+                                ];
+                            });
+
+                            // Backfill profile info (non-blocking).
+                            try {
+                                const { data } = await supabase
+                                    .from('profiles')
+                                    .select('*')
+                                    .eq('id', statusOwnerId)
+                                    .single();
+                                if (data) {
+                                    setContacts(prev => prev.map(c => c.id === statusOwnerId ? {
+                                        ...c,
+                                        name: data.name || c.name,
+                                        avatar: data.avatar_url || c.avatar,
+                                        about: data.bio || c.about,
+                                        status: data.is_online ? 'online' : c.status,
+                                        lastSeen: data.last_seen || c.lastSeen,
+                                    } : c));
+                                }
+                            } catch (e) {
+                                // Non-fatal: rail can still render with placeholder.
+                            }
+                        }
                         setStatuses(prev => {
                             if (prev.find(s => s.id === newStatus.id.toString())) return prev;
                             return [mapStatusFromDB(newStatus), ...prev];
@@ -935,14 +976,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     const logout = async () => {
+        const cleanup = [];
         if (currentUser) {
-            await updatePresenceInSupabase(currentUser.id, false);
+            cleanup.push(updatePresenceInSupabase(currentUser.id, false));
         }
         if (presenceChannelRef.current) {
-            await presenceChannelRef.current.untrack();
+            cleanup.push(presenceChannelRef.current.untrack());
             supabase.removeChannel(presenceChannelRef.current);
             presenceChannelRef.current = null;
         }
+        
+        await Promise.all(cleanup);
         setCurrentUser(null);
         setOtherUser(null);
         setContacts([]);
@@ -999,9 +1043,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (!status.isLoaded) return;
 
             // Explicit play to avoid edge cases where shouldPlay state is stale.
-            await newSound.setIsMutedAsync(false);
-            await newSound.setVolumeAsync(1.0);
-            await newSound.playAsync();
+            await Promise.all([
+                newSound.setIsMutedAsync(false),
+                newSound.setVolumeAsync(1.0),
+                newSound.playAsync()
+            ]);
 
             setSound(newSound);
             setMusicState(prev => ({ ...prev, currentSong: song, isPlaying: true }));
@@ -1049,9 +1095,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } catch (e) {}
 
         if (newIsPlaying) {
-            await soundRef.current.setIsMutedAsync(false);
-            await soundRef.current.setVolumeAsync(1.0);
-            await soundRef.current.playAsync();
+            await Promise.all([
+                soundRef.current.setIsMutedAsync(false),
+                soundRef.current.setVolumeAsync(1.0),
+                soundRef.current.playAsync()
+            ]);
         }
         else await soundRef.current.pauseAsync();
 
@@ -1108,9 +1156,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (!message.toLowerCase().includes('seeking interrupted')) {
                 console.warn('[Music] seekTo failed:', e);
             }
-        } finally {
-            isSeekingRef.current = false;
         }
+        isSeekingRef.current = false;
     };
 
     const getPlaybackPosition = async (): Promise<number> => {
@@ -1772,6 +1819,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             noteTimestamp: updates.noteTimestamp !== undefined ? updates.noteTimestamp : currentUser.noteTimestamp,
         };
         setCurrentUser(updatedUser);
+        const updatedAt = new Date().toISOString();
         try {
             const { error } = await supabase.from('profiles').upsert({
                 id: currentUser.id,
@@ -1781,11 +1829,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 birthdate: updatedUser.birthdate,
                 note: updatedUser.note,
                 note_timestamp: updatedUser.noteTimestamp,
-                updated_at: new Date().toISOString(),
+                updated_at: updatedAt,
             });
-            if (error) throw error;
-            await AsyncStorage.setItem(`@profile_${currentUser.id}`, JSON.stringify(updatedUser));
-        } catch (e) { console.warn('Failed to sync profile to DB (Non-fatal):', e); }
+            if (error) {
+                console.warn('Failed to sync profile (DB):', error);
+            } else {
+                await AsyncStorage.setItem(`@profile_${currentUser.id}`, JSON.stringify(updatedUser));
+            }
+        } catch (e) { console.warn('Failed to sync profile (Exception):', e); }
     };
 
     const saveNote = async (text: string) => {

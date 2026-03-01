@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
     ScrollView, Animated, useWindowDimensions, Alert, Modal, Share, FlatList
@@ -162,6 +162,21 @@ export default function ProfileScreen() {
             runOnJS(setViewerVisible)(false);
         });
     };
+
+    const renderViewerItem = useCallback(({ item }: { item: any }) => (
+        <View style={[styles.viewerContent, { width }]}>
+            <View style={styles.morphContainer}>
+                {activeCategory === 'videos' ? (
+                    <View style={styles.videoPlaceholder}>
+                        <Image source={{ uri: item.url }} style={styles.viewerImage} resizeMode="contain" />
+                        <View style={styles.viewerPlayBtn}><Ionicons name="play" size={40} color="#fff" /></View>
+                    </View>
+                ) : (
+                    <Image source={{ uri: item.url }} style={styles.viewerImage} resizeMode="contain" />
+                )}
+            </View>
+        </View>
+    ), [width, activeCategory]);
 
     const handleDownload = (item: any) => {
         if (!item) return;
@@ -507,21 +522,7 @@ export default function ProfileScreen() {
                             }}
                             showsHorizontalScrollIndicator={false}
                             keyExtractor={(_, i) => i.toString()}
-                            renderItem={({ item }) => (
-                                <View style={[styles.viewerContent, { width }]}>
-
-                                    <View style={styles.morphContainer}>
-                                        {activeCategory === 'videos' ? (
-                                            <View style={styles.videoPlaceholder}>
-                                                <Image source={{ uri: item.url }} style={styles.viewerImage} resizeMode="contain" />
-                                                <View style={styles.viewerPlayBtn}><Ionicons name="play" size={40} color="#fff" /></View>
-                                            </View>
-                                        ) : (
-                                            <Image source={{ uri: item.url }} style={styles.viewerImage} resizeMode="contain" />
-                                        )}
-                                    </View>
-                                </View>
-                            )}
+                            renderItem={renderViewerItem}
                         />
                     </Animated2.View>
 
