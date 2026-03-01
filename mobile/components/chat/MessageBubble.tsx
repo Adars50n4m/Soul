@@ -322,48 +322,63 @@ const MessageBubble = React.memo(({
 
             <GestureDetector gesture={composedGestures}>
                 <Animated.View style={[bubbleStyle, { alignItems: isMe ? 'flex-end' : 'flex-start' }, selectionMode && !isClone && !isMe && { paddingLeft: 34 }]}>
-                    <View ref={bubbleRef} style={[
-                        ChatStyles.bubbleContainer,
-                        isMe ? ChatStyles.bubbleContainerMe : ChatStyles.bubbleContainerThem,
-                        quotedMessage && ChatStyles.bubbleContainerWithQuote,
-                        isMediaOnly && ChatStyles.bubbleContainerMediaOnly,
-                    ]}>
-                        <View style={[ChatStyles.messageContent, isMediaOnly && ChatStyles.messageContentMediaOnly]}>
-                            {quotedMessage && (
-                                <Pressable
-                                    style={[ChatStyles.quotedContainer, isMe ? ChatStyles.quotedMe : ChatStyles.quotedThem]}
-                                    onLongPress={() => {
-                                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                                        Alert.alert(
-                                            quotedMessage.sender === 'me' ? 'You' : contactName,
-                                            quotedMessage.text || '📎 Media',
-                                        );
-                                    }}
-                                >
-                                    <View style={ChatStyles.quoteContent}>
-                                        <Text numberOfLines={1} style={[ChatStyles.quoteSender, { color: isMe ? '#fff' : activeTheme.primary }]}>
-                                            {quotedMessage.sender === 'me' ? 'You' : contactName}
-                                        </Text>
-                                        <Text numberOfLines={1} style={[ChatStyles.quoteText, { color: isMe ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.5)' }]}>
-                                            {quotedMessage.text}
-                                        </Text>
-                                    </View>
-                                </Pressable>
-                            )}
+                    <View style={ChatStyles.bubbleReactionAnchor}>
+                        <View ref={bubbleRef} style={[
+                            ChatStyles.bubbleContainer,
+                            isMe ? ChatStyles.bubbleContainerMe : ChatStyles.bubbleContainerThem,
+                            quotedMessage && ChatStyles.bubbleContainerWithQuote,
+                            isMediaOnly && ChatStyles.bubbleContainerMediaOnly,
+                        ]}>
+                            <View style={[ChatStyles.messageContent, isMediaOnly && ChatStyles.messageContentMediaOnly]}>
+                                {quotedMessage && (
+                                    <Pressable
+                                        style={[ChatStyles.quotedContainer, isMe ? ChatStyles.quotedMe : ChatStyles.quotedThem]}
+                                        onLongPress={() => {
+                                            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                                            Alert.alert(
+                                                quotedMessage.sender === 'me' ? 'You' : contactName,
+                                                quotedMessage.text || '📎 Media',
+                                            );
+                                        }}
+                                    >
+                                        <View style={ChatStyles.quoteContent}>
+                                            <Text numberOfLines={1} style={[ChatStyles.quoteSender, { color: isMe ? '#fff' : activeTheme.primary }]}>
+                                                {quotedMessage.sender === 'me' ? 'You' : contactName}
+                                            </Text>
+                                            <Text numberOfLines={1} style={[ChatStyles.quoteText, { color: isMe ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.5)' }]}>
+                                                {quotedMessage.text}
+                                            </Text>
+                                        </View>
+                                    </Pressable>
+                                )}
 
-                            {renderMediaContent()}
-                            {msg.media?.caption && (
-                                <Text style={[ChatStyles.captionText, isMe ? { color: 'rgba(255,255,255,0.8)' } : { color: 'rgba(255,255,255,0.6)' }]}>
-                                    {msg.media.caption}
-                                </Text>
-                            )}
-                            {hasText && (
-                                <Text style={[ChatStyles.messageText, isMe && ChatStyles.messageTextMe]}>{msg.text}</Text>
-                            )}
+                                {renderMediaContent()}
+                                {msg.media?.caption && (
+                                    <Text style={[ChatStyles.captionText, isMe ? { color: 'rgba(255,255,255,0.8)' } : { color: 'rgba(255,255,255,0.6)' }]}>
+                                        {msg.media.caption}
+                                    </Text>
+                                )}
+                                {hasText && (
+                                    <Text style={[ChatStyles.messageText, isMe && ChatStyles.messageTextMe]}>{msg.text}</Text>
+                                )}
+                            </View>
                         </View>
+                        {msg.reactions && msg.reactions.length > 0 && (
+                            <View style={[ChatStyles.reactionsRow, isMe ? ChatStyles.reactionsRight : ChatStyles.reactionsLeft]}>
+                                {msg.reactions.map((r, idx) => (
+                                    <BlurView key={idx} intensity={40} tint="dark" style={ChatStyles.reactionPill} experimentalBlurMethod="dimezisBlurView">
+                                        <Text style={ChatStyles.reactionEmoji}>{r}</Text>
+                                    </BlurView>
+                                ))}
+                            </View>
+                        )}
                     </View>
 
-                    <View style={[ChatStyles.messageFooter, isMe ? ChatStyles.messageFooterMe : ChatStyles.messageFooterThem]}>
+                    <View style={[
+                        ChatStyles.messageFooter,
+                        isMe ? ChatStyles.messageFooterMe : ChatStyles.messageFooterThem,
+                        msg.reactions && msg.reactions.length > 0 && ChatStyles.messageFooterWithReaction
+                    ]}>
                         <Text style={ChatStyles.timestamp}>{formatTime(msg.timestamp)}</Text>
                         {isMe && (
                             <MaterialIcons
@@ -382,16 +397,6 @@ const MessageBubble = React.memo(({
                             />
                         )}
                     </View>
-
-                    {msg.reactions && msg.reactions.length > 0 && (
-                        <View style={[ChatStyles.reactionsRow, isMe ? ChatStyles.reactionsRight : ChatStyles.reactionsLeft]}>
-                            {msg.reactions.map((r, idx) => (
-                                <BlurView key={idx} intensity={40} tint="dark" style={ChatStyles.reactionPill} experimentalBlurMethod="dimezisBlurView">
-                                    <Text style={ChatStyles.reactionEmoji}>{r}</Text>
-                                </BlurView>
-                            ))}
-                        </View>
-                    )}
                 </Animated.View>
             </GestureDetector>
         </View>

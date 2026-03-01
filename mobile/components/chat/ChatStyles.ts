@@ -13,7 +13,7 @@ export const ChatStyles = StyleSheet.create({
         alignItems: 'flex-start',
     },
     messageWrapperWithReactions: {
-        marginBottom: 22,
+        marginBottom: 8,
     },
     messageWrapperMe: {
         alignItems: 'flex-end',
@@ -48,6 +48,10 @@ export const ChatStyles = StyleSheet.create({
         borderBottomLeftRadius: 14,
         borderBottomRightRadius: 14,
         backgroundColor: 'transparent',
+    },
+    bubbleReactionAnchor: {
+        position: 'relative',
+        overflow: 'visible',
     },
     bubbleContainerMe: {
         backgroundColor: '#BC002A', // Deep crimson for sender
@@ -191,6 +195,9 @@ export const ChatStyles = StyleSheet.create({
         gap: 4,
         marginTop: 4, // Tight spacing right under the bubble
     },
+    messageFooterWithReaction: {
+        marginTop: 14,
+    },
     messageFooterMe: {
         alignSelf: 'flex-end',
         marginRight: 4,
@@ -206,21 +213,22 @@ export const ChatStyles = StyleSheet.create({
     },
     reactionsRow: {
         position: 'absolute',
-        bottom: 14,
         flexDirection: 'row',
         gap: 4,
-        zIndex: 10,
+        zIndex: 12,
     },
     reactionsRight: {
-        right: 35,
+        right: 10,
+        bottom: -10,
     },
     reactionsLeft: {
-        left: 16,
+        left: 10,
+        bottom: -10,
     },
     reactionPill: {
-        borderRadius: 11,
-        paddingHorizontal: 6,
-        paddingVertical: 2,
+        borderRadius: 10,
+        paddingHorizontal: 5,
+        paddingVertical: 1,
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.2)',
         backgroundColor: 'rgba(0,0,0,0.7)',
@@ -232,7 +240,7 @@ export const ChatStyles = StyleSheet.create({
         elevation: 3,
     },
     reactionEmoji: {
-        fontSize: 13,
+        fontSize: 12,
     },
     selectionCheckboxContainer: {
         position: 'absolute',
