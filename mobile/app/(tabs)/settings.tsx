@@ -345,14 +345,14 @@ export default function SettingsScreen() {
                             icon="key"
                             title="Privacy"
                             subtitle="Last seen, profile photo, status"
-                            onPress={() => Alert.alert('Privacy', 'Privacy settings coming soon')}
+                            onPress={() => router.push('/privacy' as any)}
                             activeTheme={activeTheme}
                         />
                         <SettingItem
                             icon="security"
                             title="Security"
                             subtitle="Two-step verification, fingerprint"
-                            onPress={() => Alert.alert('Security', 'Security settings coming soon')}
+                            onPress={() => router.push('/security')}
                             activeTheme={activeTheme}
                         />
                         <SettingItem

@@ -39,27 +39,35 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
   const { width: SCREEN_WIDTH } = useWindowDimensions();
   const TAB_BAR_WIDTH = SCREEN_WIDTH - 32;
   const { activeTheme } = useApp();
-  const focusedOptions = descriptors[state.routes[state.index].key].options;
 
-  const numTabs = state.routes.length;
-  const tabWidth = (TAB_BAR_WIDTH - 24) / numTabs; // Padding considered
-  
+  // Compute safe values for hooks (hooks must always be called)
+  const numTabs = state?.routes?.length || 3;
+  const tabWidth = (TAB_BAR_WIDTH - 24) / numTabs;
+  const currentIndex = state?.index ?? 0;
+
   const translateX = useSharedValue(0);
 
   useEffect(() => {
-    translateX.value = withSpring(state.index * tabWidth, {
+    translateX.value = withSpring(currentIndex * tabWidth, {
       damping: 18,
       stiffness: 120,
       mass: 0.8
     });
-  }, [state.index, tabWidth]);
+  }, [currentIndex, tabWidth]);
 
   const indicatorStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }],
-    backgroundColor: `${activeTheme.primary}1A`, // Restored to subtle 10% dark glass tone
+    backgroundColor: `${activeTheme.primary}1A`,
   }));
 
-  if (focusedOptions.tabBarStyle?.display === 'none') {
+  // Guard: state may be undefined during initial navigation hydration
+  if (!state || !state.routes || state.routes.length === 0) {
+    return null;
+  }
+
+  const focusedOptions = descriptors[state.routes[state.index].key]?.options;
+
+  if (focusedOptions?.tabBarStyle?.display === 'none') {
     return null;
   }
 

@@ -20,7 +20,7 @@
  * Naming: {type}_{messageId}_{timestamp}.{ext}
  */
 
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 
 const BASE_DIR = FileSystem.documentDirectory + 'SoulSync/';
 

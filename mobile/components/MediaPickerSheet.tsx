@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { View, Pressable, StyleSheet, Animated, PanResponder, useWindowDimensions, FlatList, Image, Text, ActivityIndicator, Platform } from 'react-native';
+import { View, Pressable, StyleSheet, Animated, PanResponder, useWindowDimensions, FlatList, Text, ActivityIndicator, Platform } from 'react-native';
+import { Image } from 'expo-image';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import * as MediaLibrary from 'expo-media-library';
@@ -185,10 +186,10 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
             onPress={() => onSelectAsset ? onSelectAsset(asset) : onSelectGallery()}
             style={{ width: tileSize, height: tileSize, padding: 1 }}
           >
-              <Image 
-                source={{ uri: asset.uri }} 
-                style={{ width: '100%', height: '100%' }} 
-                resizeMode="cover"
+              <Image
+                source={{ uri: asset.uri }}
+                style={{ width: '100%', height: '100%' }}
+                contentFit="cover"
               />
               {asset.mediaType === 'video' && (
                   <View style={styles.videoIndicator}>

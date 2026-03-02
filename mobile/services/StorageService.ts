@@ -1,6 +1,7 @@
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import { decode } from 'base64-arraybuffer';
 import { supabase } from '../config/supabase';
+import { SUPABASE_ENDPOINT, SUPABASE_ANON_KEY, proxySupabaseUrl } from '../config/api';
 import { R2_CONFIG } from '../config/r2';
 import { r2StorageService } from './R2StorageService';
 
@@ -33,15 +34,17 @@ export const storageService = {
                 contentType = `audio/${ext === 'm4a' ? 'x-m4a' : ext}`;
             }
 
-            // Read file using expo-file-system and convert to ArrayBuffer
-            const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-            const arrayBuffer = decode(base64);
+            // Create FormData object (React Native will interpret {uri,name,type} correctly and stream the file upload)
+            const formData = new FormData();
+            formData.append('file', {
+                uri: uri,
+                name: fileName,
+                type: contentType,
+            } as any);
 
-            // Try uploading
             const { data, error } = await supabase.storage
                 .from(bucket)
-                .upload(fileName, arrayBuffer, {
-                    contentType: contentType,
+                .upload(fileName, formData, {
                     cacheControl: '3600',
                     upsert: true,
                 });
@@ -51,12 +54,11 @@ export const storageService = {
                 // This ensures the app "just works" even if storage is not set up
                 if (error.message.includes('Bucket not found') || (error as any).statusCode === '404') {
                     console.warn(`Bucket '${bucket}' missing. Falling back to Base64...`);
-                    
-                    // For videos, base64 might be too large/slow, but we keep the fallback for now
-                    return `data:${contentType};base64,${base64}`;
+                    const base64Fallback = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+                    return `data:${contentType};base64,${base64Fallback}`;
                 } else {
                     console.warn('Storage upload error:', error);
-                    throw new Error(error.message);
+                    throw new Error(`Upload failed: ${error.message}`);
                 }
             }
 
@@ -65,7 +67,7 @@ export const storageService = {
                 .from(bucket)
                 .getPublicUrl(fileName);
 
-            return publicUrl;
+            return proxySupabaseUrl(publicUrl);
         } catch (e: any) {
             console.warn('Upload failed:', e.message);
             throw e; // Re-throw to be handled by caller

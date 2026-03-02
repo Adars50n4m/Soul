@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
 import {
-    View, Text, Image, TextInput, Pressable,
+    View, Text, TextInput, Pressable,
     StyleSheet, StatusBar, Platform,
-    Modal, Animated as RNAnimated, Dimensions, Keyboard, KeyboardEvent, Alert, InteractionManager, ScrollView, FlatList
+    Modal, Animated as RNAnimated, Dimensions, Keyboard, KeyboardEvent, Alert, InteractionManager, ScrollView, FlatList,
+    Image as RNImage
 } from 'react-native';
+import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 
 import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
@@ -13,7 +15,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
 import VoiceNotePlayer from '../../components/chat/VoiceNotePlayer';
 import ProgressiveBlur from '../../components/chat/ProgressiveBlur';
@@ -283,6 +285,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const [showMusicPlayer, setShowMusicPlayer] = useState(false);
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
+    const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
 	
     const isNavigatingRef = useRef(false);
 
@@ -791,6 +794,15 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         setSelectedContextMessage(null);
     };
 
+    const handleQuotePress = useCallback((quoteId: string) => {
+        const index = reversedMessages.findIndex(m => m.id === quoteId);
+        if (index !== -1) {
+            flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
+            setHighlightedMessageId(quoteId);
+            setTimeout(() => setHighlightedMessageId(null), 1500);
+        }
+    }, [reversedMessages]);
+
     const handleSelectToggle = useCallback((msgId: string) => {
         setSelectedMessageIds(prev => {
             const next = prev.includes(msgId) ? prev.filter(i => i !== msgId) : [...prev, msgId];
@@ -901,6 +913,8 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             selectionMode={selectionMode}
             isChecked={selectedMessageIds.includes(item.id)}
             onSelectToggle={handleSelectToggle}
+            isHighlighted={highlightedMessageId === item.id}
+            onQuotePress={handleQuotePress}
         />
     ), [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle]);
     
@@ -917,7 +931,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 });
             }}
         >
-            <Image source={{ uri: item.url }} style={styles.mediaCollectionImage} />
+            <Image source={{ uri: item.url }} style={styles.mediaCollectionImage} contentFit="cover" transition={200} />
             {item.type === 'video' && (
                 <View style={styles.mediaCollectionVideoBadge}>
                     <MaterialIcons name="play-arrow" size={18} color="#fff" />
@@ -1067,20 +1081,37 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                         {/* Input Area */}
                         <Animated.View style={[styles.inputArea, inputAreaAnimatedStyle]}>
                         {/* Reply Preview */}
-                        {replyingTo && (
-                            <BlurView intensity={60} tint="dark" style={styles.replyPreview} experimentalBlurMethod="dimezisBlurView">
-                                <View style={styles.replyContent}>
-                                    <View style={[ChatStyles.quoteBar, { backgroundColor: activeTheme.primary }]} />
-                                    <View style={styles.replyTextContainer}>
-                                        <Text style={[styles.replySender, { color: activeTheme.primary }]}>REPLYING TO</Text>
-                                        <Text numberOfLines={1} style={styles.replyText}>{replyingTo.text}</Text>
+                        {replyingTo && (() => {
+                            const mediaItems = getMessageMediaItems(replyingTo);
+                            const hasMedia = mediaItems.length > 0;
+                            const firstMedia = hasMedia ? mediaItems[0] : null;
+                            let replyText = replyingTo.text;
+                            if (!replyText && hasMedia) {
+                                if (firstMedia?.type === 'video') replyText = '🎥 Video';
+                                else if (firstMedia?.type === 'audio') replyText = '🎵 Audio Voice Note';
+                                else replyText = '📷 Photo';
+                            }
+                            
+                            return (
+                                <BlurView intensity={60} tint="dark" style={styles.replyPreview} experimentalBlurMethod="dimezisBlurView">
+                                    <View style={styles.replyContent}>
+                                        <View style={[ChatStyles.quoteBar, { backgroundColor: activeTheme.primary }]} />
+                                        <View style={styles.replyTextContainer}>
+                                            <Text style={[styles.replySender, { color: activeTheme.primary }]}>
+                                                {replyingTo.sender === 'me' ? 'You' : contact.name}
+                                            </Text>
+                                            <Text numberOfLines={1} style={styles.replyText}>{replyText}</Text>
+                                        </View>
+                                        {hasMedia && firstMedia?.type !== 'audio' && firstMedia?.url && (
+                                            <Image source={{ uri: firstMedia.url }} style={styles.replyThumbnail} resizeMode="cover" />
+                                        )}
                                     </View>
-                                </View>
-                                <Pressable onPress={() => setReplyingTo(null)}>
-                                    <MaterialIcons name="close" size={20} color="rgba(255,255,255,0.5)" />
-                                </Pressable>
-                            </BlurView>
-                        )}
+                                    <Pressable onPress={() => setReplyingTo(null)} style={{ padding: 4, marginLeft: 8 }}>
+                                        <MaterialIcons name="close" size={20} color="rgba(255,255,255,0.5)" />
+                                    </Pressable>
+                                </BlurView>
+                            );
+                        })()}
                         {/* Unified Pill Container */}
                         <View style={styles.unifiedPillContainer}>
                             <BlurView intensity={100} tint="dark" style={StyleSheet.absoluteFill} experimentalBlurMethod="dimezisBlurView" />
@@ -1627,8 +1658,8 @@ const styles = StyleSheet.create({
         justifyContent: 'space-between',
         alignItems: 'center',
         overflow: 'hidden',
-        maxWidth: '85%',
-        alignSelf: 'flex-end',
+        width: '100%',
+        alignSelf: 'center',
     },
     replyContent: {
         flexDirection: 'row',
@@ -1646,6 +1677,13 @@ const styles = StyleSheet.create({
     replyText: {
         fontSize: 12,
         color: 'rgba(255,255,255,0.5)',
+    },
+    replyThumbnail: {
+        width: 44,
+        height: 44,
+        borderRadius: 6,
+        marginLeft: 10,
+        backgroundColor: 'rgba(255,255,255,0.1)',
     },
     inputArea: {
         position: 'absolute',

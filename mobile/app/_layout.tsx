@@ -7,6 +7,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AppContext, AppProvider } from '../context/AppContext';
 import PipOverlay from '../components/PipOverlay';
 import { IncomingCallModal } from '../components/IncomingCallModal';
+import { SecurityLockOverlay } from '../components/SecurityLockOverlay';
 import '../global.css';
 import { useContext } from 'react';
 
@@ -121,6 +122,7 @@ function RootContent() {
       {/* Global Overlays */}
       <IncomingCallModal />
       <PipOverlay />
+      <SecurityLockOverlay />
     </View>
   );
 }

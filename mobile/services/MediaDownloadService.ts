@@ -5,7 +5,7 @@
  * using expo-file-system for offline viewing.
  */
 
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import * as Crypto from 'expo-crypto';
 import { offlineService, MediaStatus } from './LocalDBService';
 

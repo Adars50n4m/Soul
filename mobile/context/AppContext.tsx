@@ -22,6 +22,7 @@ import { offlineService } from '../services/LocalDBService';
 import { storageService } from '../services/StorageService';
 import { backgroundSyncService } from '../services/BackgroundSyncService';
 import { soundService } from '../services/SoundService';
+import { proxySupabaseUrl } from '../config/api';
 
 if (!offlineService) {
     console.warn('[AppContext] LocalDBService failed to load. Check native modules.');
@@ -57,7 +58,24 @@ interface User {
     birthdate?: string;
     note?: string; // New field for SoulSync Notes
     noteTimestamp?: string; // ISO date string
+    privacy?: PrivacySettings;
 }
+
+export type PrivacyValue = 'everyone' | 'contacts' | 'nobody';
+
+export interface PrivacySettings {
+    lastSeen: PrivacyValue;
+    profilePhoto: PrivacyValue;
+    status: PrivacyValue;
+    readReceipts: boolean;
+}
+
+const DEFAULT_PRIVACY: PrivacySettings = {
+    lastSeen: 'everyone',
+    profilePhoto: 'everyone',
+    status: 'everyone',
+    readReceipts: true,
+};
 
 // Fixed Users - Shri and Hari
 const USERS: Record<string, User> = {
@@ -134,6 +152,20 @@ interface AppContextType {
     saveNote: (text: string) => Promise<void>;
     deleteNote: () => Promise<void>;
     clearChatMessages: (partnerId: string) => Promise<void>;
+
+    // Security
+    biometricEnabled: boolean;
+    pinEnabled: boolean;
+    pin: string | null;
+    isLocked: boolean;
+    setBiometricEnabled: (val: boolean) => Promise<void>;
+    setPinEnabled: (val: boolean) => Promise<void>;
+    setPin: (val: string | null) => Promise<void>;
+    unlockApp: () => void;
+
+    // Privacy
+    privacySettings: PrivacySettings;
+    updatePrivacy: (settings: Partial<PrivacySettings>) => Promise<void>;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -161,6 +193,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isPlaying: false,
         favorites: []
     });
+
+    // Security State
+    const [biometricEnabled, setBiometricEnabledState] = useState(false);
+    const [pinEnabled, setPinEnabledState] = useState(false);
+    const [pin, setPinState] = useState<string | null>(null);
+    const [isLocked, setIsLocked] = useState(false);
+
+    // Privacy State
+    const [privacySettings, setPrivacySettings] = useState<PrivacySettings>(DEFAULT_PRIVACY);
 
     const [sound, setSound] = useState<Audio.Sound | null>(null);
     const soundRef = useRef<Audio.Sound | null>(null);
@@ -395,13 +436,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     fetchStatusesFromSupabase(userId, other.id);
                 }
 
-                const [storedTheme, storedFavorites, storedLastSong] = await Promise.all([
+                const [storedTheme, storedFavorites, storedLastSong, storedBio, storedPinEnabled, storedPin] = await Promise.all([
                     AsyncStorage.getItem('ss_theme'),
                     AsyncStorage.getItem(userId ? `ss_favorites_${userId}` : 'ss_favorites_none'),
                     AsyncStorage.getItem(userId ? `ss_last_song_${userId}` : 'ss_last_song_none'),
+                    AsyncStorage.getItem(userId ? `ss_biometric_${userId}` : 'ss_biometric_none'),
+                    AsyncStorage.getItem(userId ? `ss_pin_enabled_${userId}` : 'ss_pin_enabled_none'),
+                    AsyncStorage.getItem(userId ? `ss_pin_${userId}` : 'ss_pin_none'),
                 ]);
 
                 if (storedTheme) setThemeState(storedTheme as ThemeName);
+                if (storedBio) setBiometricEnabledState(storedBio === 'true');
+                if (storedPinEnabled) setPinEnabledState(storedPinEnabled === 'true');
+                if (storedPin) setPinState(storedPin);
+
                 if (storedFavorites) {
                     try {
                         setMusicState(prev => ({ ...prev, favorites: JSON.parse(storedFavorites) }));
@@ -414,6 +462,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         setMusicState(prev => ({ ...prev, currentSong: song }));
                         // We don't auto-play, just set as current
                     } catch (e) {}
+                }
+
+                if (userId) {
+                    const storedPrivacy = await AsyncStorage.getItem(`ss_privacy_${userId}`);
+                    if (storedPrivacy) {
+                        try {
+                            setPrivacySettings(JSON.parse(storedPrivacy));
+                        } catch (e) {}
+                    }
                 }
                 
             } catch (e) {
@@ -433,6 +490,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             AsyncStorage.setItem(`ss_favorites_${currentUser.id}`, JSON.stringify(musicState.favorites));
         }
     }, [musicState.favorites, currentUser]);
+
+    // Security Persistence
+    useEffect(() => {
+        if (currentUser) {
+            AsyncStorage.setItem(`ss_biometric_${currentUser.id}`, JSON.stringify(biometricEnabled));
+        }
+    }, [biometricEnabled, currentUser]);
+
+    useEffect(() => {
+        if (currentUser) {
+            AsyncStorage.setItem(`ss_pin_enabled_${currentUser.id}`, JSON.stringify(pinEnabled));
+        }
+    }, [pinEnabled, currentUser]);
+
+    useEffect(() => {
+        if (currentUser) {
+            if (pin) AsyncStorage.setItem(`ss_pin_${currentUser.id}`, pin);
+            else AsyncStorage.removeItem(`ss_pin_${currentUser.id}`);
+        }
+    }, [pin, currentUser]);
 
     // Audio cleanup
     useEffect(() => {
@@ -469,14 +546,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         } : c
                     ));
 
-                    if (!isFromMe && AppState.currentState !== 'active') {
-                        notificationService.showIncomingMessage({
-                            chatId: otherUser.id,
-                            senderId: otherUser.id,
-                            senderName: otherUser.name,
-                            text: incomingMessage.media ? 'Attachment' : incomingMessage.text,
-                            messageId: incomingMessage.id
-                        });
+                    if (!isFromMe) {
+                        // Always show notification sound/banner unless we are IN the chat with this person
+                        // expo-notifications will use the system default sound
+                        if (AppState.currentState !== 'active' || (otherUser && otherUser.id !== incomingMessage.sender_id)) {
+                             const sender = contacts.find(c => c.id === incomingMessage.sender_id);
+                             notificationService.showIncomingMessage({
+                                chatId: incomingMessage.sender_id,
+                                senderId: incomingMessage.sender_id,
+                                senderName: incomingMessage.sender_id === USERS.shri.id ? USERS.shri.name : sender?.name || 'Someone',
+                                text: incomingMessage.media ? 'Attachment' : incomingMessage.text,
+                                messageId: incomingMessage.id
+                            });
+                        }
                     }
                 },
                 (messageId: string, status: ChatMessage['status'], newId?: string) => {
@@ -865,7 +947,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 setCurrentUser(prev => prev ? {
                     ...prev,
                     name: data.name || prev.name,
-                    avatar: data.avatar_url || prev.avatar,
+                    avatar: proxySupabaseUrl(data.avatar_url) || prev.avatar,
                     bio: data.bio || prev.bio,
                     note: data.note || prev.note,
                     noteTimestamp: data.note_timestamp || prev.noteTimestamp
@@ -881,11 +963,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
             if (data) {
                 // Update Memory State first
-                setOtherUser(prev => prev ? { ...prev, name: data.name, avatar: data.avatar_url, bio: data.bio } : null);
+                setOtherUser(prev => prev ? { ...prev, name: data.name, avatar: proxySupabaseUrl(data.avatar_url), bio: data.bio } : null);
                 setContacts(prev => prev.map(c => c.id === userId ? {
                     ...c,
                     name: data.name,
-                    avatar: data.avatar_url,
+                    avatar: proxySupabaseUrl(data.avatar_url),
                     about: data.bio,
                     status: data.is_online ? 'online' : 'offline',
                     lastSeen: data.last_seen || undefined,
@@ -896,7 +978,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     const updatedContact = {
                         id: userId,
                         name: data.name,
-                        avatar: data.avatar_url,
+                        avatar: proxySupabaseUrl(data.avatar_url),
                         about: data.bio,
                         status: data.is_online ? 'online' as const : 'offline' as const,
                         lastSeen: data.last_seen || undefined,
@@ -926,7 +1008,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     text: dbRow.text,
                     timestamp: dbRow.created_at, // Use ISO string for proper sorting and persistence
                     status: dbRow.status,
-                    media: dbRow.media_url ? { type: dbRow.media_type || 'image', url: dbRow.media_url, caption: dbRow.media_caption } : undefined,
+                    media: dbRow.media_url ? { type: dbRow.media_type || 'image', url: proxySupabaseUrl(dbRow.media_url), caption: dbRow.media_caption } : undefined,
                     replyTo: dbRow.reply_to_id?.toString(),
                     reactions: dbRow.reaction ? [dbRow.reaction] : [],
                 }));
@@ -1257,6 +1339,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
 
         (async () => {
+            if (offlineService) {
+                try {
+                    await offlineService.updateReaction(messageId, nextReactionValue);
+                } catch (e) {
+                    console.warn('[AppContext] Local reaction persistence error:', e);
+                }
+            }
+
             try {
                 const { error } = await supabase
                     .from('messages')
@@ -1500,8 +1590,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                                     callType: signal.callType
                                 });
                                 callService.notifyRinging(signal.roomId || signal.callId, signal.callerId, signal.callType);
-                                // Play ringtone for incoming call
-                                soundService.playRingtone();
+                                // The native call UI (displayIncomingCall) will play the system ringtone.
+                                // We no longer play a custom MP3 here to avoid double ringing.
                             }
                         }
                         break;
@@ -1872,6 +1962,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return () => { supabase.removeChannel(profileSubscription); };
     }, []);
 
+    const setBiometricEnabled = async (val: boolean) => {
+        setBiometricEnabledState(val);
+    };
+
+    const setPinEnabled = async (val: boolean) => {
+        setPinEnabledState(val);
+    };
+
+    const setPin = async (val: string | null) => {
+        setPinState(val);
+    };
+
+    const unlockApp = () => {
+        setIsLocked(false);
+    };
+
+    const updatePrivacy = async (updates: Partial<PrivacySettings>) => {
+        if (!currentUser) return;
+        
+        const newSettings = { ...privacySettings, ...updates };
+        setPrivacySettings(newSettings);
+        
+        try {
+            await AsyncStorage.setItem(`ss_privacy_${currentUser.id}`, JSON.stringify(newSettings));
+            
+            // Sync with Supabase profiles table
+            const { error } = await supabase
+                .from('profiles')
+                .update({ 
+                    privacy_settings: newSettings,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', currentUser.id);
+                
+            if (error) throw error;
+        } catch (e) {
+            console.error('[AppContext] Failed to update privacy settings:', e);
+        }
+    };
+
+    // Auto-lock logic
+    useEffect(() => {
+        const handleAppStateSecurity = (nextAppState: AppStateStatus) => {
+            if (appStateRef.current === 'active' && (nextAppState === 'inactive' || nextAppState === 'background')) {
+                // Use a small delay or check settings
+                if (biometricEnabled || pinEnabled) {
+                    setIsLocked(true);
+                }
+            }
+            appStateRef.current = nextAppState;
+        };
+
+        const subscription = AppState.addEventListener('change', handleAppStateSecurity);
+        return () => subscription.remove();
+    }, [biometricEnabled, pinEnabled]);
+
     const clearChatMessages = async (partnerId: string) => {
         if (!currentUser) return;
 
@@ -1924,7 +2070,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             seekTo, getPlaybackPosition, sendChatMessage, updateProfile, addStatusView, toggleStatusLike,
             typingUsers, sendTyping,
             saveNote, deleteNote,
-            clearChatMessages
+            clearChatMessages,
+            biometricEnabled,
+            pinEnabled,
+            pin,
+            isLocked,
+            setBiometricEnabled,
+            setPinEnabled,
+            setPin,
+            unlockApp,
+            privacySettings,
+            updatePrivacy,
         }}>
             {children}
         </AppContext.Provider >

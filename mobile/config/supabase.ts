@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { SUPABASE_ENDPOINT, SUPABASE_ANON_KEY } from './api';
+import { SUPABASE_ENDPOINT, SUPABASE_ANON_KEY, SUPABASE_URL } from './api';
 
 export const supabase = createClient(SUPABASE_ENDPOINT, SUPABASE_ANON_KEY, {
     realtime: {
@@ -11,10 +11,10 @@ export const supabase = createClient(SUPABASE_ENDPOINT, SUPABASE_ANON_KEY, {
 
 /**
  * Get the Realtime WebSocket URL for connectivity testing.
- * Derives from the active Supabase endpoint (proxy or direct).
+ * Always uses the direct Supabase URL since the proxy can't handle WebSocket.
  */
 export const getRealtimeUrl = (): string => {
-    return SUPABASE_ENDPOINT.replace('https://', 'wss://') + '/realtime/v1';
+    return SUPABASE_URL.replace('https://', 'wss://') + '/realtime/v1';
 };
 
 /**

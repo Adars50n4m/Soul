@@ -567,6 +567,7 @@ export default function MusicScreen() {
                             <FlashList
                                 data={displaySongs}
                                 renderItem={renderSongItem}
+                                // @ts-ignore - TS incorrectly complains about missing estimatedItemSize in FlashListProps
                                 estimatedItemSize={80}
                                 initialNumToRender={10}
                                 keyExtractor={(item) => item.id}

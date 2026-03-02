@@ -19,8 +19,9 @@ import Animated, {
 } from 'react-native-reanimated';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import { storageService } from '../../services/StorageService';
+import { proxySupabaseUrl } from '../../config/api';
 
 import { useApp } from '../../context/AppContext';
 import { SoulSyncLogo } from '../../components/SoulSyncLogo';
@@ -139,7 +140,7 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
         <View style={[styles.pillContent, { position: 'absolute', width: '100%', height: '100%', paddingHorizontal: 16 }]} pointerEvents="box-none">
           <View style={styles.avatarContainer}>
             <Animated.Image
-              source={{ uri: item.avatar || DEFAULT_AVATAR }}
+              source={{ uri: proxySupabaseUrl(item.avatar) || DEFAULT_AVATAR }}
               style={styles.avatar}
             />
             {item.status === 'online' && <View style={styles.onlineIndicator} />}
@@ -304,6 +305,13 @@ export default function HomeScreen() {
     }
   };
 
+  const closeModalRobustly = useCallback(() => {
+    setIsViewerVisible(false);
+    setIsMediaPickerVisible(false);
+    setIsNoteModalVisible(false);
+    setStatusMediaPreview(null);
+  }, []);
+
   const handleSendStatus = async (mediaList: { uri: string; type: 'image' | 'video' | 'audio' }[], caption?: string) => {
     if (!currentUser || mediaList.length === 0) return;
 
@@ -346,8 +354,10 @@ export default function HomeScreen() {
   const createStatus = async (result: ImagePicker.ImagePickerResult) => {
       if (!result.canceled && result.assets?.[0] && currentUser) {
           const asset = result.assets[0];
+          // Resolve ph:// URIs to readable file paths before setting preview
+          const resolvedUri = await resolveStatusAssetUri(asset);
           setStatusMediaPreview({
-            uri: asset.uri,
+            uri: resolvedUri,
             type: asset.type === 'video' ? 'video' : 'image'
           });
       }
@@ -464,9 +474,9 @@ export default function HomeScreen() {
                           <>
                             <Image source={{ uri: myStoryPreviewUrl }} style={styles.myStatusPreviewBgFull} />
                             <View style={styles.myStatusAvatarBadgeCorner}>
-                              <Image source={{ uri: currentUser?.avatar || '' }} style={styles.myStatusAvatarSmall} />
-                              <View style={styles.myStatusAddBadgeGreen}>
-                                <MaterialIcons name="add" size={14} color="#000" />
+                              <Image source={{ uri: proxySupabaseUrl(currentUser?.avatar) || '' }} style={styles.myStatusAvatarSmall} />
+                              <View style={styles.myStatusAddBadgeBlue}>
+                                <MaterialIcons name="add" size={14} color="#fff" />
                               </View>
                             </View>
                             <Text style={[styles.startStoryText, styles.myStatusTextBottom]}>My status</Text>
@@ -474,7 +484,7 @@ export default function HomeScreen() {
                         ) : (
                           <>
                             <View style={styles.myStatusAvatarContainer}>
-                              <Image source={{ uri: currentUser?.avatar || '' }} style={styles.myStatusAvatar} />
+                              <Image source={{ uri: proxySupabaseUrl(currentUser?.avatar) || '' }} style={styles.myStatusAvatar} />
                               <View style={styles.myStatusAddBadge}><MaterialIcons name="add" size={16} color="#fff" /></View>
                             </View>
                             <Text style={styles.startStoryText}>
@@ -505,7 +515,7 @@ export default function HomeScreen() {
                     )}
                     <View style={styles.statusOverlay}>
                       <View style={[styles.contactAvatarBadge, { borderColor: hasUnseen ? '#3b82f6' : 'rgba(255,255,255,0.4)' }]}>
-                        <Image source={{ uri: contact.avatar || DEFAULT_AVATAR }} style={styles.smallStatusAvatar} />
+                        <Image source={{ uri: proxySupabaseUrl(contact.avatar) || DEFAULT_AVATAR }} style={styles.smallStatusAvatar} />
                       </View>
                       <LinearGradient
                         colors={['transparent', 'rgba(0,0,0,0.8)']}
@@ -534,7 +544,7 @@ export default function HomeScreen() {
         visible={isViewerVisible}
         stories={selectedStatusContact?.stories || []}
         contactName={selectedStatusContact?.name || ''}
-        contactAvatar={selectedStatusContact?.avatar || ''}
+        contactAvatar={proxySupabaseUrl(selectedStatusContact?.avatar) || ''}
         statusOwnerId={selectedStatusContact?.id}
         currentUserId={currentUser?.id}
         onStorySeen={(storyId) => {
@@ -561,15 +571,15 @@ export default function HomeScreen() {
             caption: story.caption,
           });
         }}
-        onClose={() => setIsViewerVisible(false)}
-        onComplete={() => setIsViewerVisible(false)}
+        onClose={closeModalRobustly}
+        onComplete={closeModalRobustly}
       />
 
       <MediaPreviewModal
         visible={!!statusMediaPreview}
         mediaUri={statusMediaPreview?.uri || ''}
         mediaType={statusMediaPreview?.type || 'image'}
-        onClose={() => setStatusMediaPreview(null)}
+        onClose={closeModalRobustly}
         onSend={handleSendStatus}
         isUploading={isUploadingStatus}
         mode="status"
@@ -577,7 +587,7 @@ export default function HomeScreen() {
 
       <MediaPickerSheet
         visible={isMediaPickerVisible}
-        onClose={() => setIsMediaPickerVisible(false)}
+        onClose={closeModalRobustly}
         onSelectCamera={handleSelectCamera}
         onSelectGallery={() => handleSelectGallery()}
         onSelectAsset={handleSelectGallery}
@@ -590,7 +600,7 @@ export default function HomeScreen() {
 
       <NoteCreatorModal
         visible={isNoteModalVisible}
-        onClose={() => setIsNoteModalVisible(false)}
+        onClose={closeModalRobustly}
       />
     </Animated.View>
   );
@@ -609,7 +619,7 @@ const styles = StyleSheet.create({
   myStatusAvatarSmall: { width: 48, height: 48, borderRadius: 24, borderWidth: 2, borderColor: '#fff' },
   myStatusAvatarBadgeCorner: { position: 'absolute', top: 12, left: 12, zIndex: 5 },
   myStatusAddBadge: { position: 'absolute', bottom: -2, right: -2, width: 24, height: 24, borderRadius: 12, backgroundColor: '#3b82f6', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#262626' },
-  myStatusAddBadgeGreen: { position: 'absolute', bottom: -2, right: -2, width: 20, height: 20, borderRadius: 10, backgroundColor: '#3b82f6', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#000' },
+  myStatusAddBadgeBlue: { position: 'absolute', bottom: -2, right: -2, width: 20, height: 20, borderRadius: 10, backgroundColor: '#3b82f6', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#000' },
   startStoryText: { color: 'rgba(255,255,255,0.8)', fontSize: 13, fontWeight: '600', textAlign: 'center' },
   myStatusTextBottom: { position: 'absolute', bottom: 16, width: '100%', textAlign: 'center', color: '#fff', fontSize: 15, fontWeight: '700' },
   statusMediaBackground: { ...StyleSheet.absoluteFillObject, backgroundColor: '#1a1a1a', borderRadius: 28 },

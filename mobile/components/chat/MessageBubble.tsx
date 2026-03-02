@@ -1,5 +1,6 @@
 import React, { useRef, useCallback, useMemo } from 'react';
-import { View, Text, Pressable, Alert, Platform, Image } from 'react-native';
+import { View, Text, Pressable, Alert, Platform } from 'react-native';
+import { Image } from 'expo-image';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -7,6 +8,10 @@ import Animated, {
     useSharedValue, 
     useAnimatedStyle, 
     withSpring, 
+    withTiming,
+    withSequence,
+    withRepeat,
+    interpolateColor,
     runOnJS 
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -15,6 +20,8 @@ import { Message } from '../../types';
 import { ChatStyles } from './ChatStyles';
 import { getMessageMediaItems } from '../../utils/chatUtils';
 import VoiceNotePlayer from './VoiceNotePlayer';
+
+const AnimatedImage = Animated.createAnimatedComponent(Image);
 
 interface MessageBubbleProps {
     msg: Message;
@@ -30,6 +37,9 @@ interface MessageBubbleProps {
     selectionMode?: boolean;
     isChecked?: boolean;
     onSelectToggle?: (id: string) => void;
+    initialAspectRatio?: number | null;
+    isHighlighted?: boolean;
+    onQuotePress?: (msgId: string) => void;
 }
 
 const formatTime = (ts: string) => {
@@ -58,9 +68,12 @@ const MessageBubble = React.memo(({
   selectionMode,
   isChecked,
   onSelectToggle,
+  initialAspectRatio,
+  isHighlighted = false,
+  onQuotePress,
 }: MessageBubbleProps) => {
     const { activeTheme } = useApp();
-    const [aspectRatio, setAspectRatio] = React.useState<number | null>(null);
+    const [aspectRatio, setAspectRatio] = React.useState<number | null>(initialAspectRatio || null);
     const translateX = useSharedValue(0);
     const isMe = msg.sender === 'me';
     const bubbleRef = useRef<View>(null);
@@ -80,10 +93,10 @@ const MessageBubble = React.memo(({
     const measureAndShowMenu = useCallback((id: string) => {
         bubbleRef.current?.measure((x, y, width, height, pageX, pageY) => {
             if (onLongPress) {
-                onLongPress(id, { x: pageX, y: pageY, width, height });
+                onLongPress(id, { x: pageX, y: pageY, width, height, aspectRatio });
             }
         });
-    }, [onLongPress]);
+    }, [onLongPress, aspectRatio]);
 
     const measureAndShowMedia = useCallback((index: number, openGallery: boolean) => {
         bubbleRef.current?.measure((x, y, width, height, pageX, pageY) => {
@@ -113,7 +126,7 @@ const MessageBubble = React.memo(({
         .activeOffsetX([-10, 10])
         .failOffsetY([-10, 10])
         .onUpdate((e) => {
-            if (!isMe && !selectionMode && !isClone) {
+            if (!selectionMode && !isClone) {
                 translateX.value = Math.max(0, Math.min(e.translationX, 80));
             }
         })
@@ -136,8 +149,25 @@ const MessageBubble = React.memo(({
         ? singleTapGesture 
         : Gesture.Simultaneous(panGesture, Gesture.Exclusive(doubleTapGesture, longPressGesture));
 
+    const highlightProgress = useSharedValue(0);
+
+    React.useEffect(() => {
+        if (isHighlighted) {
+            highlightProgress.value = withSequence(
+                withTiming(1, { duration: 200 }),
+                withRepeat(withTiming(0, { duration: 400 }), 3, true),
+                withTiming(0, { duration: 200 })
+            );
+        }
+    }, [isHighlighted, highlightProgress]);
+
     const bubbleStyle = useAnimatedStyle(() => ({
-        transform: [{ translateX: translateX.value }]
+        transform: [{ translateX: translateX.value }],
+        backgroundColor: interpolateColor(
+            highlightProgress.value,
+            [0, 1],
+            ['transparent', 'rgba(255, 255, 255, 0.3)']
+        )
     }));
 
     const iconStyle = useAnimatedStyle(() => ({
@@ -147,30 +177,9 @@ const MessageBubble = React.memo(({
             { scale: Math.min(translateX.value / 60, 1) }
         ]
     }));
-    
-    // Fetch original aspect ratio for single media items
-    React.useEffect(() => {
-        if (mediaItems.length === 1 && mediaItems[0].type === 'image') {
-            const url = mediaItems[0].url;
-            Image.getSize(url, (width: number, height: number) => {
-                let ratio = width / height;
-                // Limit extreme aspect ratios for better UI
-                if (ratio < 0.5) ratio = 0.5;
-                if (ratio > 2) ratio = 2;
-                setAspectRatio(ratio);
-            }, (error) => {
-                console.warn('Could not get image size:', error);
-                setAspectRatio(1); // Fallback to 1:1
-            });
-        }
-    }, [mediaItems]);
 
     const handleMediaPress = (index: number, openGallery = false) => {
         if (!isClone) measureAndShowMedia(index, openGallery);
-    };
-
-    const handleSelectToggle = () => {
-        if (onSelectToggle) onSelectToggle(msg.id);
     };
 
     const renderMediaContent = () => {
@@ -182,6 +191,8 @@ const MessageBubble = React.memo(({
                 return <VoiceNotePlayer uri={media.url} isMe={isMe} theme={activeTheme} />;
             }
 
+            const currentAspectRatio = aspectRatio || 1;
+
             return (
                 <Pressable
                     onPress={() => handleMediaPress(0)}
@@ -189,20 +200,28 @@ const MessageBubble = React.memo(({
                         ChatStyles.mediaSurface,
                         isMe ? ChatStyles.mediaSurfaceMe : ChatStyles.mediaSurfaceThem,
                         !hasText && !hasCaption && ChatStyles.mediaSingleNoGap,
-                        { aspectRatio: aspectRatio || 1 }
+                        { aspectRatio: currentAspectRatio }
                     ]}
                 >
-                    <Animated.Image 
+                    <AnimatedImage 
                         source={{ uri: media.url }} 
                         style={[
                             ChatStyles.mediaSingle,
                             { 
-                                aspectRatio: aspectRatio || 1, 
-                                height: undefined, // allow aspect ratio to control height
+                                aspectRatio: currentAspectRatio, 
+                                height: undefined, 
                                 width: '100%',
                             }
                         ]} 
-                        resizeMode="cover"
+                        contentFit="cover"
+                        transition={200}
+                        onLoad={(e) => {
+                            const { width, height } = e.source;
+                            if (width && height) {
+                                const ratio = Math.max(0.6, Math.min(width / height, 1.8));
+                                setAspectRatio(ratio);
+                            }
+                        }}
                     />
                     {media.type === 'video' && (
                         <View style={ChatStyles.mediaTilePlayOverlay}>
@@ -231,10 +250,9 @@ const MessageBubble = React.memo(({
                                 style={ChatStyles.mediaGridTile}
                                 onPress={() => handleMediaPress(index, showMore)}
                             >
-                                <Animated.Image source={{ uri: media.url }} style={ChatStyles.mediaGridImage} />
+                                <AnimatedImage source={{ uri: media.url }} style={ChatStyles.mediaGridImage} contentFit="cover" transition={200} />
                                 {media.type === 'video' && !showMore && (
                                     <View style={ChatStyles.mediaTilePlayOverlay}>
-
                                         <MaterialIcons name="play-circle-filled" size={34} color="rgba(255,255,255,0.92)" />
                                     </View>
                                 )}
@@ -259,7 +277,7 @@ const MessageBubble = React.memo(({
                     isMe ? ChatStyles.bubbleContainerMe : ChatStyles.bubbleContainerThem,
                     quotedMessage && ChatStyles.bubbleContainerWithQuote,
                     isMediaOnly && ChatStyles.bubbleContainerMediaOnly,
-                    { maxWidth: '100%' }
+                    { width: '100%', height: '100%', maxWidth: '100%' }
                 ]}>
                     <View style={[ChatStyles.messageContent, isMediaOnly && ChatStyles.messageContentMediaOnly]}>
                         {quotedMessage && (
@@ -333,6 +351,11 @@ const MessageBubble = React.memo(({
                                 {quotedMessage && (
                                     <Pressable
                                         style={[ChatStyles.quotedContainer, isMe ? ChatStyles.quotedMe : ChatStyles.quotedThem]}
+                                        onPress={() => {
+                                            if (onQuotePress && quotedMessage) {
+                                                onQuotePress(quotedMessage.id);
+                                            }
+                                        }}
                                         onLongPress={() => {
                                             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
                                             Alert.alert(
@@ -346,9 +369,27 @@ const MessageBubble = React.memo(({
                                                 {quotedMessage.sender === 'me' ? 'You' : contactName}
                                             </Text>
                                             <Text numberOfLines={1} style={[ChatStyles.quoteText, { color: isMe ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.5)' }]}>
-                                                {quotedMessage.text}
+                                                {(() => {
+                                                    const quoteMedia = getMessageMediaItems(quotedMessage);
+                                                    const hasQuoteMedia = quoteMedia.length > 0;
+                                                    const firstQuoteMedia = hasQuoteMedia ? quoteMedia[0] : null;
+                                                    if (quotedMessage.text) return quotedMessage.text;
+                                                    if (firstQuoteMedia?.type === 'video') return '🎥 Video';
+                                                    if (firstQuoteMedia?.type === 'audio') return '🎵 Audio Voice Note';
+                                                    if (firstQuoteMedia?.type === 'image') return '📷 Photo';
+                                                    return '📎 Media';
+                                                })()}
                                             </Text>
                                         </View>
+                                        {(() => {
+                                            const quoteMedia = getMessageMediaItems(quotedMessage);
+                                            const hasQuoteMedia = quoteMedia.length > 0;
+                                            const firstQuoteMedia = hasQuoteMedia ? quoteMedia[0] : null;
+                                            if (hasQuoteMedia && firstQuoteMedia?.type !== 'audio' && firstQuoteMedia?.url) {
+                                                return <Image source={{ uri: firstQuoteMedia.url }} style={ChatStyles.quoteThumbnail} contentFit="cover" />;
+                                            }
+                                            return null;
+                                        })()}
                                     </Pressable>
                                 )}
 

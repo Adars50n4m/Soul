@@ -87,6 +87,7 @@ export const MIGRATE_DB = async (db: any) => {
       file_size             INTEGER,
       mime_type             TEXT,
       synced                INTEGER DEFAULT 0,
+      reaction              TEXT,
       FOREIGN KEY (chat_id) REFERENCES chats(id)
     );`,
 
@@ -210,6 +211,7 @@ export const MIGRATE_DB = async (db: any) => {
     "ALTER TABLE messages ADD COLUMN media_download_status TEXT DEFAULT 'none';",
     'ALTER TABLE messages ADD COLUMN synced INTEGER DEFAULT 0;',
     "ALTER TABLE messages ADD COLUMN type TEXT DEFAULT 'text';",
+    'ALTER TABLE messages ADD COLUMN reaction TEXT;',
   ];
 
   try {

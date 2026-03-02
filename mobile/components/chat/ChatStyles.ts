@@ -111,6 +111,13 @@ export const ChatStyles = StyleSheet.create({
         flexShrink: 1,
         flexWrap: 'wrap',
     },
+    quoteThumbnail: {
+        width: 36,
+        height: 36,
+        borderRadius: 4,
+        marginLeft: 8,
+        backgroundColor: 'rgba(255,255,255,0.1)',
+    },
     messageText: {
         color: '#FFFFFF', // Clean white for all text for maximum contrast against the deep solids
         fontSize: 16,

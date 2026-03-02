@@ -23,7 +23,7 @@ import { MediaPickerSheet } from '../components/MediaPickerSheet';
 import { MediaPreviewModal } from '../components/MediaPreviewModal';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import { storageService } from '../services/StorageService';
 
 const DEFAULT_AVATAR = 'https://via.placeholder.com/150';

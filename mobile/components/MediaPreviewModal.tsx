@@ -1,7 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import {
   View,
-  Image,
   Pressable,
   StyleSheet,
   TextInput,
@@ -14,6 +13,7 @@ import {
   useWindowDimensions,
   Alert,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { MaterialIcons, Ionicons, FontAwesome5 } from '@expo/vector-icons';
 import { Video, ResizeMode } from 'expo-av';
 import { useApp } from '../context/AppContext';
@@ -354,7 +354,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             <PanGestureHandler onGestureEvent={onGestureEvent} onHandlerStateChange={onHandlerStateChange} enabled={isDrawingMode}>
               <Animated.View style={StyleSheet.absoluteFill}>
                 <View ref={viewShotRef as any} collapsable={false} style={styles.viewShotCanvas}>
-                  <Image source={{ uri: currentUri }} style={styles.mediaImage} resizeMode="contain" />
+                  <Image source={{ uri: currentUri }} style={styles.mediaImage} contentFit="contain" />
                   
                   {/* Drawing & Text Canvas Overlays */}
                   {(paths.length > 0 || currentPath || textOverlays.length > 0) && (

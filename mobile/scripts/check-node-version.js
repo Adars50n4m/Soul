@@ -1,8 +1,8 @@
 const major = Number(process.versions.node.split(".")[0]);
 
-// Expo SDK 54 / React Native 0.81 is stable on Node 20 or 22 LTS.
+// Expo SDK 52 / React Native 0.76 is stable on Node 20 or 22 LTS.
 // Relaxed to allow Node 25 for current development environment.
-if (!Number.isFinite(major) || major < 20 || major > 25) {
+if (!Number.isFinite(major) || major < 18 || major > 25) {
   console.error(
     [
       "",

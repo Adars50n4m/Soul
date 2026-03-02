@@ -5,14 +5,15 @@ import {
   Pressable,
   Text,
   Modal,
-  Image,
   ActivityIndicator,
   ScrollView,
   PanResponder,
   GestureResponderEvent,
   PanResponderGestureState,
   Alert,
+  Image as RNImage
 } from 'react-native';
+import { Image } from 'expo-image';
 import { MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Action } from 'expo-image-manipulator';
@@ -92,7 +93,7 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
             setImgH(result.height);
           } else {
             console.warn('[CropModal] Manipulator returned no dimensions, falling back to getSize');
-            Image.getSize(
+            RNImage.getSize(
               result.uri,
               (w, h) => {
                 setImgW(w);
@@ -105,7 +106,7 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
         .catch((err) => {
           console.warn('[CropModal] Normalize failed, using original:', err);
           setNormalizedUri(imageUri);
-          Image.getSize(
+          RNImage.getSize(
             imageUri,
             (w, h) => { setImgW(w); setImgH(h); },
             () => {}
@@ -428,7 +429,7 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
                     { scaleX: mirrored ? -1 : 1 },
                   ],
                 }}
-                resizeMode="stretch"
+                contentFit="fill"
               />
 
               {/* Dark overlays */}

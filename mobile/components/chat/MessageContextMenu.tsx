@@ -80,36 +80,27 @@ const MessageContextMenu = ({
 
     const isMe = msg.sender === 'me';
 
-    const EMENU_GAP = 12; 
-    const AMENU_GAP = 12; 
-    const emojiBarHeight = 54;
-    const actionMenuHeight = 260;
+    const ACTION_HEIGHT = 180; // Tightened estimate
+    const EMOJI_HEIGHT = 54;
+    const UNIT_GAP = 8; // Smaller gap for a tighter look
+    const TOTAL_GAP = UNIT_GAP * 2; 
     
-    const safeTop = 110; 
-    const safeBottom = SCREEN_HEIGHT - 40; 
+    // Total footprint of the menu unit
+    const unitHeight = layout.height + EMOJI_HEIGHT + ACTION_HEIGHT + TOTAL_GAP;
+    
+    const safeTop = 60; 
+    const safeBottom = SCREEN_HEIGHT - 60; 
 
     let topAdjust = 0;
+    const startY = layout.y - EMOJI_HEIGHT - UNIT_GAP; // Start right above the original position
 
-    if (layout.y - emojiBarHeight - EMENU_GAP < safeTop) {
-        topAdjust = safeTop - (layout.y - emojiBarHeight - EMENU_GAP);
+    if (startY < safeTop) {
+        topAdjust = safeTop - startY;
+    } else if (startY + unitHeight > safeBottom) {
+        topAdjust = safeBottom - (startY + unitHeight);
     }
-    else if (layout.y + layout.height + AMENU_GAP + actionMenuHeight > safeBottom) {
-        topAdjust = safeBottom - (layout.y + layout.height + AMENU_GAP + actionMenuHeight);
-    }
 
-    const adjustedY = layout.y + topAdjust;
-    const emojiBarY = adjustedY - emojiBarHeight - EMENU_GAP;
-    const actionMenuY = adjustedY + layout.height + AMENU_GAP;
-
-    const previewBubbleFrame = Platform.select({
-        android: {
-            minWidth: layout.width + 8,
-            maxWidth: SCREEN_WIDTH * 0.82,
-        },
-        default: {
-            width: layout.width,
-        },
-    });
+    const unitY = startY + topAdjust;
 
     return (
         <Modal visible={visible} transparent animationType="none" onRequestClose={handleClose}>
@@ -122,76 +113,77 @@ const MessageContextMenu = ({
                 <Animated.View style={[StyleSheet.absoluteFill, containerStyle]} pointerEvents="box-none">
                     <View style={{
                         position: 'absolute',
-                        top: emojiBarY,
+                        top: unitY,
                         [isMe ? 'right' : 'left']: isMe ? SCREEN_WIDTH - layout.x - layout.width : layout.x,
-                        width: 270,
-                        height: 54,
-                        shadowColor: '#000',
-                        shadowOffset: { width: 0, height: 10 },
-                        shadowOpacity: 0.5,
-                        shadowRadius: 15,
-                        elevation: 10,
+                        alignItems: isMe ? 'flex-end' : 'flex-start',
+                        gap: UNIT_GAP, 
                     }}>
-                        <BlurView intensity={80} tint="dark" style={[ChatStyles.contextEmojiTail, { [isMe ? 'right' : 'left']: 20 }]} experimentalBlurMethod="dimezisBlurView" />
-                        
-                        <BlurView intensity={80} tint="dark" style={{ flex: 1, borderRadius: 27, overflow: 'hidden', backgroundColor: 'rgba(30,30,30,0.5)' }} experimentalBlurMethod="dimezisBlurView">
-                            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ alignItems: 'center', paddingHorizontal: 16, gap: 14 }}>
-                                {emojis.map(e => (
-                                    <Pressable key={e} onPress={() => { onReaction(e); handleClose(); }} style={{ paddingVertical: 10 }}>
-                                        <Text style={{ fontSize: 26 }}>{e}</Text>
+                        {/* 1. Emoji Bar */}
+                        <View style={{
+                            width: 270,
+                            height: EMOJI_HEIGHT,
+                            shadowColor: '#000',
+                            shadowOffset: { width: 0, height: 10 },
+                            shadowOpacity: 0.5,
+                            shadowRadius: 15,
+                            elevation: 10,
+                        }}>
+                            <BlurView intensity={80} tint="dark" style={[ChatStyles.contextEmojiTail, { [isMe ? 'right' : 'left']: 20 }]} experimentalBlurMethod="dimezisBlurView" />
+                            <BlurView intensity={80} tint="dark" style={{ flex: 1, borderRadius: 27, overflow: 'hidden', backgroundColor: 'rgba(30,30,30,0.5)' }} experimentalBlurMethod="dimezisBlurView">
+                                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ alignItems: 'center', paddingHorizontal: 16, gap: 14 }}>
+                                    {emojis.map(e => (
+                                        <Pressable key={e} onPress={() => { onReaction(e); handleClose(); }} style={{ paddingVertical: 10 }}>
+                                            <Text style={{ fontSize: 26 }}>{e}</Text>
+                                        </Pressable>
+                                    ))}
+                                    <Pressable style={{ backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 16, width: 32, height: 32, alignItems: 'center', justifyContent: 'center', marginLeft: 4 }} onPress={() => { }}>
+                                        <MaterialIcons name="add" size={20} color="#fff" />
                                     </Pressable>
-                                ))}
-                                <Pressable style={{ backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 16, width: 32, height: 32, alignItems: 'center', justifyContent: 'center', marginLeft: 4 }} onPress={() => { }}>
-                                    <MaterialIcons name="add" size={20} color="#fff" />
+                                </ScrollView>
+                            </BlurView>
+                        </View>
+
+                        <View style={{
+                            width: layout.width,
+                            height: layout.height,
+                        }}>
+                            <MessageBubble
+                                msg={msg}
+                                isClone
+                                contactName={contactName}
+                                initialAspectRatio={layout.aspectRatio}
+                                quotedMessage={msg.replyTo && chatMessages ? chatMessages.find((m: any) => m.id === msg.replyTo) : null}
+                            />
+                        </View>
+
+                        {/* 3. Action Menu */}
+                        <View style={{
+                            width: 200,
+                            shadowColor: '#000',
+                            shadowOffset: { width: 0, height: 10 },
+                            shadowOpacity: 0.5,
+                            shadowRadius: 15,
+                            elevation: 10,
+                        }}>
+                            <BlurView intensity={80} tint="dark" style={{ borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', backgroundColor: 'rgba(30,30,30,0.5)' }} experimentalBlurMethod="dimezisBlurView">
+                                <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('reply'); handleClose(); }}>
+                                    <MaterialIcons name="reply" size={20} color="#fff" />
+                                    <Text style={ChatStyles.contextActionText}>Reply</Text>
                                 </Pressable>
-                            </ScrollView>
-                        </BlurView>
-                    </View>
-
-                    <View style={{
-                        position: 'absolute',
-                        top: adjustedY,
-                        [isMe ? 'right' : 'left']: isMe ? SCREEN_WIDTH - layout.x - layout.width : layout.x,
-                        ...(previewBubbleFrame as object),
-                        minHeight: layout.height,
-                    }}>
-                        <MessageBubble
-                            msg={msg}
-                            isClone
-                            contactName={contactName}
-                            quotedMessage={msg.replyTo && chatMessages ? chatMessages.find((m: any) => m.id === msg.replyTo) : null}
-                        />
-                    </View>
-
-                    <View style={{
-                        position: 'absolute',
-                        top: actionMenuY,
-                        [isMe ? 'right' : 'left']: isMe ? SCREEN_WIDTH - layout.x - layout.width : layout.x,
-                        width: 200,
-                        shadowColor: '#000',
-                        shadowOffset: { width: 0, height: 10 },
-                        shadowOpacity: 0.5,
-                        shadowRadius: 15,
-                        elevation: 10,
-                    }}>
-                        <BlurView intensity={80} tint="dark" style={{ borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', backgroundColor: 'rgba(30,30,30,0.5)' }} experimentalBlurMethod="dimezisBlurView">
-                            <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('reply'); handleClose(); }}>
-                                <MaterialIcons name="reply" size={20} color="#fff" />
-                                <Text style={ChatStyles.contextActionText}>Reply</Text>
-                            </Pressable>
-                            <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('pin'); handleClose(); }}>
-                                <MaterialIcons name="push-pin" size={20} color="#fff" />
-                                <Text style={ChatStyles.contextActionText}>Pin</Text>
-                            </Pressable>
-                            <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('select'); handleClose(); }}>
-                                <MaterialIcons name="check-circle-outline" size={20} color="#fff" />
-                                <Text style={ChatStyles.contextActionText}>Select</Text>
-                            </Pressable>
-                            <Pressable style={[ChatStyles.contextActionBtn, { borderBottomWidth: 0 }]} onPress={() => { onAction('delete'); handleClose(); }}>
-                                <MaterialIcons name="delete-outline" size={20} color="#ff4444" />
-                                <Text style={[ChatStyles.contextActionText, { color: '#ff4444' }]}>Delete</Text>
-                            </Pressable>
-                        </BlurView>
+                                <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('pin'); handleClose(); }}>
+                                    <MaterialIcons name="push-pin" size={20} color="#fff" />
+                                    <Text style={ChatStyles.contextActionText}>Pin</Text>
+                                </Pressable>
+                                <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('select'); handleClose(); }}>
+                                    <MaterialIcons name="check-circle-outline" size={20} color="#fff" />
+                                    <Text style={ChatStyles.contextActionText}>Select</Text>
+                                </Pressable>
+                                <Pressable style={[ChatStyles.contextActionBtn, { borderBottomWidth: 0 }]} onPress={() => { onAction('delete'); handleClose(); }}>
+                                    <MaterialIcons name="delete-outline" size={20} color="#ff4444" />
+                                    <Text style={[ChatStyles.contextActionText, { color: '#ff4444' }]}>Delete</Text>
+                                </Pressable>
+                            </BlurView>
+                        </View>
                     </View>
                 </Animated.View>
             </View>

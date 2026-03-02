@@ -27,6 +27,7 @@ export interface QueuedMessage {
   thumbnailUri?: string;
   fileSize?: number;
   mimeType?: string;
+  reactions?: string[];
 }
 
 export interface MediaDownloadRecord {
@@ -43,8 +44,8 @@ export const offlineService = {
     const db = await getDB();
     if (!db) return;
     await db.runAsync(
-      `INSERT OR REPLACE INTO messages (id, chat_id, sender, text, media_type, media_url, media_caption, reply_to_id, timestamp, status, is_unsent, local_file_uri, media_status, thumbnail_uri, file_size, mime_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+      `INSERT OR REPLACE INTO messages (id, chat_id, sender, text, media_type, media_url, media_caption, reply_to_id, timestamp, status, is_unsent, local_file_uri, media_status, thumbnail_uri, file_size, mime_type, reaction)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
       [
         msg.id,
         chatId,
@@ -61,7 +62,8 @@ export const offlineService = {
         msg.mediaStatus ?? 'not_downloaded',
         msg.thumbnailUri ?? null,
         msg.fileSize ?? null,
-        msg.mimeType ?? null
+        msg.mimeType ?? null,
+        msg.reactions?.[0] ?? null
       ]
     );
   },
@@ -73,8 +75,8 @@ export const offlineService = {
     const db = await getDB();
     if (!db) return;
     await db.runAsync(
-      `INSERT OR REPLACE INTO messages (id, chat_id, sender, text, media_type, media_url, media_caption, reply_to_id, timestamp, status, is_unsent, retry_count, last_retry_at, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?);`,
+      `INSERT OR REPLACE INTO messages (id, chat_id, sender, text, media_type, media_url, media_caption, reply_to_id, timestamp, status, is_unsent, retry_count, last_retry_at, error_message, reaction)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?);`,
       [
         msg.id,
         chatId,
@@ -88,7 +90,8 @@ export const offlineService = {
         'pending',
         msg.retryCount ?? 0,
         msg.lastRetryAt ?? null,
-        msg.errorMessage ?? null
+        msg.errorMessage ?? null,
+        null // Queued messages usually don't originate with a reaction initially, but we supply null to match columns
       ]
     );
   },
@@ -115,7 +118,8 @@ export const offlineService = {
         url: row.media_url,
         caption: row.media_caption
       } : undefined,
-      replyTo: row.reply_to_id
+      replyTo: row.reply_to_id,
+      reactions: row.reaction ? [row.reaction] : undefined
     }));
   },
 
@@ -228,8 +232,21 @@ export const offlineService = {
       replyTo: row.reply_to_id,
       retryCount: row.retry_count ?? 0,
       lastRetryAt: row.last_retry_at,
-      errorMessage: row.error_message
+      errorMessage: row.error_message,
+      reactions: row.reaction ? [row.reaction] : undefined
     };
+  },
+
+  /**
+   * Update message reaction
+   */
+  async updateReaction(messageId: string, reaction: string | null): Promise<void> {
+    const db = await getDB();
+    if (!db) return;
+    await db.runAsync(
+      `UPDATE messages SET reaction = ? WHERE id = ?;`,
+      [reaction, messageId]
+    );
   },
 
   // --- Contacts ---
@@ -365,7 +382,8 @@ export const offlineService = {
       mediaStatus: row.media_status as MediaStatus,
       thumbnailUri: row.thumbnail_uri,
       fileSize: row.file_size,
-      mimeType: row.mime_type
+      mimeType: row.mime_type,
+      reactions: row.reaction ? [row.reaction] : undefined
     }));
   },
 

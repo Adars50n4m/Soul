@@ -13,8 +13,8 @@ export const R2_CONFIG = {
   // Get this from: R2 Dashboard → soulsync-media → Settings → Public Access
   PUBLIC_URL: process.env.EXPO_PUBLIC_R2_PUBLIC_URL || 'https://pub-XXXXXXXXXXXX.r2.dev',
 
-  // Feature flag: Hardcoded false to fallback to Supabase Storage (R2 is flaky)
-  USE_R2: false, // process.env.EXPO_PUBLIC_USE_R2 === 'true' || false,
+  // Feature flag: Use R2 for uploads to bypass ISP blocks on Supabase Storage
+  USE_R2: false,
 
   // Upload timeout in milliseconds
   UPLOAD_TIMEOUT: 30000,

@@ -6,8 +6,7 @@ import {
 import { useRouter } from 'expo-router';
 import { BlurView } from 'expo-blur';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
-import { Paths } from 'expo-file-system';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useApp } from '../context/AppContext';
 import BreakdownItem from '../components/storage/BreakdownItem';
@@ -92,8 +91,10 @@ export default function StorageManagementScreen() {
     // Fetch device + app storage info
     const fetchStorageInfo = useCallback(async () => {
         try {
-            const totalBytes = Paths.totalDiskSpace;
-            const freeBytes = Paths.availableDiskSpace;
+            const freeDiskInfo = await FileSystem.getFreeDiskStorageAsync();
+            const totalDiskInfo = await FileSystem.getTotalDiskCapacityAsync();
+            const totalBytes = totalDiskInfo;
+            const freeBytes = freeDiskInfo;
 
             let dbSize = 0;
             let appCacheSize = 0;

@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 
 export type SyncMessageStatus = 'pending' | 'sent' | 'delivered' | 'read';
 export type MediaKind = 'image' | 'video' | 'audio' | 'file';
