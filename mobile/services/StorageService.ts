@@ -1,30 +1,18 @@
 import * as FileSystem from 'expo-file-system';
-import { decode } from 'base64-arraybuffer';
+import { SERVER_URL, proxySupabaseUrl } from '../config/api';
+// Temporarily keeping supabase instance around as a fallback if needed
 import { supabase } from '../config/supabase';
-import { SUPABASE_ENDPOINT, SUPABASE_ANON_KEY, proxySupabaseUrl } from '../config/api';
-import { R2_CONFIG } from '../config/r2';
-import { r2StorageService } from './R2StorageService';
+import { offlineService } from './LocalDBService';
 
 export const storageService = {
     /**
-     * Upload media (image or video) to storage
-     * Routes to R2 or Supabase Storage based on feature flag
-     * @param uri The local file URI
-     * @param bucket The storage bucket (default: 'avatars' or 'status-media')
-     * @param folder The folder path (optional)
+     * Upload media (image or video) to storage via Server Presigned URLs
      */
     async uploadImage(uri: string, bucket: string, folder: string = ''): Promise<string | null> {
-        // Feature flag: Use R2 if enabled, otherwise use Supabase Storage
-        if (R2_CONFIG.USE_R2) {
-            console.log('📤 Using Cloudflare R2 for upload');
-            return r2StorageService.uploadImage(uri, bucket, folder);
-        }
-
-        // Original Supabase Storage implementation below
-        console.log('📤 Using Supabase Storage for upload');
+        console.log('📤 Uploading media via Server Presigned URL');
         try {
             const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
-            const fileName = `${folder ? folder + '/' : ''}${Date.now()}.${ext}`;
+            const fileName = `${folder ? folder + '-' : ''}${Date.now()}.${ext}`;
 
             // Determine content type
             let contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
@@ -34,86 +22,144 @@ export const storageService = {
                 contentType = `audio/${ext === 'm4a' ? 'x-m4a' : ext}`;
             }
 
-            // Create FormData object (React Native will interpret {uri,name,type} correctly and stream the file upload)
-            const formData = new FormData();
-            formData.append('file', {
-                uri: uri,
-                name: fileName,
-                type: contentType,
-            } as any);
+            // 1. Get Presigned PUT URL from Node Server
+            const res = await fetch(`${SERVER_URL}/api/media/presign-upload`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fileName, contentType })
+            });
 
-            const { data, error } = await supabase.storage
-                .from(bucket)
-                .upload(fileName, formData, {
-                    cacheControl: '3600',
-                    upsert: true,
-                });
-
-            if (error) {
-                // If bucket not found, fallback to Base64 Data URI
-                // This ensures the app "just works" even if storage is not set up
-                if (error.message.includes('Bucket not found') || (error as any).statusCode === '404') {
-                    console.warn(`Bucket '${bucket}' missing. Falling back to Base64...`);
-                    const base64Fallback = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-                    return `data:${contentType};base64,${base64Fallback}`;
-                } else {
-                    console.warn('Storage upload error:', error);
-                    throw new Error(`Upload failed: ${error.message}`);
-                }
+            if (!res.ok) {
+                 throw new Error('Failed to get presigned URL from server');
             }
 
-            // Get public URL
-            const { data: { publicUrl } } = supabase.storage
-                .from(bucket)
-                .getPublicUrl(fileName);
+            const { presignedUrl, key } = await res.json();
 
-            return proxySupabaseUrl(publicUrl);
+            // 2. Upload file directly to R2 using fetch()
+            const fileInfo = await FileSystem.getInfoAsync(uri);
+            if (!fileInfo.exists) throw new Error('File does not exist locally');
+
+            // Wait until it reads the Blob for R2 PUT
+            const response = await fetch(uri);
+            const blob = await response.blob();
+
+            const uploadRes = await fetch(presignedUrl, {
+                method: 'PUT',
+                body: blob,
+                headers: {
+                    'Content-Type': contentType,
+                }
+            });
+
+            if (!uploadRes.ok) {
+                 throw new Error(`R2 Upload failed: ${uploadRes.statusText}`);
+            }
+
+            // For now return the key, the app can generate download URLs later via the server
+            // or store it locally
+            return key; 
         } catch (e: any) {
             console.warn('Upload failed:', e.message);
-            throw e; // Re-throw to be handled by caller
+            
+            // Fallback to Base64 Data URI if offline or server is down
+            try {
+               const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
+               let contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+               const base64Fallback = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+               return `data:${contentType};base64,${base64Fallback}`;
+            } catch (fallbackError) {
+               throw e; 
+            }
         }
     },
 
     /**
-     * Delete multiple files from Supabase or R2 storage
-     * @param urls Array of public URLs to delete
-     * @param bucket The storage bucket
+     * Delete multiple files from storage via Server
      */
     async deleteMedia(urls: string[], bucket: string): Promise<void> {
         if (!urls || urls.length === 0) return;
 
-        console.log(`🗑️ Deleting ${urls.length} files from ${bucket}`);
-
-        // Extract filenames/paths from URLs
-        const filePaths = urls.map(url => {
-            // Case 1: Supabase Public URL
-            // https://[id].supabase.co/storage/v1/object/public/[bucket]/folder/file.jpg
-            if (url.includes('supabase.co')) {
-                const parts = url.split(`/public/${bucket}/`);
-                return parts.length > 1 ? parts[1] : url.split('/').pop() || '';
-            }
-            
-            // Case 2: Base64 or unknown (skip deletion)
-            if (url.startsWith('data:')) return null;
-
-            // Fallback: Just the last part
-            return url.split('/').pop() || null;
-        }).filter((path): path is string => path !== null);
-
-        if (filePaths.length === 0) return;
+        console.log(`🗑️ Deleting ${urls.length} media keys via server`);
+        
+        // This takes the 'keys' and tells the Node server to remove them
+        const keys = urls.map(url => url.split('/').pop()).filter((key): key is string => !!key);
+        
+        if (keys.length === 0) return;
 
         try {
-            const { error } = await supabase.storage
-                .from(bucket)
-                .remove(filePaths);
+            const res = await fetch(`${SERVER_URL}/api/media/delete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keys })
+            });
 
-            if (error) {
-                console.warn('Storage deletion error:', error.message);
+            if (res.ok) {
+                console.log(`✅ Successfully queued deletion of ${keys.length} files`);
             } else {
-                console.log(`✅ Successfully deleted ${filePaths.length} files`);
+                console.warn('Failed to delete media via server');
             }
         } catch (e) {
-            console.warn('Deletion failed:', e);
+            console.warn('Deletion API call failed:', e);
+        }
+    },
+
+    /**
+     * Get local playable/viewable URL for an R2 key (with offline caching)
+     */
+    async getMediaUrl(r2Key: string): Promise<string | null> {
+        if (!r2Key) return null;
+        
+        // Return as-is if it's already a local file or data URI
+        if (r2Key.startsWith('file://') || r2Key.startsWith('data:')) {
+            return r2Key;
+        }
+
+        try {
+            // 1. Check local SQLite cache
+            const cachedPath = await offlineService.getCachedMedia(r2Key);
+            if (cachedPath) {
+                const info = await FileSystem.getInfoAsync(cachedPath);
+                if (info.exists) {
+                    return cachedPath;
+                }
+            }
+
+            // 2. Fetch Presigned Download URL from Server
+            const res = await fetch(`${SERVER_URL}/api/media/presign-download`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: r2Key })
+            });
+
+            if (!res.ok) {
+                // If the key is already a full URL (e.g. from Supabase legacy), just return it
+                if (r2Key.startsWith('http')) return r2Key;
+                throw new Error('Failed to get download presigned URL');
+            }
+
+            const { presignedUrl } = await res.json();
+            if (!presignedUrl) return r2Key.startsWith('http') ? r2Key : null;
+
+            // 3. Download the file locally
+            const ext = r2Key.split('.').pop() || 'tmp';
+            // Sanitize filename from key
+            const safeName = r2Key.replace(/[^a-zA-Z0-9.-]/g, '_');
+            const localUri = `${FileSystem.documentDirectory}cached_media_${Date.now()}_${safeName}`;
+
+            const downloadRes = await FileSystem.downloadAsync(presignedUrl, localUri);
+            
+            if (downloadRes.status !== 200) {
+                throw new Error(`Download failed with status: ${downloadRes.status}`);
+            }
+
+            // 4. Save to Cache tracking
+            await offlineService.saveCachedMedia(r2Key, localUri, undefined, downloadRes.headers['Content-Length'] ? parseInt(downloadRes.headers['Content-Length']) : undefined);
+
+            return localUri;
+        } catch (error) {
+            console.warn(`[StorageService] Failed to fetch/cache media for ${r2Key}:`, error);
+            // Fallback: if it was a URL, return it so the UI can try streaming it directly
+            return r2Key.startsWith('http') ? r2Key : null;
         }
     }
 };

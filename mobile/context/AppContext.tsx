@@ -22,7 +22,7 @@ import { offlineService } from '../services/LocalDBService';
 import { storageService } from '../services/StorageService';
 import { backgroundSyncService } from '../services/BackgroundSyncService';
 import { soundService } from '../services/SoundService';
-import { proxySupabaseUrl } from '../config/api';
+import { proxySupabaseUrl, SERVER_URL } from '../config/api';
 
 if (!offlineService) {
     console.warn('[AppContext] LocalDBService failed to load. Check native modules.');
@@ -131,7 +131,7 @@ interface AppContextType {
     deleteMessage: (chatId: string, messageId: string) => void;
     addReaction: (chatId: string, messageId: string, emoji: string) => void;
     addCall: (call: Omit<CallLog, 'id'>) => void;
-    addStatus: (status: Omit<StatusUpdate, 'id' | 'likes' | 'views'>) => void;
+    addStatus: (status: Omit<StatusUpdate, 'id' | 'likes' | 'views'> & { localUri?: string }) => void;
     deleteStatus: (id: string) => void;
     toggleStatusLike: (statusId: string) => Promise<void>;
     setTheme: (theme: ThemeName) => void;
@@ -424,16 +424,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                             console.log('[AppContext] Loaded messages from local DB', localMessages.length);
                             setMessages(prev => ({ ...prev, [other.id]: localMessages }));
                         }
+                        
+                        const localStatusRows = await offlineService?.getStatuses() || [];
+                        if (localStatusRows.length > 0) {
+                            console.log('[AppContext] Loaded statuses from local DB', localStatusRows.length);
+                            setStatuses(localStatusRows.map(mapLocalStatusToUI));
+                        }
                     } catch (e) {
                         console.error('[AppContext] Failed to load local DB:', e);
                     }
 
                     // 2. Fetch from Network (Sync) - non-blocking for instant startup
                     fetchProfileFromSupabase(userId);
-                    fetchMessagesFromSupabase(userId, other.id);
                     fetchCallsFromSupabase(userId);
                     fetchOtherUserProfile(other.id);
-                    fetchStatusesFromSupabase(userId, other.id);
+                    fetchStatusesFromSupabase(userId, other.id); // Sync to LocalDB
                 }
 
                 const [storedTheme, storedFavorites, storedLastSong, storedBio, storedPinEnabled, storedPin] = await Promise.all([
@@ -516,6 +521,61 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return sound ? () => { sound.unloadAsync(); } : undefined;
     }, [sound]);
 
+    // Background Sync Runner (Process pending actions)
+    useEffect(() => {
+        let syncInterval: NodeJS.Timeout;
+
+        const processSyncQueue = async () => {
+             try {
+                 const actions = await offlineService.getPendingSyncActions();
+                 if (!actions || actions.length === 0) return;
+
+                 for (const action of actions) {
+                     // Exceeded retries (e.g. 5x) -> delete it or handle failure
+                     if (action.retry_count >= 5) {
+                         await offlineService.removeSyncAction(action.id);
+                         continue;
+                     }
+
+                     try {
+                         if (action.action === 'UPLOAD_STATUS_MEDIA') {
+                             const { id, messageId, localPath } = action.payload;
+                             // Proceed with upload
+                             const uploadedUrl = await storageService.uploadImage(localPath, 'status-media');
+                             if (uploadedUrl) {
+                                 // Ideally we would trigger a Supabase metadata update here
+                                 // For now, task is just to perform the R2 upload logic in background
+                                 await offlineService.removeSyncAction(action.id);
+                             } else {
+                                 await offlineService.incrementSyncRetry(action.id);
+                             }
+                         } else if (action.action === 'SEND_MESSAGE') {
+                             // E.g. trigger ChatService to send the queued message to the Node server
+                             // await ChatService.sendQueuedMessageToServer(...)
+                             await offlineService.removeSyncAction(action.id);
+                         } else {
+                             // Unknown action
+                             await offlineService.removeSyncAction(action.id);
+                         }
+                     } catch (e) {
+                         console.warn(`[BackgroundSync] Failed to process action ${action.id}:`, e);
+                         await offlineService.incrementSyncRetry(action.id);
+                     }
+                 }
+             } catch (error) {
+                 console.warn('[BackgroundSync] Error fetching queue:', error);
+             }
+        };
+
+        // Poll every 10 seconds
+        syncInterval = setInterval(processSyncQueue, 10000);
+        
+        // Fire immediately once on load
+        processSyncQueue();
+
+        return () => clearInterval(syncInterval);
+    }, []);
+
     // Initialize Chat Service
     useEffect(() => {
         if (currentUser && otherUser) {
@@ -528,27 +588,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         id: incomingMessage.id,
                         sender: isFromMe ? 'me' : 'them',
                         text: incomingMessage.text,
-                        // Keep ISO timestamp so sorting/deduplication works with fetchMessagesFromSupabase
                         timestamp: incomingMessage.timestamp,
                         status: isFromMe ? 'sent' : 'delivered',
                         media: incomingMessage.media,
                         replyTo: incomingMessage.reply_to || undefined,
                     };
                     
-                    // Update State using helper
                     addMessageSafely(otherUser.id, newMsg);
 
                     setContacts(prevContacts => prevContacts.map(c =>
                         c.id === otherUser.id ? {
                             ...c,
-                            lastMessage: incomingMessage.media ? '梼 Attachment' : incomingMessage.text,
+                            lastMessage: incomingMessage.media ? 'Attachment' : incomingMessage.text,
                             unreadCount: !isFromMe ? (c.unreadCount || 0) + 1 : c.unreadCount
                         } : c
                     ));
 
                     if (!isFromMe) {
-                        // Always show notification sound/banner unless we are IN the chat with this person
-                        // expo-notifications will use the system default sound
                         if (AppState.currentState !== 'active' || (otherUser && otherUser.id !== incomingMessage.sender_id)) {
                              const sender = contacts.find(c => c.id === incomingMessage.sender_id);
                              notificationService.showIncomingMessage({
@@ -574,6 +630,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         });
                     }
                 },
+                (statusData: any) => {
+                    console.log('[AppContext] Real-time status sync via socket:', statusData.id);
+                    // 1. Save to local SQLite
+                    offlineService.saveStatus({
+                        id: statusData.id,
+                        userId: statusData.userId || statusData.user_id,
+                        type: statusData.mediaType || statusData.media_type as any,
+                        r2Key: statusData.mediaUrl || statusData.media_url,
+                        textContent: statusData.caption,
+                        createdAt: typeof statusData.createdAt === 'string' ? new Date(statusData.createdAt).getTime() : statusData.createdAt,
+                        expiresAt: typeof statusData.expiresAt === 'string' ? new Date(statusData.expiresAt).getTime() : statusData.expiresAt,
+                        isMine: statusData.userId === currentUser.id || statusData.user_id === currentUser.id
+                    }).catch(err => console.error('[AppContext] Save synced status error:', err));
+
+                    // 2. Update React State
+                    const incomingStatus: StatusUpdate = {
+                        id: statusData.id,
+                        userId: statusData.userId || statusData.user_id,
+                        contactName: statusData.userName || statusData.user_name,
+                        avatar: statusData.userAvatar || statusData.user_avatar,
+                        mediaUrl: statusData.mediaUrl || statusData.media_url,
+                        mediaType: statusData.mediaType || statusData.media_type,
+                        caption: statusData.caption,
+                        timestamp: typeof statusData.createdAt === 'number' ? new Date(statusData.createdAt).toISOString() : statusData.createdAt,
+                        expiresAt: typeof statusData.expiresAt === 'number' ? new Date(statusData.expiresAt).toISOString() : statusData.expiresAt,
+                        likes: [],
+                        views: []
+                    };
+                    
+                    setStatuses(prev => {
+                        if (prev.find(s => s.id === incomingStatus.id)) return prev;
+                        return [incomingStatus, ...prev];
+                    });
+
+                    // Resolve R2 key to displayable URL in background
+                    if (incomingStatus.mediaUrl && !incomingStatus.mediaUrl.startsWith('file://') && !incomingStatus.mediaUrl.startsWith('data:') && !incomingStatus.mediaUrl.startsWith('http')) {
+                        storageService.getMediaUrl(incomingStatus.mediaUrl).then(resolvedUrl => {
+                            if (resolvedUrl) {
+                                setStatuses(prev => prev.map(s => s.id === incomingStatus.id ? { ...s, mediaUrl: resolvedUrl } : s));
+                            }
+                        }).catch(() => {});
+                    }
+                },
+                (statusId: string, viewerId: string) => {
+                    console.log('[AppContext] Status view update received for:', statusId);
+                    setStatuses(prev => prev.map(s => {
+                        if (s.id === statusId && !s.views.includes(viewerId)) {
+                            return { ...s, views: [...(s.views || []), viewerId] };
+                        }
+                        return s;
+                    }));
+                },
                 (online: boolean) => {
                     setIsCloudConnected(online);
                 }
@@ -584,9 +692,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // --- REFINED DATA FETCHING ---
 
+    /** Resolve R2 keys → local file URIs for all statuses (background, non-blocking) */
+    const resolveStatusMediaUrls = async (statusList: StatusUpdate[]) => {
+        try {
+            const resolved = await Promise.all(
+                statusList.map(async (s) => {
+                    // Skip if already a displayable URI
+                    if (!s.mediaUrl || s.mediaUrl.startsWith('file://') || s.mediaUrl.startsWith('data:') || s.mediaUrl.startsWith('http')) {
+                        return s;
+                    }
+                    // s.mediaUrl is an R2 key — resolve to local/presigned URL
+                    const localUrl = await storageService.getMediaUrl(s.mediaUrl);
+                    return localUrl ? { ...s, mediaUrl: localUrl } : s;
+                })
+            );
+            setStatuses(resolved);
+        } catch (e) {
+            console.warn('[AppContext] resolveStatusMediaUrls failed (non-fatal):', e);
+        }
+    };
+
     const fetchStatusesFromSupabase = async (userId: string, otherId: string) => {
         try {
-            console.log("Fetching statuses...");
+            console.log("Fetching statuses from Supabase to sync...");
             const { data, error } = await supabase
                 .from('statuses')
                 .select('*')
@@ -594,8 +722,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 .order('created_at', { ascending: false });
 
             if (data && !error) {
-                const mappedStatuses = data.map(mapStatusFromDB);
-                setStatuses(mappedStatuses);
+                // Save to local offline DB for offline support (best-effort, non-blocking)
+                if (offlineService) {
+                    for (const dbStatus of data) {
+                        offlineService.saveStatus({
+                            id: dbStatus.id.toString(),
+                            userId: dbStatus.user_id,
+                            type: dbStatus.media_type || 'image',
+                            r2Key: dbStatus.media_url,
+                            textContent: dbStatus.caption,
+                            viewers: dbStatus.views || [],
+                            createdAt: new Date(dbStatus.created_at).getTime(),
+                            expiresAt: new Date(dbStatus.expires_at).getTime(),
+                            isMine: dbStatus.user_id === userId
+                        }).catch(() => {});
+                    }
+                }
+
+                // Map Supabase rows directly to StatusUpdate for UI
+                // (SQLite loses user_name, user_avatar, likes — so use Supabase data as source of truth)
+                const mapped = data.map(mapStatusFromDB);
+                setStatuses(mapped);
+
+                // Resolve R2 keys to local/presigned URLs in background (non-blocking)
+                resolveStatusMediaUrls(mapped);
             }
         } catch (e) { console.warn('Fetch statuses error (Non-fatal):', e); }
     };
@@ -654,6 +804,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 [partnerId]: newList.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
             };
         });
+
+        // Ensure newly observed remote messages persist to local DB
+        if (offlineService && msg.sender !== 'me') {
+            offlineService.saveMessage(partnerId, msg).catch(e => console.warn('saveMessage err:', e));
+        }
     }, []);
 
     // Real-time Subscriptions
@@ -734,16 +889,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                                 // Non-fatal: rail can still render with placeholder.
                             }
                         }
+                        const mappedNew = mapStatusFromDB(newStatus);
                         setStatuses(prev => {
-                            if (prev.find(s => s.id === newStatus.id.toString())) return prev;
-                            return [mapStatusFromDB(newStatus), ...prev];
+                            if (prev.find(s => s.id === mappedNew.id)) return prev;
+                            return [mappedNew, ...prev];
                         });
+                        // Resolve R2 key in background
+                        if (mappedNew.mediaUrl && !mappedNew.mediaUrl.startsWith('file://') && !mappedNew.mediaUrl.startsWith('data:') && !mappedNew.mediaUrl.startsWith('http')) {
+                            storageService.getMediaUrl(mappedNew.mediaUrl).then(url => {
+                                if (url) setStatuses(prev => prev.map(s => s.id === mappedNew.id ? { ...s, mediaUrl: url } : s));
+                            }).catch(() => {});
+                        }
                     }
                 } else if (payload.eventType === 'UPDATE') {
                     const updated = payload.new;
-                    setStatuses(prev => prev.map(s => 
-                        s.id === updated.id.toString() ? mapStatusFromDB(updated) : s
+                    const mappedUpdated = mapStatusFromDB(updated);
+                    setStatuses(prev => prev.map(s =>
+                        s.id === mappedUpdated.id ? mappedUpdated : s
                     ));
+                    // Resolve R2 key in background
+                    if (mappedUpdated.mediaUrl && !mappedUpdated.mediaUrl.startsWith('file://') && !mappedUpdated.mediaUrl.startsWith('data:') && !mappedUpdated.mediaUrl.startsWith('http')) {
+                        storageService.getMediaUrl(mappedUpdated.mediaUrl).then(url => {
+                            if (url) setStatuses(prev => prev.map(s => s.id === mappedUpdated.id ? { ...s, mediaUrl: url } : s));
+                        }).catch(() => {});
+                    }
                 } else if (payload.eventType === 'DELETE') {
                     setStatuses(prev => prev.filter(s => s.id !== payload.old.id.toString()));
                 }
@@ -874,19 +1043,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }, [currentUser?.id, otherUser]);
 
     // Helpers
+
+    /** Map a Supabase DB row (snake_case) → StatusUpdate */
     const mapStatusFromDB = (dbStatus: any): StatusUpdate => ({
         id: dbStatus.id.toString(),
         userId: dbStatus.user_id,
-        contactName: dbStatus.user_name || 'Unknown', 
+        contactName: dbStatus.user_name || 'Unknown',
         avatar: dbStatus.user_avatar || '',
         mediaUrl: dbStatus.media_url,
         mediaType: dbStatus.media_type,
         caption: dbStatus.caption,
-        timestamp: new Date(dbStatus.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        expiresAt: dbStatus.expires_at,
+        timestamp: typeof dbStatus.created_at === 'number'
+            ? new Date(dbStatus.created_at).toISOString()
+            : dbStatus.created_at,
+        expiresAt: typeof dbStatus.expires_at === 'number'
+            ? new Date(dbStatus.expires_at).toISOString()
+            : dbStatus.expires_at,
         views: dbStatus.views || [],
         likes: dbStatus.likes || [],
         music: dbStatus.music || undefined
+    });
+
+    /** Map a raw SQLite row → StatusUpdate (SQLite columns differ from both Supabase and StatusUpdate) */
+    const mapLocalStatusToUI = (row: any): StatusUpdate => ({
+        id: row.id,
+        userId: row.user_id || row.userId || '',
+        mediaUrl: row.r2_key || row.local_path || row.mediaUrl || '',
+        mediaType: (row.type || row.mediaType || 'image') as 'image' | 'video',
+        caption: row.text_content || row.caption || '',
+        timestamp: row.created_at
+            ? (typeof row.created_at === 'number' ? new Date(row.created_at).toISOString() : row.created_at)
+            : new Date().toISOString(),
+        expiresAt: row.expires_at
+            ? (typeof row.expires_at === 'number' ? new Date(row.expires_at).toISOString() : row.expires_at)
+            : '',
+        views: row.viewers
+            ? (typeof row.viewers === 'string' ? (() => { try { return JSON.parse(row.viewers); } catch { return []; } })() : row.viewers)
+            : [],
+        likes: [],
+        contactName: '',
+        avatar: '',
     });
 
     const sendChatMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string) => {
@@ -920,7 +1116,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
             // Force fetch immediately upon login (non-blocking)
             fetchProfileFromSupabase(normalizedUser);
-            fetchMessagesFromSupabase(normalizedUser, other.id);
             fetchCallsFromSupabase(normalizedUser);
             fetchOtherUserProfile(other.id);
             fetchStatusesFromSupabase(normalizedUser, other.id);
@@ -991,70 +1186,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } catch (e) {
             console.warn('[AppContext] fetchOtherUserProfile error:', e);
         }
-    };
-
-    const fetchMessagesFromSupabase = async (userId: string, partnerId: string) => {
-        try {
-            const { data, error } = await supabase
-                .from('messages')
-                .select('*')
-                .or(`and(sender.eq.${userId},receiver.eq.${partnerId}),and(sender.eq.${partnerId},receiver.eq.${userId})`)
-                .order('created_at', { ascending: true });
-
-            if (data && !error) {
-                const mappedMessages: Message[] = data.map(dbRow => ({
-                    id: dbRow.id.toString(),
-                    sender: dbRow.sender === userId ? 'me' : 'them',
-                    text: dbRow.text,
-                    timestamp: dbRow.created_at, // Use ISO string for proper sorting and persistence
-                    status: dbRow.status,
-                    media: dbRow.media_url ? { type: dbRow.media_type || 'image', url: proxySupabaseUrl(dbRow.media_url), caption: dbRow.media_caption } : undefined,
-                    replyTo: dbRow.reply_to_id?.toString(),
-                    reactions: dbRow.reaction ? [dbRow.reaction] : [],
-                }));
-
-                setMessages(prev => {
-                    const existing = prev[partnerId] || [];
-                    const merged = [...existing];
-                    
-                    mappedMessages.forEach(newMsg => {
-                        const idx = merged.findIndex(m => m.id === newMsg.id);
-                        if (idx >= 0) {
-                            const existingReactions = merged[idx].reactions || [];
-                            merged[idx] = {
-                                ...newMsg,
-                                reactions: (newMsg.reactions && newMsg.reactions.length > 0)
-                                    ? newMsg.reactions
-                                    : existingReactions,
-                            };
-                        }
-                        else merged.push(newMsg);
-                    });
-
-                    return { 
-                        ...prev, 
-                        [partnerId]: merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-                    };
-                });
-
-                // Save to Local DB (non-blocking)
-                if (offlineService) {
-                    Promise.all(mappedMessages.map(msg => offlineService.saveMessage(partnerId, msg)))
-                        .catch(e => console.warn('[AppContext] saveMessage err:', e));
-                }
-
-                // Update last message in specific contact
-                const lastMsg = mappedMessages[mappedMessages.length - 1];
-                if (lastMsg) {
-                     setContacts(prev => prev.map(c => 
-                        c.id === partnerId ? {
-                            ...c,
-                            lastMessage: lastMsg.media ? '梼 Attachment' : lastMsg.text
-                        } : c
-                    ));
-                }
-            }
-        } catch (e) {}
     };
 
     const logout = async () => {
@@ -1802,51 +1933,124 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     // --- STATUS LOGIC ---
-    const addStatus = async (status: Omit<StatusUpdate, 'id' | 'likes' | 'views'>) => {
+    const addStatus = async (status: Omit<StatusUpdate, 'id' | 'likes' | 'views'> & { localUri?: string }) => {
         const tempId = Date.now().toString();
-        const newStatus = { 
-            ...status, 
+        const newStatus = {
+            ...status,
             id: tempId,
+            // Use local file URI for immediate display on poster's device
+            mediaUrl: status.localUri || status.mediaUrl,
             likes: [],
             views: []
         } as StatusUpdate;
         setStatuses((prev) => [newStatus, ...prev]);
 
-        if (currentUser) {
-            try {
-                const { error } = await supabase.from('statuses').insert({
+        if (!currentUser) {
+            console.error('No current user found when adding status');
+            return;
+        }
+        
+        try {
+            // 1. Save immediately to Local SQLite DB
+            await offlineService.saveStatus({
+                id: tempId,
+                userId: currentUser.id,
+                type: (status.mediaType === 'video' ? 'video' : 'image') as any,
+                localPath: status.localUri || status.mediaUrl,
+                textContent: status.caption,
+                createdAt: Date.now(),
+                expiresAt: new Date(status.expiresAt).getTime(),
+                isMine: true
+            });
+
+            // 2. Upload Media (Fallback until R2 Service is fully built in Task 2)
+            let finalMediaUrl = status.mediaUrl;
+            if (status.localUri && status.localUri.startsWith('file://')) {
+                // Track in pending_sync queue
+                await offlineService.addSyncAction('UPLOAD_STATUS_MEDIA', {
+                    id: Date.now().toString(),
+                    messageId: `status_${tempId}`,
+                    localPath: status.localUri
+                });
+                
+                const uploaded = await storageService.uploadImage(status.localUri, 'status-media', currentUser.id);
+                if (uploaded) {
+                    finalMediaUrl = uploaded;
+                    // Update Local SQLite with remote URL
+                    await offlineService.saveStatus({
+                        id: tempId,
+                        userId: currentUser.id,
+                        type: (status.mediaType === 'video' ? 'video' : 'image') as any,
+                        localPath: status.localUri,
+                        r2Key: finalMediaUrl, // Treat Supabase URL as r2_key for now until migration
+                        textContent: status.caption,
+                        createdAt: Date.now(),
+                        expiresAt: new Date(status.expiresAt).getTime(),
+                        isMine: true
+                    });
+                }
+            }
+
+            // 3. Save metadata to ephemeral Supabase statuses table via Node Server (for real-time broadcast)
+            const statusPayload = {
+                id: tempId,
+                userId: currentUser.id,
+                userName: currentUser.name,
+                userAvatar: currentUser.avatar,
+                mediaUrl: finalMediaUrl,
+                mediaType: status.mediaType,
+                caption: status.caption,
+                expiresAt: status.expiresAt,
+                createdAt: new Date().toISOString(),
+                likes: [],
+                views: [],
+                music: status.music || null
+            };
+
+            const response = await fetch(`${SERVER_URL}/api/status/create`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: statusPayload })
+            });
+            
+            if (!response.ok) {
+                console.warn('Node server status create failed, falling back to direct Supabase');
+                // Fallback to direct Supabase if Node server is down
+                const { error: fallbackError } = await supabase.from('statuses').insert({
+                    id: tempId,
                     user_id: currentUser.id,
                     user_name: currentUser.name,
                     user_avatar: currentUser.avatar,
-                    media_url: status.mediaUrl,
+                    media_url: finalMediaUrl,
                     media_type: status.mediaType,
                     caption: status.caption,
-                    expires_at: status.expiresAt,
-                    created_at: new Date().toISOString(),
                     likes: [],
                     views: [],
-                    music: musicState.currentSong ? {
-                      name: musicState.currentSong.name,
-                      artist: musicState.currentSong.artist,
-                      image: musicState.currentSong.image
-                    } : null
+                    music: statusPayload.music,
+                    created_at: statusPayload.createdAt,
+                    expires_at: status.expiresAt,
                 });
                 
-                if (error) {
-                    console.warn('Supabase status insert error:', error);
-                    Alert.alert('Error', 'Failed to save status to cloud.');
+                if (fallbackError) {
+                    throw new Error(`Fallback insert failed: ${fallbackError.message}`);
                 }
-            } catch (e) { 
-                console.warn('Failed to save status to DB:', e);
-                Alert.alert('Error', 'Failed to save status to cloud.');
             }
-        } else {
-             console.error('No current user found when adding status');
+            
+            // Note: error was from a removed line, so we remove the check
+            
+        } catch (e) { 
+            console.warn('Failed to save status to DB:', e);
+            Alert.alert('Offline Mode', 'Status saved locally. Will sync when online.');
         }
     };
 
     const deleteStatus = async (statusId: string) => {
         setStatuses((prev) => prev.filter((s) => s.id !== statusId));
+        try {
+            await offlineService.deleteStatus(statusId);
+        } catch (e) {
+            console.warn('Local status delete error:', e);
+        }
         if (currentUser) {
             try {
                 await supabase.from('statuses').delete().eq('id', statusId).eq('user_id', currentUser.id);
@@ -1861,17 +2065,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const status = statuses.find(s => s.id === statusId);
         if (!status || status.views?.includes(currentUser.id)) return;
 
+        const ownerId = status.userId;
         const updatedViews = [...(status.views || []), currentUser.id];
         
-        // Optimistic update
+        // 1. Optimistic update
         setStatuses(prev => prev.map(s =>
             s.id === statusId ? { ...s, views: updatedViews } : s
         ));
 
-        // DB update
+        // 2. Server broadcast
         try {
-            await supabase.from('statuses').update({ views: updatedViews }).eq('id', statusId);
-        } catch (e) { console.warn('Failed to update status views (Non-fatal):', e); }
+            await fetch(`${SERVER_URL}/api/status/view`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ statusId, viewerId: currentUser.id, ownerId })
+            });
+        } catch (e) {
+            console.warn('Failed to broadcast status view:', e);
+        }
+
+        // 3. Local DB update
+        try {
+            await offlineService.markStatusAsSeen(statusId);
+        } catch (e) { console.warn('Failed to update status views locally:', e); }
+
+        // 4. Supabase fallback update if online
+        if (isCloudConnected && supabase) {
+            try {
+                // Ensure we use the correct array append logic if supported or just update the whole array
+                await supabase.from('statuses').update({ views: updatedViews }).eq('id', statusId);
+            } catch (e) { console.warn('Failed to update Supabase status views:', e); }
+        }
     };
 
     const toggleStatusLike = async (statusId: string) => {

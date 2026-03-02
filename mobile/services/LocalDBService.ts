@@ -129,27 +129,32 @@ export const offlineService = {
   async getPendingMessages(): Promise<QueuedMessage[]> {
     const db = await getDB();
     if (!db) return [];
-    const rows = await db.getAllAsync(
-      `SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC;`
-    );
+    try {
+      const rows = await db.getAllAsync(
+        `SELECT * FROM messages WHERE status = 'pending' ORDER BY timestamp ASC;`
+      );
 
-    return rows.map((row: any) => ({
-      id: row.id,
-      chatId: row.chat_id,
-      sender: row.sender as 'me' | 'them',
-      text: row.text,
-      timestamp: row.timestamp,
-      status: 'pending' as MessageStatus,
-      media: row.media_url ? {
-        type: row.media_type,
-        url: row.media_url,
-        caption: row.media_caption
-      } : undefined,
-      replyTo: row.reply_to_id,
-      retryCount: row.retry_count ?? 0,
-      lastRetryAt: row.last_retry_at,
-      errorMessage: row.error_message
-    }));
+      return rows.map((row: any) => ({
+        id: row.id,
+        chatId: row.chat_id,
+        sender: row.sender as 'me' | 'them',
+        text: row.text,
+        timestamp: row.timestamp,
+        status: 'pending' as MessageStatus,
+        media: row.media_url ? {
+          type: row.media_type,
+          url: row.media_url,
+          caption: row.media_caption
+        } : undefined,
+        replyTo: row.reply_to_id,
+        retryCount: row.retry_count ?? 0,
+        lastRetryAt: row.last_retry_at,
+        errorMessage: row.error_message
+      }));
+    } catch (e) {
+      console.warn('[LocalDB] getPendingMessages failed (schema mismatch?):', e);
+      return [];
+    }
   },
 
   /**
@@ -562,298 +567,190 @@ export const offlineService = {
   },
 
   // ============================================================
-  // ── UPLOAD QUEUE (media upload queue for offline) ───────────
+  // ── BACKGROUND SYNC QUEUE (Offline Support) ─────────────────
   // ============================================================
 
   /**
-   * Add a media file to the upload queue
+   * Add a generic background sync action (e.g. 'UPLOAD_STATUS_MEDIA', 'SEND_MESSAGE')
    */
-  async addToUploadQueue(item: {
-    id: string;
-    messageId: string;
-    localPath: string;
-    remotePath?: string;
-  }): Promise<void> {
+  async addSyncAction(action: 'UPLOAD_STATUS_MEDIA' | 'SEND_MESSAGE' | 'UPDATE_PROFILE', payload: any): Promise<void> {
     const db = await getDB();
     if (!db) return;
     await db.runAsync(
-      `INSERT OR REPLACE INTO upload_queue
-       (id, message_id, local_path, remote_path, status, retry_count, created_at)
-       VALUES (?, ?, ?, ?, 'pending', 0, ?);`,
-      [item.id, item.messageId, item.localPath, item.remotePath ?? null, Date.now()]
+      `INSERT INTO pending_sync (action, payload, created_at, retry_count) VALUES (?, ?, ?, 0);`,
+      [action, JSON.stringify(payload), Date.now()]
     );
   },
 
   /**
-   * Get all pending uploads
+   * Get all pending sync actions ordered by oldest first
    */
-  async getPendingUploads(): Promise<any[]> {
+  async getPendingSyncActions(): Promise<any[]> {
     const db = await getDB();
     if (!db) return [];
-    return await db.getAllAsync(
-      `SELECT * FROM upload_queue WHERE status = 'pending' OR status = 'failed' ORDER BY created_at ASC;`
-    );
+    try {
+      const rows = await db.getAllAsync(`SELECT * FROM pending_sync ORDER BY created_at ASC;`);
+      return rows.map((r: any) => ({
+        ...r,
+        payload: JSON.parse(r.payload)
+      }));
+    } catch {
+      return [];
+    }
   },
 
   /**
-   * Update upload status
+   * Remove a completed sync action from the queue
    */
-  async markUploadStatus(id: string, status: 'pending' | 'uploading' | 'done' | 'failed'): Promise<void> {
+  async removeSyncAction(id: number): Promise<void> {
     const db = await getDB();
     if (!db) return;
-    await db.runAsync(
-      `UPDATE upload_queue SET status = ?, last_tried_at = ? WHERE id = ?;`,
-      [status, Date.now(), id]
-    );
+    await db.runAsync(`DELETE FROM pending_sync WHERE id = ?;`, [id]);
   },
 
   /**
-   * Increment retry count for a failed upload
+   * Increment retry count for a failed sync action
    */
-  async incrementUploadRetry(id: string): Promise<void> {
+  async incrementSyncRetry(id: number): Promise<void> {
     const db = await getDB();
     if (!db) return;
-    await db.runAsync(
-      `UPDATE upload_queue SET retry_count = retry_count + 1, last_tried_at = ? WHERE id = ?;`,
-      [Date.now(), id]
-    );
-  },
-
-  /**
-   * Remove completed uploads from queue
-   */
-  async cleanUploadQueue(): Promise<void> {
-    const db = await getDB();
-    if (!db) return;
-    await db.runAsync(`DELETE FROM upload_queue WHERE status = 'done';`);
+    await db.runAsync(`UPDATE pending_sync SET retry_count = retry_count + 1 WHERE id = ?;`, [id]);
   },
 
   // ============================================================
-  // ── MY STATUSES ─────────────────────────────────────────────
+  // ── UNIFIED STATUSES (Task 1) ───────────────────────────────
   // ============================================================
 
   /**
-   * Save a status I posted
+   * Save a status (mine or received)
    */
-  async saveMyStatus(status: {
-    id: string;
-    type: 'image' | 'video';
-    mediaLocalPath: string;
-    mediaRemoteUrl?: string;
-    thumbnailPath?: string;
-    caption?: string;
-  }): Promise<void> {
-    const db = await getDB();
-    if (!db) return;
-    const now = Date.now();
-    const expiresAt = now + 86400000; // 24 hours
-    await db.runAsync(
-      `INSERT OR REPLACE INTO my_statuses
-       (id, type, media_local_path, media_remote_url, thumbnail_path, caption, synced, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?);`,
-      [
-        status.id, status.type, status.mediaLocalPath,
-        status.mediaRemoteUrl ?? null, status.thumbnailPath ?? null,
-        status.caption ?? null, now, expiresAt,
-      ]
-    );
-  },
-
-  /**
-   * Get all my non-expired statuses
-   */
-  async getMyStatuses(): Promise<any[]> {
-    const db = await getDB();
-    if (!db) return [];
-    return await db.getAllAsync(
-      `SELECT * FROM my_statuses WHERE expires_at > ? ORDER BY created_at DESC;`,
-      [Date.now()]
-    );
-  },
-
-  /**
-   * Mark a status as synced to server
-   */
-  async markMyStatusSynced(statusId: string, remoteUrl: string): Promise<void> {
-    const db = await getDB();
-    if (!db) return;
-    await db.runAsync(
-      `UPDATE my_statuses SET synced = 1, media_remote_url = ? WHERE id = ?;`,
-      [remoteUrl, statusId]
-    );
-  },
-
-  // ============================================================
-  // ── RECEIVED STATUSES ───────────────────────────────────────
-  // ============================================================
-
-  /**
-   * Save a status received from a contact
-   */
-  async saveReceivedStatus(status: {
+  async saveStatus(status: {
     id: string;
     userId: string;
-    userName?: string;
-    userAvatarPath?: string;
-    type: 'image' | 'video';
-    mediaLocalPath?: string;
-    mediaRemoteUrl: string;
-    thumbnailPath?: string;
-    caption?: string;
+    type: 'image' | 'video' | 'text';
+    r2Key?: string;
+    localPath?: string;
+    textContent?: string;
+    backgroundColor?: string;
+    viewers?: string[];
     createdAt: number;
     expiresAt: number;
-  }): Promise<void> {
-    const db = await getDB();
-    if (!db) return;
-    await db.runAsync(
-      `INSERT OR REPLACE INTO received_statuses
-       (id, user_id, user_name, user_avatar_path, type, media_local_path,
-        media_remote_url, thumbnail_path, caption, media_download_status,
-        synced, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1, ?, ?);`,
-      [
-        status.id, status.userId, status.userName ?? null,
-        status.userAvatarPath ?? null, status.type,
-        status.mediaLocalPath ?? null, status.mediaRemoteUrl,
-        status.thumbnailPath ?? null, status.caption ?? null,
-        status.createdAt, status.expiresAt,
-      ]
-    );
-  },
-
-  /**
-   * Get all non-expired received statuses grouped by user
-   */
-  async getReceivedStatuses(): Promise<any[]> {
-    const db = await getDB();
-    if (!db) return [];
-    return await db.getAllAsync(
-      `SELECT * FROM received_statuses WHERE expires_at > ? ORDER BY created_at DESC;`,
-      [Date.now()]
-    );
-  },
-
-  /**
-   * Mark a received status as viewed
-   */
-  async markStatusViewed(statusId: string): Promise<void> {
-    const db = await getDB();
-    if (!db) return;
-    await db.runAsync(
-      `UPDATE received_statuses SET is_viewed = 1, viewed_at = ? WHERE id = ?;`,
-      [Date.now(), statusId]
-    );
-  },
-
-  // ============================================================
-  // ── TEXT STATUSES ───────────────────────────────────────────
-  // ============================================================
-
-  /**
-   * Save a text status (mine or received)
-   */
-  async saveTextStatus(status: {
-    id: string;
-    userId: string;
-    userName?: string;
-    userAvatarPath?: string;
-    textContent: string;
-    bgType?: 'solid' | 'gradient';
-    bgColor?: string;
-    bgGradient?: string[];
-    textColor?: string;
-    fontSize?: number;
-    fontStyle?: string;
-    textAlign?: string;
     isMine: boolean;
   }): Promise<void> {
     const db = await getDB();
     if (!db) return;
-    const now = Date.now();
-    const expiresAt = now + 86400000; // 24 hours
+    
     await db.runAsync(
-      `INSERT OR REPLACE INTO text_statuses
-       (id, user_id, user_name, user_avatar_path, text_content, bg_type, bg_color,
-        bg_gradient, text_color, font_size, font_style, text_align,
-        is_mine, synced, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?);`,
+      `INSERT OR REPLACE INTO statuses
+       (id, user_id, r2_key, local_path, type, text_content, background_color, viewers, created_at, expires_at, is_mine)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
       [
-        status.id, status.userId, status.userName ?? null,
-        status.userAvatarPath ?? null, status.textContent,
-        status.bgType ?? 'solid', status.bgColor ?? '#2D6A4F',
-        status.bgGradient ? JSON.stringify(status.bgGradient) : null,
-        status.textColor ?? '#FFFFFF', status.fontSize ?? 24,
-        status.fontStyle ?? 'normal', status.textAlign ?? 'center',
-        status.isMine ? 1 : 0, now, expiresAt,
+        status.id, 
+        status.userId, 
+        status.r2Key ?? null, 
+        status.localPath ?? null, 
+        status.type,
+        status.textContent ?? null, 
+        status.backgroundColor ?? null, 
+        status.viewers ? JSON.stringify(status.viewers) : '[]',
+        status.createdAt, 
+        status.expiresAt,
+        status.isMine ? 1 : 0
       ]
     );
   },
 
   /**
-   * Get all non-expired text statuses
+   * Mark a status as seen locally
    */
-  async getTextStatuses(): Promise<any[]> {
+  async markStatusAsSeen(statusId: string): Promise<void> {
+    const db = await getDB();
+    if (!db) return;
+    
+    // Check if current user is already in viewers
+    // Simplified for local: we just want to know it's seen
+    await db.runAsync(
+      `UPDATE statuses SET is_seen = 1 WHERE id = ?;`,
+      [statusId]
+    );
+  },
+
+  /**
+   * Get all active statuses
+   */
+  async getStatuses(): Promise<any[]> {
     const db = await getDB();
     if (!db) return [];
     return await db.getAllAsync(
-      `SELECT * FROM text_statuses WHERE expires_at > ? ORDER BY created_at DESC;`,
+      `SELECT * FROM statuses WHERE expires_at > ? ORDER BY created_at DESC;`,
       [Date.now()]
     );
   },
 
-  // ============================================================
-  // ── COMBINED STATUS FEED ────────────────────────────────────
-  // ============================================================
-
   /**
-   * Get all statuses (text + media) merged and grouped by user
+   * Delete a status manually
    */
-  async getAllStatuses(): Promise<any[]> {
+  async deleteStatus(statusId: string): Promise<void> {
     const db = await getDB();
-    if (!db) return [];
-    const now = Date.now();
-
-    const textStatuses = await db.getAllAsync(
-      `SELECT *, 'text' as status_type FROM text_statuses WHERE expires_at > ? ORDER BY created_at DESC;`,
-      [now]
-    );
-    const myStatuses = await db.getAllAsync(
-      `SELECT *, 'media' as status_type, 1 as is_mine FROM my_statuses WHERE expires_at > ? ORDER BY created_at DESC;`,
-      [now]
-    );
-    const receivedStatuses = await db.getAllAsync(
-      `SELECT *, 'media' as status_type, 0 as is_mine FROM received_statuses WHERE expires_at > ? ORDER BY created_at DESC;`,
-      [now]
-    );
-
-    return [...textStatuses, ...myStatuses, ...receivedStatuses];
+    if (!db) return;
+    await db.runAsync(`DELETE FROM statuses WHERE id = ?;`, [statusId]);
   },
 
-  // ============================================================
-  // ── CLEANUP ─────────────────────────────────────────────────
-  // ============================================================
-
   /**
-   * Remove all expired statuses (24hr TTL)
+   * Cleanup expired statuses (24hr TTL)
    */
   async cleanupExpiredStatuses(): Promise<{ deleted: number }> {
     const db = await getDB();
     if (!db) return { deleted: 0 };
     const now = Date.now();
 
-    // Get expired media paths for file cleanup
+    // Get expired media paths for file cleanup if needed
     const expiredMedia = await db.getAllAsync(
-      `SELECT media_local_path, thumbnail_path FROM my_statuses WHERE expires_at < ?
-       UNION ALL
-       SELECT media_local_path, thumbnail_path FROM received_statuses WHERE expires_at < ?;`,
-      [now, now]
+      `SELECT local_path FROM statuses WHERE expires_at < ? AND local_path IS NOT NULL;`,
+      [now]
     );
 
-    // Delete from all status tables
-    await db.runAsync(`DELETE FROM my_statuses WHERE expires_at < ?;`, [now]);
-    await db.runAsync(`DELETE FROM received_statuses WHERE expires_at < ?;`, [now]);
-    await db.runAsync(`DELETE FROM text_statuses WHERE expires_at < ?;`, [now]);
+    // Delete from table
+    await db.runAsync(`DELETE FROM statuses WHERE expires_at < ?;`, [now]);
 
     return { deleted: expiredMedia.length };
   },
+
+  // ============================================================
+  // ── CACHED MEDIA ────────────────────────────────────────────
+  // ============================================================
+
+  /**
+   * Get cached media by its R2 key (remote URL)
+   */
+  async getCachedMedia(r2Key: string): Promise<string | null> {
+    const db = await getDB();
+    if (!db) return null;
+    const result = await db.getFirstAsync(
+      `SELECT local_path FROM cached_media WHERE r2_key = ?;`,
+      [r2Key]
+    ) as { local_path: string } | null;
+    if (result) {
+      await db.runAsync(
+        `UPDATE cached_media SET last_accessed = ? WHERE r2_key = ?;`,
+        [Date.now(), r2Key]
+      );
+      return result.local_path;
+    }
+    return null;
+  },
+
+  /**
+   * Save a newly downloaded remote media file to the cache tracking table
+   */
+  async saveCachedMedia(r2Key: string, localPath: string, messageId?: string, sizeBytes?: number): Promise<void> {
+    const db = await getDB();
+    if (!db) return;
+    const now = Date.now();
+    await db.runAsync(
+      `INSERT OR REPLACE INTO cached_media (r2_key, local_path, message_id, size_bytes, cached_at, last_accessed)
+       VALUES (?, ?, ?, ?, ?, ?);`,
+      [r2Key, localPath, messageId || null, sizeBytes || null, now, now]
+    );
+  }
 };

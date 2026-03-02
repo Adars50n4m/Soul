@@ -11,6 +11,11 @@ import { SecurityLockOverlay } from '../components/SecurityLockOverlay';
 import '../global.css';
 import { useContext } from 'react';
 
+// Ensures expo-router constructs valid initial state during hydration
+export const unstable_settings = {
+  initialRouteName: 'index',
+};
+
 function RootContent() {
   const context = useContext(AppContext);
   const router = useRouter();

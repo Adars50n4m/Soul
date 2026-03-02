@@ -99,7 +99,6 @@ export default function MyStatusScreen() {
     try {
       const item = mediaList[0];
       const safeUri = item.uri;
-      let mediaUrl = safeUri;
 
       const expiresAt = new Date();
       expiresAt.setHours(expiresAt.getHours() + 24);
@@ -109,33 +108,23 @@ export default function MyStatusScreen() {
       const expiresAtString = expiresAt.toISOString();
       const statusCaption = caption || '';
 
-      try {
-        if (safeUri.startsWith('file://')) {
-          const uploadedUrl = await storageService.uploadImage(safeUri, 'status-media', currentUser.id);
-          if (uploadedUrl) mediaUrl = uploadedUrl;
-        }
-
-        addStatus({
-          userId: currentUser.id,
-          mediaUrl,
-          mediaType,
-          timestamp,
-          expiresAt: expiresAtString,
-          caption: statusCaption,
-        });
+      // Offline First: pass the local URI! AppContext handles the actual storage/upload
+      addStatus({
+        userId: currentUser.id,
+        mediaUrl: safeUri, // Will be swapped with the remote URL after upload
+        localUri: safeUri,
+        mediaType,
+        timestamp,
+        expiresAt: expiresAtString,
+        caption: statusCaption,
+      });
       
-        setStatusMediaPreview(null);
-        setIsUploadingStatus(false);
-        setIsMediaPickerVisible(false);
-      } catch (error) {
-        console.error('Failed to upload status:', error);
-        Alert.alert('Error', 'Failed to upload status. Please try again.');
-        setIsUploadingStatus(false);
-        setIsMediaPickerVisible(false);
-      }
+      setStatusMediaPreview(null);
+      setIsUploadingStatus(false);
+      setIsMediaPickerVisible(false);
     } catch (error) {
-      console.error('Failed to upload status:', error);
-      Alert.alert('Error', 'Failed to upload status. Please try again.');
+      console.error('Failed to create status:', error);
+      Alert.alert('Error', 'Failed to create status. Please try again.');
       setIsUploadingStatus(false);
       setIsMediaPickerVisible(false);
     }

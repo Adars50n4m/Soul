@@ -127,6 +127,7 @@ export default function AddStatusScreen() {
         addStatus({
             userId: currentUser?.id || 'anonymous',
             mediaUrl: publicUrl,
+            localUri: media.uri,
             mediaType: media.type,
             caption: caption.trim(),
             timestamp: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),

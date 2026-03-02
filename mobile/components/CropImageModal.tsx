@@ -11,26 +11,26 @@ import {
   GestureResponderEvent,
   PanResponderGestureState,
   Alert,
-  Image as RNImage
+  Image as RNImage,
+  Dimensions,
+  Platform
 } from 'react-native';
 import { Image } from 'expo-image';
 import { MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { Action } from 'expo-image-manipulator';
+import * as ImageManipulator from 'expo-image-manipulator';
 
 const MIN_SIZE = 60;
 
 interface Props {
   visible: boolean;
-  imageUri: string;
+  imageUri: string,
   onClose: () => void;
   onCropComplete: (uri: string) => void;
 }
 
 type CropBox = { x: number; y: number; w: number; h: number };
 type DragTarget = 'TL' | 'TR' | 'BL' | 'BR' | 'CENTER' | null;
-
-type ImageManipulatorModule = typeof import('expo-image-manipulator');
 
 export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, onCropComplete }) => {
   const insets = useSafeAreaInsets();
@@ -57,15 +57,11 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
   const [mirrored, setMirrored] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [aspectMenu, setAspectMenu] = useState(false);
-  const [manipulatorModule, setManipulatorModule] = useState<ImageManipulatorModule | null>(null);
-  const [manipulatorError, setManipulatorError] = useState<string | null>(null);
-  const [manipulatorLoading, setManipulatorLoading] = useState(true);
+  const [isReady, setIsReady] = useState(false);
 
   // STEP 1: On open, normalize the image to bake in EXIF rotation.
-  // This creates a new file where the pixel data matches the visual orientation.
-  // After this, Image.getSize and the manipulator's crop action are in the same coordinate space.
   useEffect(() => {
-    if (!visible || !imageUri || !manipulatorModule) return;
+    if (!visible || !imageUri) return;
 
     setRotation(0);
     setMirrored(false);
@@ -76,23 +72,19 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
     setImgH(0);
     setDispW(0);
     setDispH(0);
+    setIsReady(false);
 
     // Normalize: run with empty actions to bake EXIF
-    manipulatorModule.manipulateAsync(imageUri, [], {
-      format: manipulatorModule.SaveFormat.JPEG,
+    ImageManipulator.manipulateAsync(imageUri, [], {
+      format: ImageManipulator.SaveFormat.JPEG,
       compress: 1,
     })
         .then((result) => {
           setNormalizedUri(result.uri);
-          // We MUST use result dimensions! Image.getSize() on Android returns density-scaled down dimensions
-          // (e.g., exactly 1/3 size on a 3x Pixel device). Using scaled dimensions causes the crop logic
-          // to calculate a tiny crop box that only covers the top-left portion of the full-res file!
           if (result.width && result.height) {
-            console.log('[CropModal] Using unscaled physical image size:', result.width, 'x', result.height);
             setImgW(result.width);
             setImgH(result.height);
           } else {
-            console.warn('[CropModal] Manipulator returned no dimensions, falling back to getSize');
             RNImage.getSize(
               result.uri,
               (w, h) => {
@@ -112,49 +104,12 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
             () => {}
           );
         });
-  }, [visible, imageUri, manipulatorModule]);
-
-  useEffect(() => {
-    let isActive = true;
-    import('expo-image-manipulator')
-      .then((mod) => {
-        if (isActive) {
-          setManipulatorModule(mod);
-          setManipulatorError(null);
-        }
-      })
-      .catch((err) => {
-        if (isActive) {
-          console.warn('[CropModal] ImageManipulator failed to load:', err);
-          setManipulatorError(err?.message || 'Image manipulator native module is unavailable.');
-        }
-      })
-      .finally(() => {
-        if (isActive) {
-          setManipulatorLoading(false);
-        }
-      });
-
-    return () => {
-      isActive = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (visible && manipulatorError) {
-      Alert.alert(
-        'Crop unavailable',
-        'The native ImageManipulator support is missing from this build. Rebuild the dev client or use a shell that ships with the module.',
-        [{ text: 'OK', onPress: onClose }]
-      );
-    }
-  }, [visible, manipulatorError, onClose]);
+  }, [visible, imageUri]);
 
   // STEP 2: Compute display layout when we know image size + container size
   useEffect(() => {
     if (imgW <= 0 || imgH <= 0 || canvasW <= 0 || canvasH <= 0) return;
 
-    // No need to swap for rotation here since we apply rotation via CSS transform
     const scale = Math.min(canvasW / imgW, canvasH / imgH);
     const dw = imgW * scale;
     const dh = imgH * scale;
@@ -166,6 +121,7 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
     setDispX(dx);
     setDispY(dy);
     setCrop({ x: 0, y: 0, w: dw, h: dh });
+    setIsReady(true);
   }, [imgW, imgH, canvasW, canvasH]);
 
   // ---- Pan Responder for crop box manipulation ----
@@ -266,87 +222,50 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
     setCrop({ x: nx, y: ny, w: nw, h: nh });
   };
 
-  // STEP 3: On "Done", apply rotation/flip to match what user sees, then crop
-  // The key insight: user sees rotation applied via CSS, so we must apply SAME rotation 
-  // before cropping to get matching output
   const handleDone = async () => {
-    if (isProcessing || !normalizedUri || dispW === 0 || imgW === 0 || !manipulatorModule) return;
+    if (isProcessing || !normalizedUri || dispW === 0 || imgW === 0) return;
     setIsProcessing(true);
 
     try {
-      if (dispW === 0 || dispH === 0) {
-        onClose();
-        return;
-      }
-
-      // Calculate crop coordinates relative to the displayed image (which has rotation applied visually)
-      // These coordinates map to what user sees in the crop box
       const relativeX = crop.x / dispW;
       const relativeY = crop.y / dispH;
       const relativeW = crop.w / dispW;
       const relativeH = crop.h / dispH;
 
-      // For rotation in expo-image-manipulator:
-      // The image is rotated and then cropped. The crop coordinates need to be
-      // in the ROTATED image's coordinate space.
-      // 
-      // For rotation in expo-image-manipulator:
-      // The image is rotated and then cropped. The crop coordinates need to be
-      // in the ROTATED image's coordinate space after rotation is applied.
-
       const isRotated90or270 = rotation === 90 || rotation === 270;
       const rotatedW = isRotated90or270 ? imgH : imgW;
       const rotatedH = isRotated90or270 ? imgW : imgH;
 
-      // Calculate crop coordinates - map display space to rotated image space
-      // The display shows the rotated image, so we map directly using rotated dimensions
-      let originX: number, originY: number, width: number, height: number;
+      let originX = Math.max(0, Math.round(relativeX * rotatedW));
+      let originY = Math.max(0, Math.round(relativeY * rotatedH));
+      let width = Math.max(1, Math.round(relativeW * rotatedW));
+      let height = Math.max(1, Math.round(relativeH * rotatedH));
 
-      // Base calculations using rotated dimensions
-      originX = Math.max(0, Math.round(relativeX * rotatedW));
-      originY = Math.max(0, Math.round(relativeY * rotatedH));
-      width = Math.max(1, Math.round(relativeW * rotatedW));
-      height = Math.max(1, Math.round(relativeH * rotatedH));
-
-      // For 180° rotation, we need to flip both axes since rotation 180 
-      // inverts both horizontally and vertically
       if (rotation === 180) {
         originX = Math.max(0, Math.round((1 - relativeX - relativeW) * rotatedW));
         originY = Math.max(0, Math.round((1 - relativeY - relativeH) * rotatedH));
       }
 
-      // Clamp to rotated image bounds
       width = Math.min(width, rotatedW - originX);
       height = Math.min(height, rotatedH - originY);
 
-      console.log('[CropModal] Crop params:', { 
-        originX, originY, width, height, 
-        imgW, imgH, rotation, rotatedW, rotatedH,
-        relativeX, relativeY, relativeW, relativeH,
-        crop 
-      });
-
-      const actions: Action[] = [];
+      const actions: ImageManipulator.Action[] = [];
       
-      // Apply rotation to match what user sees in the cropper
       if (rotation !== 0) {
         actions.push({ rotate: rotation });
       }
       
-      // Apply flip if mirrored
       if (mirrored) {
-        actions.push({ flip: manipulatorModule.FlipType.Horizontal });
+        actions.push({ flip: ImageManipulator.FlipType.Horizontal });
       }
       
-      // Apply crop on the transformed (rotated) image
       actions.push({ crop: { originX, originY, width, height } });
 
-      const result = await manipulatorModule.manipulateAsync(normalizedUri, actions, {
+      const result = await ImageManipulator.manipulateAsync(normalizedUri, actions, {
         compress: 1,
-        format: manipulatorModule.SaveFormat.JPEG,
+        format: ImageManipulator.SaveFormat.JPEG,
       });
 
-      console.log('[CropModal] Result:', result.uri, result.width, result.height);
       onCropComplete(result.uri);
     } catch (e) {
       console.error('[CropModal] Crop error:', e);
@@ -358,7 +277,6 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
 
   const RATIOS = [
     { label: 'Original', ratio: null },
-    { label: 'Fit to screen', ratio: null },
     { label: 'Square', ratio: 1 },
     { label: '2:3', ratio: 2 / 3 },
     { label: '3:5', ratio: 3 / 5 },
@@ -370,36 +288,9 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
 
   if (!visible) return null;
 
-  if (!manipulatorModule) {
-    return (
-      <Modal visible={visible} animationType="fade" transparent>
-        <View style={styles.loadingOverlay}>
-          {manipulatorLoading ? (
-            <>
-              <ActivityIndicator size="large" color="#fff" />
-              <Text style={styles.loadingText}>Preparing the cropper…</Text>
-            </>
-          ) : (
-            <>
-              <Text style={styles.loadingText}>
-                Cropping is not available in this build.
-              </Text>
-              <Pressable onPress={onClose} style={styles.errorButton}>
-                <Text style={styles.errorText}>Close</Text>
-              </Pressable>
-            </>
-          )}
-        </View>
-      </Modal>
-    );
-  }
-
-  const isReady = dispW > 0 && dispH > 0 && normalizedUri;
-
   return (
     <Modal visible={visible} animationType="fade" transparent={false} onRequestClose={onClose}>
       <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
-        {/* Canvas */}
         <View
           style={styles.canvas}
           onLayout={(e) => {
@@ -407,7 +298,7 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
             setCanvasH(e.nativeEvent.layout.height);
           }}
         >
-          {isReady ? (
+          {isReady && normalizedUri ? (
             <View
               style={{
                 position: 'absolute',
@@ -418,7 +309,6 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
               }}
               {...panResponder.panHandlers}
             >
-              {/* The normalized image: no EXIF ambiguity */}
               <Image
                 source={{ uri: normalizedUri }}
                 style={{
@@ -432,13 +322,11 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
                 contentFit="fill"
               />
 
-              {/* Dark overlays */}
               <View style={[styles.ov, { top: 0, left: 0, right: 0, height: crop.y }]} />
               <View style={[styles.ov, { top: crop.y + crop.h, left: 0, right: 0, bottom: 0 }]} />
               <View style={[styles.ov, { top: crop.y, left: 0, width: crop.x, height: crop.h }]} />
               <View style={[styles.ov, { top: crop.y, left: crop.x + crop.w, right: 0, height: crop.h }]} />
 
-              {/* Crop box with corner markers */}
               <View style={[styles.cropBox, { left: crop.x, top: crop.y, width: crop.w, height: crop.h }]}>
                 <View style={styles.mTL} />
                 <View style={styles.mTR} />
@@ -454,7 +342,6 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
           )}
         </View>
 
-        {/* Bottom Toolbar */}
         <View style={styles.toolbar}>
           <View style={styles.toolRow}>
             <Pressable onPress={() => setRotation((p) => (p - 90 + 360) % 360)} style={styles.iconBtn}>
@@ -481,7 +368,6 @@ export const CropImageModal: React.FC<Props> = ({ visible, imageUri, onClose, on
           </View>
         </View>
 
-        {/* Aspect ratio popup */}
         {aspectMenu && (
           <View style={styles.aspectMenu}>
             <ScrollView bounces={false}>
@@ -550,28 +436,4 @@ const styles = StyleSheet.create({
   },
   aspectItem: { paddingVertical: 14, paddingHorizontal: 16 },
   aspectText: { color: '#fff', fontSize: 16 },
-  loadingOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.92)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 32,
-  },
-  loadingText: {
-    color: '#fff',
-    fontSize: 16,
-    textAlign: 'center',
-    marginTop: 12,
-  },
-  errorButton: {
-    marginTop: 16,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: '#444',
-    borderRadius: 8,
-  },
-  errorText: {
-    color: '#fff',
-    fontSize: 16,
-  },
 });

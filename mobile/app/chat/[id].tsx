@@ -1288,10 +1288,28 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                 <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
                             </Pressable>
 
-                            <Pressable style={styles.avatarWrapper} onPress={() => router.push(`/profile/${contact.id}` as any)}>
+                            <Pressable 
+                                style={styles.avatarWrapper} 
+                                onPress={() => {
+                                    if (contact.stories && contact.stories.length > 0) {
+                                        // Open status viewer logic could be added here
+                                        // But for now, just navigate to profile or show ring
+                                        router.push(`/profile/${contact.id}` as any);
+                                    } else {
+                                        router.push(`/profile/${contact.id}` as any);
+                                    }
+                                }}
+                            >
                                 <Animated.Image
                                     source={{ uri: contact.avatar }}
-                                    style={styles.avatar}
+                                    style={[
+                                        styles.avatar,
+                                        contact.stories && contact.stories.length > 0 && {
+                                            borderWidth: 2,
+                                            borderColor: contact.stories.some(s => !s.seen) ? '#3b82f6' : 'rgba(255,255,255,0.4)',
+                                            padding: 2
+                                        }
+                                    ]}
                                 />
                                 {contact.status === 'online' && <View style={styles.onlineIndicator} />}
                             </Pressable>

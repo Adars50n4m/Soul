@@ -273,6 +273,7 @@ export const StatusViewerModal = ({
           style={[
             styles.contentContainer,
             { paddingTop: insets.top, paddingBottom: insets.bottom + 20 },
+            currentStory.type === 'text' && { backgroundColor: currentStory.backgroundColor || '#151515' }
           ]}
         >
           {currentStory.type === 'image' && !mediaLoadFailed && (
@@ -283,7 +284,24 @@ export const StatusViewerModal = ({
               blurRadius={28}
             />
           )}
-          {currentStory.type === 'image' && !mediaLoadFailed ? (
+          {currentStory.type === 'text' ? (
+             <View style={styles.textStatusContainer}>
+               <Text 
+                 style={[
+                   styles.captionText, 
+                   { 
+                     fontSize: Math.max(24, 42 - (currentStory.caption?.length || 0) / 4), 
+                     paddingHorizontal: 20,
+                     fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
+                     lineHeight: 52,
+                     textAlign: 'center'
+                   }
+                 ]}
+                >
+                 {currentStory.caption || currentStory.url} 
+               </Text>
+             </View>
+          ) : currentStory.type === 'image' && !mediaLoadFailed ? (
             <Image
               source={{ uri: currentStory.url }}
               style={[styles.media, { width: width }]}
@@ -328,16 +346,6 @@ export const StatusViewerModal = ({
                       <Text style={styles.userName}>{contactName}</Text>
                       <View style={styles.metaRow}>
                         <Text style={styles.timestamp}>{formatStoryTime(currentStory.timestamp)}</Text>
-                        {!!currentStory.music && (
-                          <>
-                            <Text style={styles.metaDivider}> • </Text>
-                            <Ionicons name="musical-notes" size={12} color="rgba(255,255,255,0.6)" />
-                            <Text style={[styles.musicText, { maxWidth: width * 0.4 }]} numberOfLines={1}>
-                              {currentStory.music.artist} {currentStory.music.name}
-                            </Text>
-                            <MaterialIcons name="chevron-right" size={16} color="rgba(255,255,255,0.6)" />
-                          </>
-                        )}
                       </View>
                     </View>
                 </View>
@@ -350,16 +358,6 @@ export const StatusViewerModal = ({
                   </Pressable>
                 </View>
             </View>
-
-            {/* Floating Music Art */}
-            {!!currentStory.music && (
-              <View style={styles.floatingMusicContainer}>
-                <Image source={{ uri: currentStory.music.image }} style={styles.floatingMusicArt} />
-                <View style={styles.musicVinyl}>
-                   <View style={styles.musicVinylCenter} />
-                </View>
-              </View>
-            )}
         </SafeAreaView>
 
         {/* Touch Navigation Overlay */}
@@ -386,7 +384,7 @@ export const StatusViewerModal = ({
           style={[styles.bottomContainer, { paddingBottom: insets.bottom + 12, opacity: isUIVisible ? 1 : 0 }]}
           pointerEvents={isUIVisible ? 'auto' : 'none'}
         >
-          {!!currentStory.caption && (
+          {!!currentStory.caption && currentStory.type !== 'text' && (
             <View style={styles.captionContainer}>
               <Text style={styles.captionText}>{currentStory.caption}</Text>
               <View style={styles.captionDivider} />
@@ -518,6 +516,13 @@ const styles = StyleSheet.create({
   media: {
     height: '100%',
     borderRadius: 0,
+  },
+  textStatusContainer: {
+    flex: 1,
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
   },
   videoPlaceholder: {
     backgroundColor: 'rgba(255,255,255,0.08)',

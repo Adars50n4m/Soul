@@ -12,6 +12,12 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useApp } from '../../context/AppContext';
 
+// Tells expo-router how to construct initial tab state during hydration
+// Prevents "Cannot read property 'stale' of undefined" in TabRouter.getRehydratedState
+export const unstable_settings = {
+  initialRouteName: 'index',
+};
+
 const TabIcon = ({ name, focused, size = 24 }: { name: any; focused: boolean; size?: number }) => {
   const { activeTheme } = useApp();
   const scale = useSharedValue(1);
@@ -61,11 +67,13 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
   }));
 
   // Guard: state may be undefined during initial navigation hydration
-  if (!state || !state.routes || state.routes.length === 0) {
+  if (!state || !state.routes || state.routes.length === 0 || !descriptors) {
     return null;
   }
 
-  const focusedOptions = descriptors[state.routes[state.index].key]?.options;
+  const focusedRoute = state.routes[state.index];
+  if (!focusedRoute) return null;
+  const focusedOptions = descriptors[focusedRoute.key]?.options;
 
   if (focusedOptions?.tabBarStyle?.display === 'none') {
     return null;
@@ -146,6 +154,8 @@ export default function TabLayout() {
       screenOptions={{
         headerShown: false,
       }}
+      initialRouteName="index"
+      backBehavior="initialRoute"
     >
       <Tabs.Screen
         name="index"

@@ -26,11 +26,12 @@ export interface Message {
 export interface Story {
   id: string;
   url: string;
-  type: 'image' | 'video';
+  type: 'image' | 'video' | 'text';
   timestamp: string;
   seen: boolean;
   duration?: number;
   caption?: string;
+  backgroundColor?: string;
   userId?: string;
   likes?: string[];
   views?: string[];

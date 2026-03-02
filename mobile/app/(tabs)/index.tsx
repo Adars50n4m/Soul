@@ -141,7 +141,13 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
           <View style={styles.avatarContainer}>
             <Animated.Image
               source={{ uri: proxySupabaseUrl(item.avatar) || DEFAULT_AVATAR }}
-              style={styles.avatar}
+              style={[
+                styles.avatar,
+                item.stories && item.stories.length > 0 && {
+                  borderWidth: 2,
+                  borderColor: item.stories.some((s) => !s.seen) ? '#3b82f6' : 'rgba(255,255,255,0.4)'
+                }
+              ]}
             />
             {item.status === 'online' && <View style={styles.onlineIndicator} />}
           </View>
@@ -172,6 +178,8 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
     prevProps.item.name === nextProps.item.name &&
     prevProps.item.avatar === nextProps.item.avatar &&
     prevProps.item.status === nextProps.item.status &&
+    prevProps.item.stories?.length === nextProps.item.stories?.length &&
+    prevProps.item.stories?.some(s => !s.seen) === nextProps.item.stories?.some(s => !s.seen) &&
     prevProps.lastMsg.text === nextProps.lastMsg.text &&
     prevProps.lastMsg.timestamp === nextProps.lastMsg.timestamp &&
     prevProps.isTyping === nextProps.isTyping &&
@@ -333,6 +341,7 @@ export default function HomeScreen() {
       addStatus({
         userId: currentUser.id,
         mediaUrl,
+        localUri: item.uri,
         mediaType,
         timestamp,
         expiresAt: expiresAtString,
@@ -432,15 +441,20 @@ export default function HomeScreen() {
   const renderItem = useCallback(({ item }: { item: Contact }) => {
     const lastMsg = lastMessagesMap[item.id] || { text: item.lastMessage, timestamp: '' };
     const isTyping = typingUsers.includes(item.id);
+    
+    // Inject stories if any
+    const storiesForContact = contactStoriesMap.get(item.id) || [];
+    const itemWithStories = { ...item, stories: storiesForContact };
+
     return (
       <ChatListItem 
-          item={item} 
+          item={itemWithStories} 
           lastMsg={lastMsg} 
           onSelect={handleUserSelect} 
           isTyping={isTyping}
       />
     );
-  }, [lastMessagesMap, typingUsers, handleUserSelect]);
+  }, [lastMessagesMap, typingUsers, handleUserSelect, contactStoriesMap]);
 
   // Stable keyExtractor for FlashList
   const keyExtractor = useCallback((item: Contact) => item.id, []);
