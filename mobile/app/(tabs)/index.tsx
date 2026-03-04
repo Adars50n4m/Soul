@@ -11,6 +11,8 @@ import Animated, {
   useAnimatedStyle,
   withSpring,
   withTiming,
+  SharedTransition,
+  Easing,
   LinearTransition,
   FadeIn,
   FadeOut,
@@ -66,6 +68,20 @@ const resolveStatusAssetUri = async (asset: ImagePicker.ImagePickerAsset): Promi
 const typingStyle = { color: '#22c55e', fontWeight: '700' as const };
 const chevronColor = 'rgba(255,255,255,0.3)';
 const hiddenStyle = { opacity: 0 };
+const pillSharedTransition = SharedTransition.custom((values) => {
+  'worklet';
+  const morph = {
+    duration: 920,
+    easing: Easing.bezier(0.22, 1, 0.36, 1),
+  };
+  return {
+    originX: withTiming(values.targetOriginX, morph),
+    originY: withTiming(values.targetOriginY, morph),
+    width: withTiming(values.targetWidth, morph),
+    height: withTiming(values.targetHeight, morph),
+    borderRadius: withTiming(values.targetBorderRadius, morph),
+  };
+}).duration(920);
 const formatTime = (ts: string) => {
   if (!ts) return '';
   try {
@@ -82,6 +98,8 @@ const formatTime = (ts: string) => {
     return ts;
   }
 };
+
+let hasRenderedHomeOnce = false;
 
 interface ChatListItemProps {
   item: Contact;
@@ -129,12 +147,18 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
       style={isHidden ? [styles.chatItem, hiddenStyle] : styles.chatItem}
       disabled={isHidden}
     >
-      <Animated.View style={[styles.chatPillContainer, animatedStyle]}>
-        
-        {/* Glass blur background — same feel as navbar */}
-        <View style={[StyleSheet.absoluteFill, { borderRadius: 36, overflow: 'hidden' }]}>
-          <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill} />
-        </View>
+      {/* Outer morph target - ONLY handles the shared element transition */}
+      <Animated.View 
+        sharedTransitionTag={`pill-${item.id}`}
+        sharedTransitionStyle={pillSharedTransition}
+        style={[styles.chatPillContainer]}
+      >
+        {/* Inner container handles the press scale animation */}
+        <Animated.View style={[StyleSheet.absoluteFill, animatedStyle]}>
+          {/* Glass blur background — same feel as navbar */}
+          <View style={[StyleSheet.absoluteFill, { borderRadius: 36, overflow: 'hidden' }]}>
+            <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill} />
+          </View>
         {/* Subtle dark tint overlay */}
         <Animated.View
             style={[StyleSheet.absoluteFill, { borderRadius: 36, backgroundColor: 'rgba(15, 15, 20, 0.4)' }]}
@@ -142,7 +166,11 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
             
         {/* Content rendered safely as an overlay, decoupled from Reanimated's snapshot engine */}
         <View style={[styles.pillContent, { position: 'absolute', width: '100%', height: '100%', paddingHorizontal: 16 }]} pointerEvents="box-none">
-          <View style={styles.avatarContainer}>
+          <Animated.View
+            sharedTransitionTag={`pill-avatar-${item.id}`}
+            sharedTransitionStyle={pillSharedTransition}
+            style={styles.avatarContainer}
+          >
             <Animated.Image
               source={{ uri: proxySupabaseUrl(item.avatar) || DEFAULT_AVATAR }}
               style={[
@@ -154,14 +182,17 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
               ]}
             />
             {item.status === 'online' && <View style={styles.onlineIndicator} />}
-          </View>
+          </Animated.View>
 
           <View style={styles.chatContent}>
-            <View>
+            <Animated.View
+              sharedTransitionTag={`pill-name-${item.id}`}
+              sharedTransitionStyle={pillSharedTransition}
+            >
               <Text style={styles.contactName}>
                 {item.name}
               </Text>
-            </View>
+            </Animated.View>
             <Text numberOfLines={1} style={isTyping ? [styles.lastMessage, typingStyle] : styles.lastMessage}>
               {isTyping ? 'Typing...' : (lastMsg.text || 'Start a conversation')}
             </Text>
@@ -172,6 +203,7 @@ const ChatListItem = React.memo(({ item, lastMsg, onSelect, isTyping, isHidden }
             <MaterialIcons name="chevron-right" size={20} color={chevronColor} />
           </View>
         </View>
+        </Animated.View>
       </Animated.View>
     </Pressable>
   );
@@ -218,6 +250,12 @@ export default function HomeScreen() {
   const [isNoteModalVisible, setIsNoteModalVisible] = useState(false);
   const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' } | null>(null);
   const [isUploadingStatus, setIsUploadingStatus] = useState(false);
+  const statusRailOpacity = useSharedValue(hasRenderedHomeOnce ? 0 : 1);
+  const hasFocusedOnce = useRef(false);
+
+  const statusRailAnimStyle = useAnimatedStyle(() => ({
+    opacity: statusRailOpacity.value,
+  }));
 
   // Hide tab bar when fullscreen overlays are open — useLayoutEffect ensures
   // the tab bar is hidden before the first paint, avoiding a flash on Android
@@ -228,6 +266,24 @@ export default function HomeScreen() {
       tabBarStyle: { display: shouldHideTabBar ? 'none' : 'flex' }
     });
   }, [isViewerVisible, isMediaPickerVisible, statusMediaPreview, isNoteModalVisible, navigation]);
+
+  useEffect(() => {
+    const unsubscribe = (navigation as any).addListener('focus', () => {
+      if (!hasFocusedOnce.current) {
+        hasFocusedOnce.current = true;
+        hasRenderedHomeOnce = true;
+        statusRailOpacity.value = 1;
+        return;
+      }
+      // Fade-in only status rail on return; keep the rest of Home unchanged.
+      statusRailOpacity.value = 0;
+      statusRailOpacity.value = withTiming(1, {
+        duration: 320,
+        easing: Easing.out(Easing.cubic),
+      });
+    });
+    return unsubscribe;
+  }, [navigation, statusRailOpacity]);
 
   const contactStoriesMap = useMemo(() => {
     const map = new Map<string, Story[]>();
@@ -469,7 +525,7 @@ export default function HomeScreen() {
 
   // Stable header component to prevent remounting and touch loss on Android
   const renderHeader = useCallback(() => (
-    <View style={styles.statusRail}>
+    <Animated.View style={[styles.statusRail, statusRailAnimStyle]}>
       <FlatList
         horizontal
         data={[{ id: 'my-status' }, ...contactsWithStories]}
@@ -554,16 +610,13 @@ export default function HomeScreen() {
           );
         }}
       />
-    </View>
-  ), [contactsWithStories, myStories, currentUser, handleMyStatusPress, handleStatusPress]);
+    </Animated.View>
+  ), [contactsWithStories, myStories, currentUser, handleMyStatusPress, handleStatusPress, statusRailAnimStyle]);
 
   return (
-    <Animated.View 
-        style={styles.container} 
-    >
+    <View style={styles.container}>
       <StatusBar barStyle="light-content" />
-      
-      <FlashList
+      <FlatList
         data={visibleContacts}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
@@ -571,7 +624,6 @@ export default function HomeScreen() {
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
       />
-
 
       <StatusViewerModal
         visible={isViewerVisible}
@@ -635,7 +687,7 @@ export default function HomeScreen() {
         visible={isNoteModalVisible}
         onClose={closeModalRobustly}
       />
-    </Animated.View>
+    </View>
   );
 }
 

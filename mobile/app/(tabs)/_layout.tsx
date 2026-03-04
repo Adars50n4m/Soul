@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { Tabs } from 'expo-router';
-import { View, Pressable, StyleSheet, Platform, useWindowDimensions } from 'react-native';
+import { View, Pressable, StyleSheet, useWindowDimensions } from 'react-native';
 import GlassView from '../../components/ui/GlassView';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -8,7 +8,9 @@ import Animated, {
   useSharedValue, 
   useAnimatedStyle, 
   withSpring, 
-  withTiming 
+  withTiming,
+  withDelay,
+  Easing,
 } from 'react-native-reanimated';
 import { useApp } from '../../context/AppContext';
 
@@ -17,6 +19,8 @@ import { useApp } from '../../context/AppContext';
 export const unstable_settings = {
   initialRouteName: 'index',
 };
+
+let hasRenderedTabBarOnce = false;
 
 const TabIcon = ({ name, focused, size = 24 }: { name: any; focused: boolean; size?: number }) => {
   const { activeTheme } = useApp();
@@ -51,19 +55,46 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
   const tabWidth = (TAB_BAR_WIDTH - 24) / numTabs;
   const currentIndex = state?.index ?? 0;
 
-  const translateX = useSharedValue(0);
+  const isFirstIndicatorSync = React.useRef(true);
+  const translateX = useSharedValue(currentIndex * tabWidth);
+  const tabBarOpacity = useSharedValue(hasRenderedTabBarOnce ? 0 : 1);
 
   useEffect(() => {
+    if (isFirstIndicatorSync.current) {
+      // Avoid first-frame indicator slide when tab bar remounts after chat.
+      isFirstIndicatorSync.current = false;
+      translateX.value = currentIndex * tabWidth;
+      return;
+    }
     translateX.value = withSpring(currentIndex * tabWidth, {
       damping: 18,
       stiffness: 120,
       mass: 0.8
     });
-  }, [currentIndex, tabWidth]);
+  }, [currentIndex, tabWidth, translateX]);
+
+  useEffect(() => {
+    if (!hasRenderedTabBarOnce) {
+      hasRenderedTabBarOnce = true;
+      tabBarOpacity.value = 1;
+      return;
+    }
+    tabBarOpacity.value = withDelay(
+      60,
+      withTiming(1, {
+        duration: 300,
+        easing: Easing.out(Easing.cubic),
+      })
+    );
+  }, [tabBarOpacity]);
 
   const indicatorStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }],
     backgroundColor: `${activeTheme.primary}0D`, // 0D is ~5% opacity (even more subtle)
+  }));
+
+  const tabBarFadeStyle = useAnimatedStyle(() => ({
+    opacity: tabBarOpacity.value,
   }));
 
   // Guard: state may be undefined during initial navigation hydration
@@ -80,7 +111,7 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
   }
 
   return (
-    <View style={styles.tabBarContainer}>
+    <Animated.View style={[styles.tabBarContainer, tabBarFadeStyle]}>
       <View style={styles.tabBarGlassContainer}>
         {/* Layer 1: The Glass background */}
         <GlassView
@@ -134,7 +165,7 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
           })}
         </View>
       </View>
-    </View>
+    </Animated.View>
   );
 };
 
