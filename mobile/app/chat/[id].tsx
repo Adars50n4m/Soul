@@ -17,6 +17,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
+import { offlineService } from '../../services/LocalDBService';
 import VoiceNotePlayer from '../../components/chat/VoiceNotePlayer';
 import ProgressiveBlur from '../../components/chat/ProgressiveBlur';
 import MessageBubble from '../../components/chat/MessageBubble';
@@ -202,7 +203,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     
     const router = useRouter();
     const isFocused = useIsFocused();
-    const { contacts, messages, sendChatMessage, startCall, activeCall, addReaction, deleteMessage, musicState, currentUser, activeTheme, sendTyping, typingUsers } = useApp();
+    const { contacts, messages, sendChatMessage, startCall, activeCall, updateMessage, addReaction, deleteMessage, musicState, currentUser, activeTheme, sendTyping, typingUsers, uploadProgressTracker } = useApp();
     const [inputText, setInputText] = useState('');
     const [showCallModal, setShowCallModal] = useState(false);
     const [isReady, setIsReady] = useState(false);
@@ -650,8 +651,15 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             recordingTranslateX.value = 0;
             pendingStopAfterPrepareRef.current = null;
             isStoppingRecordingRef.current = false;
-        } catch (err) {
-            console.error('Failed to stop recording', err);
+        } catch (err: any) {
+            // "no valid audio data" happens if the recording was too short (quick tap).
+            // We suppress the noisy console.error for this specific case.
+            if (err.message?.includes('no valid audio data')) {
+                console.log('[Chat] Audio recording was too short, skipping send.');
+            } else {
+                console.error('Failed to stop recording', err);
+            }
+            
             await Audio.setAudioModeAsync({
                 allowsRecordingIOS: false,
                 playsInSilentModeIOS: true,
@@ -665,24 +673,16 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
     const handleSendAudio = async (uri: string) => {
         if (!id) return;
-        setIsUploading(true);
         try {
             const media: Message['media'] = {
                 type: 'audio',
-                url: '', // will be set after upload
+                url: '', // will be set by ChatService after background upload
             };
-            try {
-                const publicUrl = await storageService.uploadImage(uri, 'chat-media', currentUser?.id || '');
-                if (!publicUrl) throw new Error('Upload failed');
-                media.url = publicUrl;
-                sendChatMessage(id, '', media);
-            } catch (err) {
-                throw err; // Re-throw to be caught by outer catch
-            }
-            setIsUploading(false);
+            
+            // Instantly send message to local DB, passing the local uri for background upload
+            sendChatMessage(id, '', media, undefined, uri);
         } catch (error: any) {
-            Alert.alert('Upload Failed', error.message || 'Please try again.');
-            setIsUploading(false);
+            Alert.alert('Send Failed', error.message || 'Please try again.');
         }
     };
 
@@ -1007,6 +1007,35 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         }
     };
 
+    const handleMediaDownload = useCallback(async (msgId: string, url: string, index: number) => {
+        try {
+            // Use storageService.getMediaUrl to handle caching and URL resolution (R2 keys vs direct URLs)
+            // This fixes the "Expected URL scheme" error on Android by ensuring we always have a proper URL before downloadAsync
+            const localUri = await storageService.getMediaUrl(url);
+            
+            if (!localUri) {
+               throw new Error('Failed to resolve media URL');
+            }
+
+            // Update Database
+            await offlineService.updateMessageLocalUri(msgId, localUri);
+
+            // Update AppContext State to trigger re-render in UI
+            if (updateMessage) {
+                const currentMsg = chatMessages.find(m => m.id === msgId);
+                if (currentMsg) {
+                    updateMessage(id as string, msgId, { 
+                         localFileUri: localUri,
+                         media: currentMsg.media ? { ...currentMsg.media, url: currentMsg.media.url } : undefined
+                    } as any);
+                }
+            }
+        } catch (error) {
+            console.error('[ChatScreen] Media download error:', error);
+            // Alert.alert('Download Failed', 'Could not seamlessly download this media.');
+        }
+    }, [updateMessage, chatMessages, id]);
+
     const renderMessage = useCallback(({ item }: { item: any }) => (
         <MessageBubble
             msg={item}
@@ -1023,8 +1052,10 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             onSelectToggle={handleSelectToggle}
             isHighlighted={highlightedMessageId === item.id}
             onQuotePress={handleQuotePress}
+            uploadProgress={uploadProgressTracker[item.id]}
+            onMediaDownload={handleMediaDownload}
         />
-    ), [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle]);
+    ), [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle, uploadProgressTracker, handleMediaDownload]);
     
     const renderCollectionItem = useCallback(({ item, index }: { item: any, index: number }) => (
         <Pressable
@@ -1096,32 +1127,23 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
     const handleSendMedia = async (mediaList: { uri: string; type: 'image'|'video'|'audio' }[], caption?: string) => {
         if (!mediaList || mediaList.length === 0 || !id) return;
-        setIsUploading(true);
         try {
             for (let i = 0; i < mediaList.length; i++) {
                 const item = mediaList[i];
                 
                 const media: Message['media'] = {
                     type: item.type,
-                    url: '', // will be set after upload
+                    url: '', // will be set by ChatService after background upload
                     caption: i === 0 ? caption || undefined : undefined,
                 };
                 const msgText = i === 0 ? (caption || '') : '';
 
-                try {
-                    const publicUrl = await storageService.uploadImage(item.uri, 'chat-media', currentUser?.id || '');
-                    if (!publicUrl) throw new Error('Upload failed');
-                    media.url = publicUrl;
-                    await sendChatMessage(id, msgText, media);
-                } catch (err) {
-                    throw err; // Re-throw to be caught by outer catch
-                }
+                // Instantly send to local UI and background queue
+                await sendChatMessage(id, msgText, media, undefined, item.uri);
             }
             setMediaPreview(null);
-            setIsUploading(false);
         } catch (error: any) {
-            Alert.alert('Upload Failed', error.message || 'Please try again.');
-            setIsUploading(false);
+            Alert.alert('Send Failed', error.message || 'Please try again.');
         }
     };
 

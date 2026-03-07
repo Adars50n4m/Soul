@@ -8,8 +8,9 @@ export const storageService = {
     /**
      * Upload media (image or video) to storage via Server Presigned URLs
      */
-    async uploadImage(uri: string, bucket: string, folder: string = ''): Promise<string | null> {
+    async uploadImage(uri: string, bucket: string, folder: string = '', onProgress?: (progress: number) => void): Promise<string | null> {
         console.log('📤 Uploading media via Server Presigned URL');
+        let uploadTask: FileSystem.UploadTask | null = null;
         try {
             const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
             const fileName = `${folder ? folder + '-' : ''}${Date.now()}.${ext}`;
@@ -33,26 +34,33 @@ export const storageService = {
                  throw new Error('Failed to get presigned URL from server');
             }
 
-            const { presignedUrl, key } = await res.json();
+            const jsonRes = await res.json() as { presignedUrl: string, key: string };
+            const { presignedUrl, key } = jsonRes;
 
-            // 2. Upload file directly to R2 using fetch()
+            // 2. Upload file directly to R2 using FileSystem
             const fileInfo = await FileSystem.getInfoAsync(uri);
             if (!fileInfo.exists) throw new Error('File does not exist locally');
 
-            // Wait until it reads the Blob for R2 PUT
-            const response = await fetch(uri);
-            const blob = await response.blob();
-
-            const uploadRes = await fetch(presignedUrl, {
-                method: 'PUT',
-                body: blob,
-                headers: {
-                    'Content-Type': contentType,
+            uploadTask = FileSystem.createUploadTask(
+                presignedUrl,
+                uri,
+                {
+                    httpMethod: 'PUT',
+                    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+                    headers: {
+                        'Content-Type': contentType,
+                    }
+                },
+                (data) => {
+                    const progress = data.totalBytesSent / data.totalBytesExpectedToSend;
+                    if (onProgress) onProgress(progress);
                 }
-            });
+            );
 
-            if (!uploadRes.ok) {
-                 throw new Error(`R2 Upload failed: ${uploadRes.statusText}`);
+            const uploadRes = await uploadTask.uploadAsync();
+
+            if (uploadRes?.status !== 200) {
+                 throw new Error(`R2 Upload failed: ${uploadRes?.status}`);
             }
 
             // For now return the key, the app can generate download URLs later via the server

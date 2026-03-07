@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, StyleSheet, ViewProps, StyleProp, ViewStyle, Platform } from 'react-native';
+import { StyleSheet, ViewProps, StyleProp, ViewStyle, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 
 export interface GlassViewProps extends ViewProps {
@@ -9,12 +9,6 @@ export interface GlassViewProps extends ViewProps {
     children?: React.ReactNode;
 }
 
-/**
- * GlassView — uses Expo's native BlurView.
- * Provides high-performance, GPU-accelerated "liquid glass" backdrop filters.
- * 
- * Falls back to a subtle semi-transparent View only if BlurView fails to load.
- */
 export const GlassView = ({
     intensity = 45,
     tint = 'dark',
@@ -22,16 +16,29 @@ export const GlassView = ({
     children,
     ...rest
 }: GlassViewProps) => {
+    if (Platform.OS === 'android') {
+        // On Android, use dimezisBlurView for real backdrop blur.
+        // blurReductionFactor reduces the perceived intensity on Android
+        // to match iOS visually. Increase intensity to compensate for the reduction.
+        return (
+            <BlurView
+                intensity={Math.min(intensity * 2.5, 100)}
+                tint={tint}
+                experimentalBlurMethod="dimezisBlurView"
+                blurReductionFactor={4}
+                style={[styles.container, style]}
+                {...rest}
+            >
+                {children}
+            </BlurView>
+        );
+    }
+
     return (
-        <BlurView 
-            intensity={intensity} 
-            tint={tint} 
-            experimentalBlurMethod={Platform.OS === 'android' ? 'dimezisBlurView' : undefined}
-            style={[
-                styles.container, 
-                { backgroundColor: tint === 'dark' ? 'rgba(0, 0, 0, 0.2)' : 'rgba(255, 255, 255, 0.1)' },
-                style
-            ]} 
+        <BlurView
+            intensity={intensity}
+            tint={tint}
+            style={[styles.container, style]}
             {...rest}
         >
             {children}

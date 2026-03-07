@@ -54,11 +54,11 @@ export const ChatStyles = StyleSheet.create({
         overflow: 'visible',
     },
     bubbleContainerMe: {
-        backgroundColor: '#BC002A', // Deep crimson for sender
+        backgroundColor: 'rgba(188, 0, 42, 0.75)', // Glassy crimson for sender
         borderBottomRightRadius: 4,
     },
     bubbleContainerThem: {
-        backgroundColor: 'rgba(255, 255, 255, 0.12)', // Darker subtle gray for receiver
+        backgroundColor: 'rgba(255, 255, 255, 0.15)', // Glassy subtle gray for receiver
         borderTopLeftRadius: 4,
     },
     messageContent: {
@@ -238,7 +238,7 @@ export const ChatStyles = StyleSheet.create({
         paddingVertical: 1,
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.2)',
-        backgroundColor: 'rgba(0,0,0,0.7)',
+        backgroundColor: 'rgba(0,0,0,0.4)',
         overflow: 'hidden',
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },

@@ -2,6 +2,7 @@
  * SoulSync — Couple Teddy Bears Login (React Native)
  * ✅ Fixed: "Moved to native" Error & Blink Stability.
  * Consistent use of JS driver for SVG properties to ensure stability.
+ * ✅ Updated: OTP-based login + Google Sign-In + Forgot Password
  */
 
 import React, { useState, useRef, useEffect } from 'react';
@@ -31,11 +32,13 @@ import Svg, {
 } from 'react-native-svg';
 import { useRouter } from 'expo-router';
 import { useApp } from '../context/AppContext';
+import { authService } from '../services/AuthService';
 
 const AnimatedG = Animated.createAnimatedComponent(G) as any;
 const AnimatedPath = Animated.createAnimatedComponent(Path) as any;
 const AnimatedEllipse = Animated.createAnimatedComponent(Ellipse) as any;
 const AnimatedRect = Animated.createAnimatedComponent(Rect) as any;
+const AnimatedCircle = Animated.createAnimatedComponent(Circle) as any;
 
 const { width } = Dimensions.get('window');
 
@@ -57,7 +60,7 @@ const C = {
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { login, currentUser } = useApp();
+  const { login, setSession, currentUser } = useApp();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -82,6 +85,9 @@ export default function LoginScreen() {
   }, [currentUser]);
 
   useEffect(() => {
+    let isActive = true;
+    let blinkTimer: any = null;
+    
     // Breathing loop (JS Driver for SVG stability)
     Animated.loop(
       Animated.sequence([
@@ -90,15 +96,36 @@ export default function LoginScreen() {
       ])
     ).start();
 
-    // Blinking loop (JS Driver)
+    // Blinking loop (Using setTimeout for reliable long delays on Android)
+    // Blinking loop (Robust strict single-timer)
     const runBlink = () => {
-      Animated.sequence([
-        Animated.delay(3800),
-        Animated.timing(blinkAnim, { toValue: 1, duration: 100, useNativeDriver: false }),
-        Animated.timing(blinkAnim, { toValue: 0, duration: 100, useNativeDriver: false }),
-      ]).start(() => runBlink());
+      if (!isActive) return;
+      if (blinkTimer) clearTimeout(blinkTimer);
+      
+      // Extremely slow: 25 to 50 seconds delay
+      const nextDelay = Math.random() * 25000 + 25000;
+      
+      blinkTimer = setTimeout(() => {
+        if (!isActive) return;
+        
+        Animated.sequence([
+          Animated.timing(blinkAnim, { toValue: 1, duration: 200, useNativeDriver: false }),
+          Animated.timing(blinkAnim, { toValue: 0, duration: 200, useNativeDriver: false }),
+        ]).start(({ finished }) => {
+          if (isActive && finished) {
+            runBlink();
+          }
+        });
+      }, nextDelay);
     };
+    
     runBlink();
+
+    return () => {
+      isActive = false;
+      if (blinkTimer) clearTimeout(blinkTimer);
+      blinkAnim.stopAnimation();
+    };
   }, []);
 
   useEffect(() => {
@@ -113,9 +140,9 @@ export default function LoginScreen() {
   useEffect(() => {
     if (status === 'success' || status === 'fail') {
       Animated.sequence([
-        Animated.timing(statusAnim, { toValue: status === 'success' ? 1 : -1, duration: 150, useNativeDriver: true }),
-        Animated.timing(statusAnim, { toValue: status === 'success' ? 0 : 1, duration: 150, useNativeDriver: true }),
-        Animated.timing(statusAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
+        Animated.timing(statusAnim, { toValue: status === 'success' ? 1 : -1, duration: 150, useNativeDriver: false }),
+        Animated.timing(statusAnim, { toValue: status === 'success' ? 0 : 1, duration: 150, useNativeDriver: false }),
+        Animated.timing(statusAnim, { toValue: 0, duration: 150, useNativeDriver: false }),
       ]).start();
       
       if (status === 'fail') {
@@ -127,14 +154,45 @@ export default function LoginScreen() {
 
   const handleLogin = async () => {
     if (status === 'loading') return;
+    if (!email.trim() || !password.trim()) {
+      setStatus('fail');
+      return;
+    }
     setStatus('loading');
-    const success = await login(email, password);
-    if (success) {
+
+    // email field accepts email OR username
+    const result = await authService.signInWithPassword(email, password);
+
+    if (result.success && result.user) {
+      // Sync the user state to AppContext for UI redirection
+      await setSession(result.user.id);
       setStatus('success');
-      setTimeout(() => router.replace('/(tabs)'), 2000);
+      setTimeout(() => router.replace('/(tabs)'), 1500);
     } else {
       setStatus('fail');
     }
+  };
+
+  const handleGoogleSignIn = async () => {
+    if (status === 'loading') return;
+    setStatus('loading');
+
+    const result = await authService.signInWithGoogle();
+
+    if (result.success) {
+      setStatus('success');
+      if (result.isNewUser) {
+        setTimeout(() => router.push('/username-setup'), 1000);
+      } else {
+        setTimeout(() => router.replace('/(tabs)'), 1000);
+      }
+    } else {
+      setStatus('fail');
+    }
+  };
+
+  const handleCreateAccount = () => {
+    router.push('/signup');
   };
 
   // ─── Tracking & Paths ───────────────────────
@@ -189,7 +247,14 @@ export default function LoginScreen() {
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.keyboardView}>
         
         <Animated.View style={[styles.svgContainer, { transform: [status === 'fail' ? { translateX: containerTrans } : { translateY: containerTrans }] }]}>
-          <Svg width="360" height="200" viewBox="0 0 400 240">
+          <Svg 
+            width="360" 
+            height="200" 
+            viewBox="0 0 400 240" 
+            onLayout={() => {}}
+            pointerEvents="none"
+            collapsable={false}
+          >
             <Defs>
               {bears.map(b => (
               <ClipPath id={`mouth-clip-${b.id}`} key={`clip-${b.id}`}>
@@ -239,9 +304,9 @@ export default function LoginScreen() {
                           <AnimatedEllipse cx={cx+38} cy={cy} rx={16} ry={eyeRY} fill="white" />
                           <G transform={`translate(${targetPupilX}, ${pupilY})`}>
                             <AnimatedEllipse cx={cx-38} cy={cy} rx={9} ry={pupilRY} fill={C.bearDark} />
-                            <Circle cx={cx-41} cy={cy-3} r="3" fill="white" opacity={blinkAnim.interpolate({inputRange:[0,0.5], outputRange:[1,0]}) as any} />
+                            <AnimatedCircle cx={cx-41} cy={cy-3} r="3" fill="white" opacity={blinkAnim.interpolate({inputRange:[0,0.5], outputRange:[1,0]}) as any} />
                             <AnimatedEllipse cx={cx+38} cy={cy} rx={9} ry={pupilRY} fill={C.bearDark} />
-                            <Circle cx={cx+35} cy={cy-3} r="3" fill="white" opacity={blinkAnim.interpolate({inputRange:[0,0.5], outputRange:[1,0]}) as any} />
+                            <AnimatedCircle cx={cx+35} cy={cy-3} r="3" fill="white" opacity={blinkAnim.interpolate({inputRange:[0,0.5], outputRange:[1,0]}) as any} />
                           </G>
                         </G>
                       )}
@@ -271,37 +336,64 @@ export default function LoginScreen() {
           </Svg>
         </Animated.View>
 
-        <View style={styles.cardWrapper}>
-          <BlurView intensity={80} tint="dark" style={styles.card}>
+        <View style={styles.cardContainer}>
+          <BlurView 
+            intensity={Platform.OS === 'ios' ? 85 : 30} 
+            tint="dark" 
+            style={StyleSheet.absoluteFill}
+          />
+          {/* Subtle "Gloss" highlight layer */}
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(255,255,255,0.03)' }]} />
+          
+          <View style={styles.card}>
             <View style={styles.header}>
               <Text style={styles.title}>SoulSync</Text>
               <Text style={styles.subtitle}>Join the cutest couples today ✨</Text>
             </View>
 
+            {/* Email */}
             <View style={styles.inputContainer}>
               <View style={styles.iconWrapper}><Feather name="user" size={20} color={isEmailFocused ? '#EC4899' : '#9CA3AF'} /></View>
-              <TextInput style={styles.input} placeholder="Partner 1 & Partner 2" placeholderTextColor="#9CA3AF" onFocus={() => setIsEmailFocused(true)} onBlur={() => setIsEmailFocused(false)} onChangeText={setEmail} value={email} autoCapitalize="none" />
+              <TextInput style={styles.input} placeholder="Email or Username" placeholderTextColor="#9CA3AF" onFocus={() => setIsEmailFocused(true)} onBlur={() => setIsEmailFocused(false)} onChangeText={setEmail} value={email} autoCapitalize="none" autoCorrect={false} />
             </View>
 
+            {/* Password */}
             <View style={styles.inputContainer}>
               <View style={styles.iconWrapper}><Feather name="lock" size={20} color={isPasswordFocused ? '#EC4899' : '#9CA3AF'} /></View>
-              <TextInput style={styles.input} placeholder="Secret Handshake" placeholderTextColor="#9CA3AF" secureTextEntry={!showPassword} onFocus={() => setIsPasswordFocused(true)} onBlur={() => setIsPasswordFocused(false)} onChangeText={setPassword} value={password} autoCapitalize="none" />
+              <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#9CA3AF" secureTextEntry={!showPassword} onFocus={() => setIsPasswordFocused(true)} onBlur={() => setIsPasswordFocused(false)} onChangeText={setPassword} value={password} autoCapitalize="none" />
               <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(!showPassword)}>
                 <Feather name={showPassword ? 'eye' : 'eye-off'} size={20} color="#9CA3AF" />
               </TouchableOpacity>
             </View>
 
+            {/* Login Button */}
             <TouchableOpacity activeOpacity={0.8} onPress={handleLogin} disabled={status === 'loading'}>
               <LinearGradient colors={['#EC4899', '#F43F5E']} style={styles.btn}>
                 {status === 'loading' ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.btnText}>{status === 'success' ? 'Hearts Synced 💕' : 'Sync Hearts'}</Text>}
               </LinearGradient>
             </TouchableOpacity>
 
-            <View style={styles.footer}>
-              <TouchableOpacity><Text style={styles.footerMuted}>Lost the spark?</Text></TouchableOpacity>
-              <TouchableOpacity><Text style={styles.footerPink}>Create Match</Text></TouchableOpacity>
+            {/* Divider */}
+            <View style={styles.divider}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>or</Text>
+              <View style={styles.dividerLine} />
             </View>
-          </BlurView>
+
+            {/* Google Sign-In */}
+            <TouchableOpacity activeOpacity={0.8} onPress={handleGoogleSignIn} disabled={status === 'loading'}>
+              <View style={styles.googleBtn}>
+                <Text style={styles.googleIcon}>G</Text>
+                <Text style={styles.googleBtnText}>Continue with Google</Text>
+              </View>
+            </TouchableOpacity>
+
+            {/* Footer */}
+            <View style={styles.footer}>
+              <TouchableOpacity onPress={() => router.push('/forgot-password')}><Text style={styles.footerMuted}>Forgot password?</Text></TouchableOpacity>
+              <TouchableOpacity onPress={handleCreateAccount}><Text style={styles.footerPink}>Create Account</Text></TouchableOpacity>
+            </View>
+          </View>
         </View>
       </KeyboardAvoidingView>
     </View>
@@ -312,8 +404,21 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0a0a0a', alignItems: 'center', justifyContent: 'center' },
   keyboardView: { width: '100%', maxWidth: 400, alignItems: 'center', paddingHorizontal: 20 },
   svgContainer: { width: 400, height: 180, marginBottom: -55, zIndex: 0, alignItems: 'center', justifyContent: 'flex-end' },
-  cardWrapper: { width: '100%', borderRadius: 32, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)', zIndex: 10 },
-  card: { width: '100%', padding: 30, paddingTop: 45, backgroundColor: 'rgba(0,0,0,0.5)' },
+  cardContainer: { width: '100%', borderRadius: 32, overflow: 'hidden', zIndex: 10 },
+  card: { 
+    width: '100%', 
+    padding: 30, 
+    paddingTop: 45, 
+    backgroundColor: Platform.OS === 'ios' ? 'rgba(30, 30, 30, 0.4)' : 'rgba(30, 30, 30, 0.85)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 25 },
+    shadowOpacity: 0.5,
+    shadowRadius: Platform.OS === 'ios' ? 35.5 : 10,
+    elevation: Platform.OS === 'ios' ? 0 : 2,
+  },
   header: { alignItems: 'center', marginBottom: 25 },
   title: { fontSize: 34, fontWeight: '900', color: '#EC4899', letterSpacing: -0.5 },
   subtitle: { color: '#FBCFE8', opacity: 0.9, marginTop: 6, fontWeight: '600', fontSize: 14 },
@@ -321,8 +426,24 @@ const styles = StyleSheet.create({
   iconWrapper: { paddingHorizontal: 16, justifyContent: 'center' },
   input: { flex: 1, color: '#FFFFFF', fontSize: 16, fontWeight: '500', height: '100%' },
   eyeBtn: { paddingHorizontal: 16, height: '100%', justifyContent: 'center' },
-  btn: { height: 56, borderRadius: 16, justifyContent: 'center', alignItems: 'center', marginTop: 10, shadowColor: '#EC4899', shadowOpacity: 0.4, shadowRadius: 12, elevation: 10 },
+  btn: { 
+    height: 56, 
+    borderRadius: 16, 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    marginTop: 10, 
+    shadowColor: '#EC4899', 
+    shadowOpacity: 0.4, 
+    shadowRadius: Platform.OS === 'ios' ? 12 : 5, 
+    elevation: Platform.OS === 'ios' ? 10 : 3 
+  },
   btnText: { color: '#FFFFFF', fontSize: 18, fontWeight: 'bold' },
+  divider: { flexDirection: 'row', alignItems: 'center', marginVertical: 20 },
+  dividerLine: { flex: 1, height: 1, backgroundColor: 'rgba(255,255,255,0.1)' },
+  dividerText: { color: '#9CA3AF', fontSize: 13, paddingHorizontal: 12 },
+  googleBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', borderRadius: 16, height: 56, gap: 10 },
+  googleIcon: { fontSize: 18, fontWeight: '800', color: '#4285F4' },
+  googleBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '500' },
   footer: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 24 },
   footerMuted: { color: '#9CA3AF', fontWeight: '500' },
   footerPink: { color: '#EC4899', fontWeight: 'bold' },

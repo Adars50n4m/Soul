@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import Animated, { FadeIn, FadeOut, ZoomIn } from 'react-native-reanimated';
+import GlassView from './ui/GlassView';
 
 interface NoteBubbleProps {
     text: string;
@@ -34,7 +35,6 @@ const styles = StyleSheet.create({
         zIndex: 100,
     },
     bubble: {
-        backgroundColor: '#262626',
         paddingHorizontal: 12,
         paddingVertical: 8,
         borderRadius: 18,

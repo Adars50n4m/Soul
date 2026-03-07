@@ -446,27 +446,29 @@ export default function CallScreen() {
     return (
         <GestureHandlerRootView style={{ flex: 1 }}>
             <GestureDetector gesture={screenPanGesture}>
-                <Animated.View style={[styles.container, { backgroundColor: activeTheme?.bg || '#000', width, height }, screenStyle]}>
+                <Animated.View style={[styles.container, { backgroundColor: '#000', width, height }, screenStyle]}>
                     <StatusBar hidden />
 
                     {/* 1. Background Layer (Remote Video or Blurred Avatar) */}
-                    <View style={StyleSheet.absoluteFill}>
-                        {/* Always show blurred avatar base for a smooth experience (even during a live video) */}
-                        <Image
-                            source={{ uri: contact.avatar }}
-                            style={[styles.backgroundImage, { width, height }]}
-                            blurRadius={isVideo ? 60 : 50}
-                        />
+                    <View style={[StyleSheet.absoluteFill, { backgroundColor: '#111' }]}>
+                        {/* Blurred avatar background — only if avatar URI exists */}
+                        {!!contact.avatar && (
+                            <Image
+                                source={{ uri: contact.avatar }}
+                                style={[styles.backgroundImage, { width, height }]}
+                                blurRadius={isVideo ? 60 : 50}
+                            />
+                        )}
                         <View style={styles.overlay} />
 
-                        {/* Remote Video Stream - On top of the blurred avatar */}
+                        {/* Remote Video Stream — zOrder=1 so it renders ABOVE the RN window on Android */}
                         {isVideo && RTCView && remoteStream && activeCall.isAccepted && !activeCall.remoteVideoOff && (
                             <RTCView
                                 streamURL={typeof remoteStream.toURL === 'function' ? remoteStream.toURL() : remoteStream}
                                 style={styles.remoteVideo}
                                 objectFit="cover"
                                 mirror={false}
-                                zOrder={0}
+                                zOrder={1}
                             />
                         )}
 
@@ -537,7 +539,7 @@ export default function CallScreen() {
                                                 style={styles.selfVideo}
                                                 objectFit="cover"
                                                 mirror={true}
-                                                zOrder={1}
+                                                zOrder={2}
                                             />
                                         ) : (
                                             <View style={styles.selfVideoPlaceholder}>

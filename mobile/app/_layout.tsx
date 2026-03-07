@@ -32,7 +32,7 @@ function RootContent() {
         const isCallActive = !!activeCall && (!activeCall.isIncoming || activeCall.isAccepted);
         if (isCallActive) return;
 
-        const inAuthGroup = segments[0] === 'login';
+        const inAuthGroup = ['login', 'signup', 'otp', 'username-setup', 'profile-setup', 'forgot-password'].includes(segments[0] as string);
 
         // Use a small timeout to let the navigation state settle on Android
         const timer = setTimeout(() => {
@@ -97,6 +97,11 @@ function RootContent() {
       <Stack screenOptions={{ headerShown: false, gestureEnabled: false }}>
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="login" options={{ headerShown: false, animation: 'fade' }} />
+        <Stack.Screen name="signup" options={{ headerShown: false, animation: 'slide_from_right' }} />
+        <Stack.Screen name="otp" options={{ headerShown: false, animation: 'slide_from_right' }} />
+        <Stack.Screen name="username-setup" options={{ headerShown: false, animation: 'slide_from_right' }} />
+        <Stack.Screen name="profile-setup" options={{ headerShown: false, animation: 'slide_from_right' }} />
+        <Stack.Screen name="forgot-password" options={{ headerShown: false, animation: 'slide_from_right' }} />
         <Stack.Screen name="(tabs)" options={{ 
           headerShown: false,
           gestureEnabled: false // Prevents root-level GO_BACK crash on swipe

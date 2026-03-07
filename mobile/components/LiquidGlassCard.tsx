@@ -66,10 +66,6 @@ export const LiquidGlassCard: React.FC<LiquidGlassCardProps> = ({
                 style,
             ]}
         >
-            {/* Android: dark frosted backing so blur produces visible glass depth */}
-            {isAndroid && (
-                <View style={[styles.androidBacking, { borderRadius }]} />
-            )}
 
             {/* Glass Background */}
             <GlassView
@@ -113,7 +109,6 @@ export const LiquidGlassView: React.FC<{
     const blurIntensity = isAndroid ? Math.min(intensity + 20, 100) : intensity;
     return (
         <View style={[styles.glassViewWrapper, style]}>
-            {isAndroid && <View style={styles.androidBackingFull} />}
             <GlassView
                 intensity={blurIntensity}
                 tint="dark"
@@ -181,14 +176,6 @@ const styles = StyleSheet.create({
         shadowOffset: { width: 0, height: 8 },
         shadowRadius: 24,
         elevation: 10,
-    },
-    androidBacking: {
-        ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'rgba(20, 20, 25, 0.75)',
-    },
-    androidBackingFull: {
-        ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'rgba(20, 20, 25, 0.70)',
     },
     blur: {
         overflow: 'hidden',

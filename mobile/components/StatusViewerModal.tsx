@@ -281,7 +281,7 @@ export const StatusViewerModal = ({
         <RNStatusBar barStyle="light-content" translucent backgroundColor="transparent" />
         
         {/* Background Backdrop */}
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: Platform.OS === 'android' ? 'rgba(0,0,0,0.85)' : '#000' }]} />
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: Platform.OS === 'android' ? 'rgba(0,0,0,0.4)' : '#000' }]} />
         
         <GlassView intensity={24} tint="dark" style={StyleSheet.absoluteFill} />
         
@@ -764,7 +764,6 @@ const styles = StyleSheet.create({
     flex: 1,
     borderRadius: 28,
     overflow: 'hidden',
-    backgroundColor: 'rgba(255,255,255,0.18)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.2)',
     height: 54,
@@ -781,7 +780,6 @@ const styles = StyleSheet.create({
     borderRadius: 27,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.18)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.2)',
   },

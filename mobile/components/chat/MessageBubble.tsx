@@ -40,6 +40,8 @@ interface MessageBubbleProps {
     initialAspectRatio?: number | null;
     isHighlighted?: boolean;
     onQuotePress?: (msgId: string) => void;
+    uploadProgress?: number;
+    onMediaDownload?: (msgId: string, url: string, index: number) => void;
 }
 
 const formatTime = (ts: string) => {
@@ -71,9 +73,12 @@ const MessageBubble = React.memo(({
   initialAspectRatio,
   isHighlighted = false,
   onQuotePress,
+  uploadProgress,
+  onMediaDownload,
 }: MessageBubbleProps) => {
     const { activeTheme } = useApp();
     const [aspectRatio, setAspectRatio] = React.useState<number | null>(initialAspectRatio || null);
+    const [downloadingIndices, setDownloadingIndices] = React.useState<number[]>([]);
     const translateX = useSharedValue(0);
     const isMe = msg.sender === 'me';
     const bubbleRef = useRef<View>(null);
@@ -179,7 +184,17 @@ const MessageBubble = React.memo(({
     }));
 
     const handleMediaPress = (index: number, openGallery = false) => {
-        if (!isClone) measureAndShowMedia(index, openGallery);
+        if (!isClone) {
+            const media = mediaItems[index];
+            if (!isMe && !media.localFileUri && onMediaDownload) {
+                if (!downloadingIndices.includes(index)) {
+                    setDownloadingIndices(prev => [...prev, index]);
+                    onMediaDownload(msg.id, media.url, index);
+                }
+                return;
+            }
+            measureAndShowMedia(index, openGallery);
+        }
     };
 
     const renderMediaContent = () => {
@@ -204,7 +219,7 @@ const MessageBubble = React.memo(({
                     ]}
                 >
                     <AnimatedImage 
-                        source={{ uri: media.url }} 
+                        source={{ uri: media.localFileUri || media.url }} 
                         style={[
                             ChatStyles.mediaSingle,
                             { 
@@ -215,6 +230,7 @@ const MessageBubble = React.memo(({
                         ]} 
                         contentFit="cover"
                         transition={200}
+                        blurRadius={(!isMe && !media.localFileUri) ? 20 : 0}
                         onLoad={(e) => {
                             const { width, height } = e.source;
                             if (width && height) {
@@ -223,9 +239,25 @@ const MessageBubble = React.memo(({
                             }
                         }}
                     />
-                    {media.type === 'video' && (
+                    {media.type === 'video' && uploadProgress === undefined && (
                         <View style={ChatStyles.mediaTilePlayOverlay}>
                             <MaterialIcons name="play-circle-filled" size={46} color="rgba(255,255,255,0.92)" />
+                        </View>
+                    )}
+                    {uploadProgress !== undefined && uploadProgress < 1 && (
+                        <View style={[ChatStyles.mediaTilePlayOverlay, { backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 46 }]}>
+                            <Text style={{ color: 'white', fontSize: 14, fontWeight: 'bold' }}>
+                                {Math.round(uploadProgress * 100)}%
+                            </Text>
+                        </View>
+                    )}
+                    {(!isMe && !media.localFileUri) && (
+                        <View style={[ChatStyles.mediaTilePlayOverlay, { backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 46 }]}>
+                            {downloadingIndices.includes(0) ? (
+                                <MaterialIcons name="hourglass-empty" size={36} color="rgba(255,255,255,0.92)" />
+                            ) : (
+                                <MaterialIcons name="file-download" size={46} color="rgba(255,255,255,0.92)" />
+                            )}
                         </View>
                     )}
                 </Pressable>
@@ -250,10 +282,32 @@ const MessageBubble = React.memo(({
                                 style={ChatStyles.mediaGridTile}
                                 onPress={() => handleMediaPress(index, showMore)}
                             >
-                                <AnimatedImage source={{ uri: media.url }} style={ChatStyles.mediaGridImage} contentFit="cover" transition={200} />
-                                {media.type === 'video' && !showMore && (
+                                <AnimatedImage 
+                                     source={{ uri: media.localFileUri || media.url }} 
+                                     style={ChatStyles.mediaGridImage} 
+                                     contentFit="cover" 
+                                     transition={200} 
+                                     blurRadius={(!isMe && !media.localFileUri) ? 20 : 0}
+                                />
+                                {media.type === 'video' && !showMore && uploadProgress === undefined && (
                                     <View style={ChatStyles.mediaTilePlayOverlay}>
                                         <MaterialIcons name="play-circle-filled" size={34} color="rgba(255,255,255,0.92)" />
+                                    </View>
+                                )}
+                                {uploadProgress !== undefined && uploadProgress < 1 && (
+                                    <View style={[ChatStyles.mediaTilePlayOverlay, { backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 34 }]}>
+                                        <Text style={{ color: 'white', fontSize: 12, fontWeight: 'bold' }}>
+                                            {Math.round(uploadProgress * 100)}%
+                                        </Text>
+                                    </View>
+                                )}
+                                {(!isMe && !media.localFileUri) && (
+                                    <View style={[ChatStyles.mediaTilePlayOverlay, { backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 34 }]}>
+                                        {downloadingIndices.includes(index) ? (
+                                            <MaterialIcons name="hourglass-empty" size={24} color="rgba(255,255,255,0.92)" />
+                                        ) : (
+                                            <MaterialIcons name="file-download" size={30} color="rgba(255,255,255,0.92)" />
+                                        )}
                                     </View>
                                 )}
                                 {showMore && (

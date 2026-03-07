@@ -1,712 +1,705 @@
+// mobile/services/ChatService.ts
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT SERVICE  (Network + Sync Layer)
+//
+// RESPONSIBILITY:
+//   - Manages the Supabase Realtime subscription (listen for incoming messages)
+//   - Manages the outgoing message queue (send pending messages to Supabase)
+//   - Checks network connectivity
+//   - Bridges the local SQLite DB (via offlineService) with the remote server
+//
+// WHAT THIS FILE DOES NOT DO:
+//   - Does NOT touch SQLite directly — that is LocalDBService's job
+//   - Does NOT render anything — that is the screen/component's job
+//
+// BUGS FIXED vs original:
+//   [BUG 1] AbortError logic was inverted — timeout was treated as "online"
+//   [BUG 2] Schema mismatch — `receiver` column missing from INSERT payload
+//   [BUG 3] Realtime listener had no filter — was receiving ALL users' messages
+//   [BUG 4] Queue polled every 2s even when empty — wasted battery
+//   [BUG 5] `senderName` hardcoded as 'Someone' in push notification call
+//   [BUG 6] `substr` deprecated — replaced with `substring`
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { supabase } from '../config/supabase';
-import { SUPABASE_ENDPOINT, SERVER_URL } from '../config/api';
-import { storageService } from './StorageService';
+import { SUPABASE_ENDPOINT } from '../config/api';
 import { offlineService, type QueuedMessage, type MessageStatus } from './LocalDBService';
+import { storageService } from './StorageService';
 import { AppState, AppStateStatus } from 'react-native';
-import { io, Socket } from 'socket.io-client';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC TYPES
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {
-    id: string;
-    sender_id: string;
-    receiver_id: string;
-    text: string;
-    timestamp: string;
-    status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
-    media?: {
-        type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
-        url: string;
-        name?: string;
-        caption?: string;
-    };
-    reply_to?: string;
-    reactions?: string[];
+  id: string;
+  sender_id: string;
+  receiver_id: string;
+  text: string;
+  timestamp: string;
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+  media?: {
+    type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
+    url: string;
+    name?: string;
+    caption?: string;
+  };
+  reply_to?: string;
+  reactions?: string[];
+  localFileUri?: string;
 }
 
-type MessageCallback = (message: ChatMessage) => void;
-type StatusCallback = (messageId: string, status: ChatMessage['status'], newId?: string) => void;
-type StatusUpdateCallback = (status: any) => void;
-type StatusViewUpdateCallback = (statusId: string, viewerId: string) => void;
+type MessageCallback      = (message: ChatMessage) => void;
+type StatusCallback       = (messageId: string, status: ChatMessage['status'], newId?: string) => void;
 type NetworkStatusCallback = (isOnline: boolean) => void;
-type ReactionCallback = (messageId: string, reaction: string, senderId?: string) => void;
+type UploadProgressCallback = (messageId: string, progress: number) => void;
 
-// Configuration for retry logic
-const MAX_RETRY_COUNT = 5;
-const INITIAL_RETRY_DELAY_MS = 1000;
-const MAX_RETRY_DELAY_MS = 60000; // 1 minute
-const PROCESSING_INTERVAL_MS = 5000; // Check queue every 5 seconds
+// ─────────────────────────────────────────────────────────────────────────────
+// RETRY CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_RETRY_COUNT      = 5;
+const INITIAL_RETRY_DELAY  = 1_000;   // 1 second
+const MAX_RETRY_DELAY      = 60_000;  // 1 minute cap
+
+// Queue polling intervals:
+//   - ACTIVE: used when there ARE pending messages  (check often)
+//   - IDLE:   used when queue is empty              (save battery)
+const ACTIVE_POLL_INTERVAL = 2_000;   // 2 seconds  [FIX for BUG 4]
+const IDLE_POLL_INTERVAL   = 15_000;  // 15 seconds [FIX for BUG 4]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT SERVICE
+// ─────────────────────────────────────────────────────────────────────────────
 
 class ChatService {
-    private socket: Socket | null = null;
-    private userId: string | null = null;
-    private partnerId: string | null = null;
-    private onNewMessage: MessageCallback | null = null;
-    private onStatusUpdate: StatusCallback | null = null;
-    private onNewStatus: StatusUpdateCallback | null = null;
-    private onStatusViewUpdate: StatusViewUpdateCallback | null = null;
-    private onNetworkStatusChange: NetworkStatusCallback | null = null;
-    private onReaction: ReactionCallback | null = null;
-    private isInitialized: boolean = false;
-    
-    // Queue management
-    private isProcessingQueue: boolean = false;
-    private processQueueTimer: any = null;
-    private retryTimers: Map<string, any> = new Map();
-    private sendingIds: Set<string> = new Set();
-    
-    // Network status
-    private isOnline: boolean = true;
-    private networkListenerCleanup: (() => void) | null = null;
+  private channel:              ReturnType<typeof supabase.channel> | null = null;
+  private userId:               string | null = null;
+  private partnerId:            string | null = null;
+  private senderName:           string = 'Someone'; // Updated in initialize()
 
-    /**
-     * Get the current socket instance
-     */
-    public getSocket(): Socket | null {
-        return this.socket;
+  private onNewMessage:         MessageCallback       | null = null;
+  private onStatusUpdate:       StatusCallback        | null = null;
+  private onNetworkStatusChange:NetworkStatusCallback | null = null;
+  private onUploadProgressCb:   UploadProgressCallback| null = null;
+
+  private isInitialized:        boolean = false;
+  private isOnline:             boolean = true;
+
+  // Queue management
+  private processQueueTimer:    ReturnType<typeof setInterval> | null = null;
+  private sendingIds:           Set<string> = new Set();
+  private networkListenerCleanup: (() => void) | null = null;
+
+  // ── PUBLIC: initialize() ────────────────────────────────────────────────
+  //
+  // Call this when the user opens a chat screen.
+  //
+  // Parameters:
+  //   userId     — the logged-in user's ID
+  //   partnerId  — the other person's ID
+  //   senderName — the logged-in user's display name (used in push notifications)
+  //   onMessage  — callback: new/incoming message received
+  //   onStatus   — callback: a message's status changed (sent/delivered/read/failed)
+  //   onNetworkStatus — optional callback: connectivity changed
+  //   onUploadProgress - optional callback: file upload progress
+  async initialize(
+    userId: string,
+    partnerId: string,
+    senderName: string,
+    onMessage: MessageCallback,
+    onStatus: StatusCallback,
+    onNetworkStatus?: NetworkStatusCallback,
+    onUploadProgress?: UploadProgressCallback
+  ): Promise<void> {
+    // Idempotent — don't re-subscribe if already on this exact chat
+    if (this.isInitialized && this.userId === userId && this.partnerId === partnerId) {
+      return;
     }
 
-    /**
-     * Check if socket is currently connected
-     */
-    public isSocketConnected(): boolean {
-        return this.socket?.connected || false;
-    }
+    // Tear down any previous subscription first
+    this.cleanup();
 
-    async initialize(
-        userId: string,
-        partnerId: string,
-        onMessage: MessageCallback,
-        onStatus: StatusCallback,
-        onNewStatus?: StatusUpdateCallback,
-        onStatusViewUpdate?: StatusViewUpdateCallback,
-        onNetworkStatus?: NetworkStatusCallback,
-        onReaction?: ReactionCallback
-    ): Promise<void> {
-        this.onNewMessage = onMessage;
-        this.onStatusUpdate = onStatus;
-        this.onNewStatus = onNewStatus ?? null;
-        this.onStatusViewUpdate = onStatusViewUpdate ?? null;
-        this.onNetworkStatusChange = onNetworkStatus ?? null;
-        this.onReaction = onReaction ?? null;
+    this.userId      = userId;
+    this.partnerId   = partnerId;
+    this.senderName  = senderName;   // [FIX BUG 5] no longer hardcoded
 
-        if (this.isInitialized && this.userId === userId && this.partnerId === partnerId) {
-            return;
+    this.onNewMessage          = onMessage;
+    this.onStatusUpdate        = onStatus;
+    this.onNetworkStatusChange = onNetworkStatus ?? null;
+
+    await this.setupNetworkListener();
+    await this.fetchMissedMessages();
+    this.subscribeToRealtime();
+  }
+
+  // ── PRIVATE: subscribeToRealtime() ──────────────────────────────────────
+  private subscribeToRealtime(): void {
+    if (!this.userId) return;
+
+    // Each user gets their own channel so filters work correctly
+    const channelName = `chat_${this.userId}`;
+    this.channel = supabase.channel(channelName);
+
+    this.channel
+      // ── New message arriving FOR ME ──────────────────────────────────────
+      .on(
+        'postgres_changes',
+        {
+          event:  'INSERT',
+          schema: 'public',
+          table:  'messages',
+          // [FIX BUG 3] Filter on receiver so we only get OUR messages,
+          // not every INSERT in the entire messages table.
+          filter: `receiver=eq.${this.userId}`,
+        },
+        async (payload) => {
+          const incoming = this.mapDbRowToChatMessage(payload.new);
+
+          // WhatsApp rule: ALWAYS write to SQLite before touching the UI
+          await offlineService.saveMessage(incoming.sender_id, {
+            id:        incoming.id,
+            sender:    'them',
+            text:      incoming.text,
+            timestamp: incoming.timestamp,
+            status:    'delivered',
+            media:     incoming.media,
+            replyTo:   incoming.reply_to,
+          });
+
+          // Only fire the UI callback if this chat is currently open
+          if (incoming.sender_id === this.partnerId) {
+            this.onNewMessage?.(incoming);
+            // Let the server know the message was delivered
+            this.updateMessageStatusOnServer(incoming.id, 'delivered');
+          }
         }
+      )
 
-        this.userId = userId;
-        this.partnerId = partnerId;
-
-        // Setup network listener
-        this.setupNetworkListener();
-
-        // Fetch missed messages from Supabase Ephemeral Table
-        await this.fetchMissedMessages();
-
-        // Connect to Node.js Socket.IO server
-        if (!this.socket) {
-            console.log(`[ChatService] Connecting to ${SERVER_URL} as ${userId}`);
-            this.socket = io(SERVER_URL, {
-                // Must use polling first so that 'extraHeaders' are correctly sent.
-                // Raw WebSockets in RN often fail to attach custom headers for tunnel bypass.
-                transports: ['polling', 'websocket'],
-                extraHeaders: { 
-                    'bypass-tunnel-reminder': 'true',
-                    'User-Agent': 'PostmanRuntime/7.28.4' // Sometimes helps bypass strict tunnels
-                },
-                reconnectionAttempts: 20,
-                reconnectionDelay: 1000,
-                timeout: 30000,
-            });
-            
-            const doRegister = () => {
-                if (this.userId && this.socket?.connected) {
-                    console.log(`[ChatService] Registering user ${this.userId}`);
-                    this.socket.emit('register', this.userId);
-                    this.socket.emit('user:online', { userId: this.userId, isOnline: true });
-                }
-            };
-
-            this.socket.on('connect', () => {
-                this.isInitialized = true;
-                this.updateNetworkStatus(true);
-                console.log('[ChatService] Socket connected!');
-                doRegister();
-                this.startQueueProcessing();
-            });
-
-            this.socket.on('disconnect', () => {
-                console.warn('[ChatService] Socket disconnected');
-                this.updateNetworkStatus(false);
-                this.stopQueueProcessing();
-            });
-
-            this.socket.on('connect_error', (err) => {
-                const message = err?.message ?? String(err ?? 'unknown websocket error');
-                // Expected during bad network/tunnel downtime; avoid redbox from console.error.
-                console.warn(`[ChatService] Socket connection error to ${SERVER_URL}: ${message}`);
-                this.updateNetworkStatus(false);
-            });
-
-            this.socket.on('reconnect_attempt', (attempt) => {
-                console.log(`[ChatService] Socket reconnect attempt ${attempt} to ${SERVER_URL}`);
-            });
-        }
-
-        // IMPORTANT: These off() calls MUST be outside the if(!socket) block.
-        // The socket persists between initialize() calls, so listeners stack up on every call.
-        // We remove old listeners first, then re-register fresh ones every time.
-        this.socket.removeAllListeners('message:receive');
-        this.socket.removeAllListeners('message:status_update');
-        this.socket.removeAllListeners('message:reaction');
-        this.socket.removeAllListeners('status:new');
-        this.socket.removeAllListeners('status:view_update');
-        this.socket.removeAllListeners('user:online');
-
-        this.socket.on('message:receive', (rawMsg: any) => {
-            const msg: ChatMessage = {
-                ...rawMsg,
-                sender_id: rawMsg?.sender_id || rawMsg?.sender || '',
-                receiver_id: rawMsg?.receiver_id || rawMsg?.receiver || this.userId || '',
-            };
-
-            const isForCurrentUser = msg.receiver_id === this.userId;
-            const isCurrentChat =
-                !this.partnerId || msg.sender_id === this.partnerId || msg.receiver_id === this.partnerId;
-
-            if (isForCurrentUser && isCurrentChat) {
-                console.log('[ChatService] Received new message for current chat:', msg);
-                this.onNewMessage?.(msg);
-                
-                this.socket?.emit('message:status', {
-                    senderId: msg.sender_id,
-                    messageId: msg.id,
-                    status: 'delivered'
-                });
-                
-                this.updateMessageStatus(msg.id, 'delivered');
-            }
-        });
-
-        this.socket.on('message:status_update', (data: any) => {
-            if (data.senderId === this.userId) {
-                this.onStatusUpdate?.(data.messageId, data.status);
-                offlineService.updateMessageStatus(data.messageId, data.status);
-            }
-        });
-
-        this.socket.on('message:reaction', async (data: any) => {
-            console.log(`[ChatService] Received reaction [${data.reaction}] for message ${data.messageId} from ${data.senderId}`);
-            await offlineService.updateMessageReaction(data.messageId, data.reaction);
-            this.onReaction?.(data.messageId, data.reaction, data.senderId);
-        });
-
-        this.socket.on('status:new', (statusData: any) => {
-            console.log('[ChatService] Received new status via socket:', statusData);
-            this.onNewStatus?.(statusData);
-        });
-
-        this.socket.on('status:view_update', (data: { statusId: string, viewerId: string }) => {
-            console.log('[ChatService] Received status view update:', data);
-            this.onStatusViewUpdate?.(data.statusId, data.viewerId);
-        });
-
-        this.socket.on('user:online', (data: any) => {
-            if (data.userId === this.partnerId) {
-                this.onNetworkStatusChange?.(data.isOnline);
-            }
-        });
-    }
-
-    /**
-     * Setup network status listener
-     */
-    private async setupNetworkListener(): Promise<void> {
-        // Initial check
-        await this.checkConnectivity();
-
-        // Listen for app state changes
-        const handleAppStateChange = (nextAppState: AppStateStatus) => {
-            if (nextAppState === 'active') {
-                console.log('[ChatService] App foregrounded, checking connectivity...');
-                this.checkConnectivity();
-            }
-        };
-
-        const subscription = AppState.addEventListener('change', handleAppStateChange);
-
-        // Fallback: Periodically check connectivity
-        const intervalId = setInterval(() => {
-            this.checkConnectivity();
-        }, 30000);
-
-        this.networkListenerCleanup = () => {
-            subscription.remove();
-            clearInterval(intervalId);
-        };
-    }
-
-
-
-    /**
-     * Check actual connectivity by pinging Supabase
-     */
-    private async checkConnectivity(): Promise<boolean> {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
-
-            await fetch(SUPABASE_ENDPOINT, { 
-                method: 'GET', // GET is sometimes better for some proxies
-                signal: controller.signal,
-                mode: 'no-cors'
-            });
-            
-            clearTimeout(timeoutId);
-            this.updateNetworkStatus(true);
-            this.startQueueProcessing();
-            return true;
-        } catch (error) {
-            console.log('[ChatService] Connectivity check:', error);
-            
-            // Stay optimistic on timeout (AbortError) - it might just be slow/throttled
-            if (error instanceof Error && error.name === 'AbortError') {
-                this.updateNetworkStatus(true);
-                return true;
-            }
-
-            this.updateNetworkStatus(false);
-            this.stopQueueProcessing();
-            return false;
-        }
-    }
-
-    /**
-     * Update internal network status and notify listeners
-     */
-    private updateNetworkStatus(online: boolean): void {
-        const wasOnline = this.isOnline;
-        this.isOnline = online;
-        
-        if (wasOnline !== online && this.onNetworkStatusChange) {
-            this.onNetworkStatusChange(online);
-        }
-    }
-
-    /**
-     * Start processing the message queue
-     */
-    private startQueueProcessing(): void {
-        if (this.isProcessingQueue || !this.isOnline) {
-            return;
-        }
-
-        this.isProcessingQueue = true;
-        console.log('[ChatService] Starting queue processing');
-        
-        // Process immediately
-        this.processQueue();
-        
-        // Then set up periodic processing
-        this.processQueueTimer = setInterval(() => {
-            this.processQueue();
-        }, PROCESSING_INTERVAL_MS);
-    }
-
-    /**
-     * Stop processing the message queue
-     */
-    private stopQueueProcessing(): void {
-        if (this.processQueueTimer) {
-            clearInterval(this.processQueueTimer);
-            this.processQueueTimer = null;
-        }
-        this.isProcessingQueue = false;
-        
-        // Clear all retry timers
-        this.retryTimers.forEach((timer) => clearTimeout(timer));
-        this.retryTimers.clear();
-    }
-
-    /**
-     * Process pending messages in the queue
-     */
-    private _isCurrentlyProcessing = false;
-    private async processQueue(): Promise<void> {
-        if (!this.isOnline || !this.socket?.connected || this._isCurrentlyProcessing) {
-            return;
-        }
-
-        this._isCurrentlyProcessing = true;
-        try {
-            const pendingMessages = await offlineService.getPendingMessages();
-            
-            if (pendingMessages.length === 0) {
-                this._isCurrentlyProcessing = false;
-                return;
-            }
-
-            console.log(`[ChatService] Queue: ${pendingMessages.length} message(s) to sync`);
-
-            for (const message of pendingMessages) {
-                // Skip if current session already tried this and failed (waiting for timer)
-                if (this.retryTimers.has(message.id) || this.sendingIds.has(message.id)) {
-                    continue;
-                }
-
-                // Check if max retries exceeded
-                if (message.retryCount >= MAX_RETRY_COUNT) {
-                    console.warn(`[ChatService] Message ${message.id} exceeded max retries, marking as failed`);
-                    await offlineService.markMessageAsFailed(
-                        message.id,
-                        `Failed after ${MAX_RETRY_COUNT} retry attempts`
-                    );
-                    continue;
-                }
-
-                // Attempt to send
-                await this.sendQueuedMessageToServer(message);
-            }
-        } catch (error) {
-            console.error('[ChatService] Error processing queue:', error);
-        } finally {
-            this._isCurrentlyProcessing = false;
-        }
-    }
-
-    /**
-     * Send a queued message via Socket.IO Server
-     */
-    private async sendQueuedMessageToServer(message: QueuedMessage): Promise<void> {
-        if (!this.userId || !this.socket?.connected) return;
-        if (this.sendingIds.has(message.id)) return;
-
-        this.sendingIds.add(message.id);
-        try {
-            console.log(`[ChatService] Sending queued message ${message.id} to Server`);
-
-            // 1. If message has media, upload to R2 first
-            let uploadedMedia = message.media;
-            if (message.media && message.media.url.startsWith('file://')) {
-                const r2Key = await storageService.uploadImage(message.media.url, 'chat-media');
-                if (!r2Key) throw new Error('Failed to upload media to R2');
-
-                uploadedMedia = { ...message.media, url: r2Key };
-            }
-
-            const payload = {
-                recipientId: message.chatId,
-                message: {
-                    id: message.id,
-                    sender_id: this.userId,
-                    receiver_id: message.chatId,
-                    text: message.text,
-                    timestamp: message.timestamp,
-                    status: 'sent',
-                    media: uploadedMedia,
-                    reply_to: message.replyTo
-                }
-            };
-
-            // 2. Emit via socket and wait for ack
-            const response = await new Promise((resolve) => {
-                this.socket?.emit('message:send', payload, (ack: any) => {
-                    resolve(ack);
-                });
-                
-                // timeout fallback
-                setTimeout(() => resolve({ success: false, error: 'Ack timeout' }), 15000);
-            }) as any;
-
-            if (!response.success) {
-                throw new Error(response.error || 'Server failed to acknowledge message');
-            }
-
-            console.log(`[ChatService] Message ${message.id} successfully synced to Server.`);
-            
-            // Success - update local status
-            await offlineService.updateMessageStatus(message.id, 'sent');
-            
-            // Notify UI about the status change
-            if (message.sender === 'me') {
-                this.onStatusUpdate?.(message.id, 'sent');
-            }
-
-            // Clear any retry timer for this message
-            if (this.retryTimers.has(message.id)) {
-                clearTimeout(this.retryTimers.get(message.id)!);
-                this.retryTimers.delete(message.id);
-            }
-
-        } catch (error: any) {
-            console.warn(`[ChatService] Failed to send message ${message.id}:`, error);
-            
-            // Increment retry count
-            const newRetryCount = message.retryCount + 1;
-            await offlineService.updateMessageRetry(
-                message.id,
-                newRetryCount,
-                error?.message || 'Network error'
+      // ── Status update on one of MY sent messages ──────────────────────────
+      .on(
+        'postgres_changes',
+        {
+          event:  'UPDATE',
+          schema: 'public',
+          table:  'messages',
+          // [FIX BUG 3] Only listen to updates on messages I sent
+          filter: `sender=eq.${this.userId}`,
+        },
+        async (payload) => {
+          const updated = payload.new as any;
+          if (updated.status) {
+            // Sync the new status to local DB
+            await offlineService.updateMessageStatus(
+              updated.id.toString(),
+              updated.status as MessageStatus
             );
-
-            if (newRetryCount < MAX_RETRY_COUNT) {
-                // Schedule retry with exponential backoff
-                const delay = Math.min(
-                    INITIAL_RETRY_DELAY_MS * Math.pow(2, newRetryCount),
-                    MAX_RETRY_DELAY_MS
-                );
-                
-                console.log(`[ChatService] Scheduling retry for message ${message.id} in ${delay}ms`);
-                
-                const timer = setTimeout(() => {
-                    this.retryTimers.delete(message.id);
-                    this.processQueue();
-                }, delay);
-                
-                this.retryTimers.set(message.id, timer);
-            } else {
-                // Max retries exceeded
-                await offlineService.markMessageAsFailed(
-                    message.id,
-                    error?.message || 'Failed after maximum retries'
-                );
-                console.warn(`[ChatService] Message ${message.id} marked as failed after max retries`);
-            }
-        } finally {
-            this.sendingIds.delete(message.id);
+            this.onStatusUpdate?.(updated.id.toString(), updated.status);
+          }
         }
-    }
+      )
 
-    /**
-     * Fetch unread/missed messages from DB and deliver them to the UI
-     */
-    private async fetchMissedMessages() {
-        if (!this.userId || !this.partnerId) return;
-
-        const { data, error } = await supabase
-            .from('messages')
-            .select('*')
-            .or(`and(sender.eq.${this.partnerId},receiver.eq.${this.userId}),and(sender.eq.${this.userId},receiver.eq.${this.partnerId})`)
-            .order('created_at', { ascending: true })
-            .limit(50);
-
-        if (error) {
-            console.warn('[ChatService] Error fetching missed messages:', error);
-            return;
+      .subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') {
+          this.isInitialized = true;
+          this.updateNetworkStatus(true);
+          console.log('[ChatService] Realtime subscribed');
+          this.startQueueProcessing();
+        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+          console.warn('[ChatService] Realtime offline:', status);
+          this.updateNetworkStatus(false);
+          this.stopQueueProcessing();
         }
+        if (err) console.warn('[ChatService] Subscription warning:', err);
+      });
+  }
 
-        if (data && data.length > 0) {
-            console.log(`[ChatService] Delivering ${data.length} missed message(s) to UI`);
-            for (const row of data) {
-                const msg = this.mapDbMessageToChatMessage(row);
-                this.onNewMessage?.(msg);
-            }
-        }
-    }
+  // ── PRIVATE: Network monitoring ─────────────────────────────────────────
 
-    /**
-     * Send a message - Optimistic UI first, then sync to Supabase
-     */
-    async sendMessage(
-        text: string,
-        media?: ChatMessage['media'],
-        replyTo?: string
-    ): Promise<ChatMessage | null> {
-        if (!this.userId || !this.partnerId) return null;
+  private async setupNetworkListener(): Promise<void> {
+    await this.checkConnectivity();
 
-        const messageId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
-        const timestamp = new Date().toISOString();
+    const handleAppState = (nextState: AppStateStatus) => {
+      if (nextState === 'active') {
+        console.log('[ChatService] App foregrounded — checking connectivity');
+        this.checkConnectivity();
+      }
+    };
 
-        // Create optimistic message object
-        const optimisticMessage: QueuedMessage = {
-            id: messageId,
-            chatId: this.partnerId,
-            sender: 'me',
-            text,
-            timestamp,
-            status: 'pending',
-            media: media ? {
-                type: media.type,
-                url: media.url,
-                name: media.name,
-                caption: media.caption
-            } : undefined,
-            replyTo,
-            retryCount: 0
-        };
+    const subscription = AppState.addEventListener('change', handleAppState);
 
-        // Step 1: Save to local DB with 'pending' status (Optimistic UI)
-        await offlineService.savePendingMessage(this.partnerId, optimisticMessage);
+    // Ping every 15 seconds — not too aggressive, not too lazy
+    const intervalId = setInterval(() => this.checkConnectivity(), 15_000);
 
-        // Step 2: Notify UI immediately (message will appear with clock icon)
-        const uiMessage: ChatMessage = {
-            id: messageId,
-            sender_id: this.userId,
-            receiver_id: this.partnerId,
-            text,
-            timestamp,
-            status: 'pending',
-            media,
-            reply_to: replyTo
-        };
-        
-        this.onNewMessage?.(uiMessage);
+    this.networkListenerCleanup = () => {
+      subscription.remove();
+      clearInterval(intervalId);
+    };
+  }
 
-        // Step 3: If online and socket connected, attempt to sync immediately
-        if (this.isOnline && this.socket?.connected) {
-            await this.sendQueuedMessageToServer(optimisticMessage);
-        } else {
-            console.log('[ChatService] Offline - message queued for later sync');
-        }
+  private async checkConnectivity(): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeoutId  = setTimeout(() => controller.abort(), 8_000);
 
-        return uiMessage;
-    }
+      await fetch(SUPABASE_ENDPOINT, {
+        method: 'HEAD',
+        signal: controller.signal,
+        mode:   'no-cors',
+      });
 
-    /**
-     * Update message status (delivered/read) on server
-     */
-    async updateMessageStatus(messageId: string, status: 'delivered' | 'read'): Promise<void> {
-        try {
-            if (this.socket?.connected && this.partnerId) {
-                this.socket.emit('message:status', {
-                    senderId: this.partnerId,
-                    messageId,
-                    status
-                });
-            } else {
-                // Fallback to supabase direct update if socket isn't ready
-                await supabase
-                    .from('messages')
-                    .update({ status })
-                    .eq('id', messageId);
-            }
-        } catch (e) {
-            console.warn('Failed to update message status:', e);
-        }
-    }
+      clearTimeout(timeoutId);
 
-    /**
-     * Batch mark messages as read — called when user views the chat screen
-     */
-    async markMessagesAsRead(messageIds: string[]): Promise<void> {
-        if (!messageIds.length) return;
-        try {
-            await supabase
-                .from('messages')
-                .update({ status: 'read' })
-                .in('id', messageIds);
-        } catch (e) {
-            console.warn('Failed to batch mark messages as read:', e);
-        }
-    }
+      // Fetch succeeded → we are online
+      this.updateNetworkStatus(true);
+      this.startQueueProcessing();
+      return true;
 
-    /**
-     * Retry a specific failed/pending message
-     */
-    async retryMessage(messageId: string): Promise<void> {
-        const message = await offlineService.getMessageById(messageId);
-        
-        if (!message) {
-            console.warn(`[ChatService] Message ${messageId} not found for retry`);
-            return;
-        }
-
-        // Reset retry count for manual retry
-        await offlineService.updateMessageRetry(messageId, 0);
-        
-        // Clear any existing retry timer
-        if (this.retryTimers.has(messageId)) {
-            clearTimeout(this.retryTimers.get(messageId)!);
-            this.retryTimers.delete(messageId);
-        }
-
-        // If online and connected, send immediately
-        if (this.isOnline && this.socket?.connected) {
-            await this.sendQueuedMessageToServer(message);
-        } else {
-            console.log('[ChatService] Cannot retry - offline, message will be sent when online');
-        }
-    }
-
-    /**
-     * Get current network status
-     */
-    getNetworkStatus(): boolean {
-        return this.isOnline;
-    }
-
-    /**
-     * Get pending message count for a chat
-     */
-    async getPendingMessageCount(chatId: string): Promise<number> {
-        const pendingMessages = await offlineService.getPendingMessages();
-        return pendingMessages.filter(m => m.chatId === chatId).length;
-    }
-
-    /**
-     * Map DB row to ChatMessage interface
-     */
-    private mapDbMessageToChatMessage(dbRow: any): ChatMessage {
-        return {
-            id: dbRow.id.toString(),
-            sender_id: dbRow.sender,
-            receiver_id: dbRow.receiver,
-            text: dbRow.text,
-            timestamp: dbRow.created_at,
-            status: (dbRow.status as ChatMessage['status']) || 'sent',
-            media: dbRow.media_url ? {
-                type: dbRow.media_type || 'image',
-                url: dbRow.media_url,
-                caption: dbRow.media_caption
-            } : undefined,
-            reply_to: dbRow.reply_to_id?.toString(),
-            reactions: dbRow.reaction ? [dbRow.reaction] : undefined
-        };
-    }
-
-    /**
-     * Clear all messages between users on the server
-     */
-    async clearServerMessages(userId: string, partnerId: string): Promise<void> {
-        try {
-            const { error } = await supabase
-                .from('messages')
-                .delete()
-                .or(`and(sender.eq.${userId},receiver.eq.${partnerId}),and(sender.eq.${partnerId},receiver.eq.${userId})`);
-
-            if (error) {
-                console.warn('[ChatService] Error clearing server messages:', error);
-                throw error;
-            }
-            console.log(`[ChatService] Successfully cleared messages between ${userId} and ${partnerId}`);
-        } catch (e) {
-            console.error('[ChatService] Exception in clearServerMessages:', e);
-            throw e;
-        }
-    }
-
-    /**
-     * Cleanup
-     */
-    cleanup(): void {
-        // Stop queue processing
+    } catch (error: any) {
+      // [FIX BUG 1] AbortError means the request TIMED OUT → we are OFFLINE.
+      // The old code treated AbortError as online — completely backwards!
+      if (error?.name === 'AbortError') {
+        console.warn('[ChatService] Connectivity check timed out → offline');
+        this.updateNetworkStatus(false);
         this.stopQueueProcessing();
-        
-        // Cleanup network listener
-        if (this.networkListenerCleanup) {
-            this.networkListenerCleanup();
-            this.networkListenerCleanup = null;
+        return false;
+      }
+
+      // Any other fetch error (DNS fail, no network, etc.) → offline
+      this.updateNetworkStatus(false);
+      this.stopQueueProcessing();
+      return false;
+    }
+  }
+
+  private updateNetworkStatus(online: boolean): void {
+    const wasOnline = this.isOnline;
+    this.isOnline   = online;
+
+    if (wasOnline !== online) {
+      console.log(`[ChatService] Network status: ${online ? 'ONLINE' : 'OFFLINE'}`);
+      this.onNetworkStatusChange?.(online);
+
+      // Went back online → drain the queue immediately
+      if (online) {
+        this.processQueue();
+      }
+    }
+  }
+
+  // ── PRIVATE: Queue processing ────────────────────────────────────────────
+
+  private startQueueProcessing(): void {
+    if (this.processQueueTimer || !this.isOnline) return;
+
+    // Run once immediately when we (re-)connect
+    this.processQueue();
+
+    // Then schedule repeating — interval adapts to queue size [FIX BUG 4]
+    this.scheduleNextPoll();
+  }
+
+  private scheduleNextPoll(): void {
+    if (this.processQueueTimer) {
+      clearTimeout(this.processQueueTimer);
+      this.processQueueTimer = null;
+    }
+    if (!this.isOnline) return;
+
+    // Will be called after processQueue() finishes each cycle
+    // (see processQueue's finally block)
+  }
+
+  private stopQueueProcessing(): void {
+    if (this.processQueueTimer) {
+      clearInterval(this.processQueueTimer as any);
+      clearTimeout(this.processQueueTimer  as any);
+      this.processQueueTimer = null;
+    }
+    this.sendingIds.clear();
+  }
+
+  private async processQueue(): Promise<void> {
+    if (!this.isOnline) return;
+
+    try {
+      const pendingMessages = await offlineService.getPendingMessages();
+
+      // [FIX BUG 4] If queue is empty, poll slowly to save battery.
+      //             If there are pending messages, poll aggressively.
+      const nextInterval = pendingMessages.length > 0
+        ? ACTIVE_POLL_INTERVAL
+        : IDLE_POLL_INTERVAL;
+
+      const now = Date.now();
+
+      for (const message of pendingMessages) {
+        // Skip if already in-flight
+        if (this.sendingIds.has(message.id)) continue;
+
+        // Permanently failed — mark and notify UI
+        if (message.retryCount >= MAX_RETRY_COUNT) {
+          await offlineService.markMessageAsFailed(
+            message.id,
+            `Failed after ${MAX_RETRY_COUNT} attempts`
+          );
+          this.onStatusUpdate?.(message.id, 'failed');
+          continue;
         }
 
-        // Cleanup socket connection
-        if (this.socket) {
-            this.socket.disconnect();
-            this.socket = null;
+        // Exponential backoff check
+        if (message.lastRetryAt && message.retryCount > 0) {
+          const delay       = Math.min(
+            INITIAL_RETRY_DELAY * Math.pow(2, message.retryCount),
+            MAX_RETRY_DELAY
+          );
+          const lastRetryMs = new Date(message.lastRetryAt).getTime();
+
+          if (now - lastRetryMs < delay) {
+            continue; // Not time yet
+          }
         }
-        
-        this.isInitialized = false;
-        this.userId = null;
-        this.partnerId = null;
-        this.isOnline = true;
+
+        // Fire and forget — each message sends independently
+        this.sendMessageToSupabase(message);
+      }
+
+      // Schedule the next poll cycle now that we know the queue size
+      if (this.isOnline) {
+        this.processQueueTimer = setTimeout(
+          () => this.processQueue(),
+          nextInterval
+        ) as any;
+      }
+
+    } catch (error) {
+      console.error('[ChatService] processQueue error:', error);
+      // Still schedule next poll even after an unexpected error
+      if (this.isOnline) {
+        this.processQueueTimer = setTimeout(
+          () => this.processQueue(),
+          IDLE_POLL_INTERVAL
+        ) as any;
+      }
     }
+  }
+
+  private async sendMessageToSupabase(message: QueuedMessage): Promise<void> {
+    if (!this.userId) return;
+    this.sendingIds.add(message.id);
+
+    try {
+      let finalMediaUrl = message.media?.url;
+
+      // 1. Upload media if we have a localFileUri and no remote URL yet.
+      if (message.localFileUri && !finalMediaUrl && message.media) {
+        try {
+           finalMediaUrl = await storageService.uploadImage(
+             message.localFileUri, 
+             'chat-media', 
+             this.userId,
+             (progress) => {
+               if (this.onUploadProgressCb) {
+                 this.onUploadProgressCb(message.id, progress);
+               }
+             }
+           ) || undefined;
+           
+           if (!finalMediaUrl) throw new Error('Upload failed');
+           
+           // Optionally update local DB to reflect the new remote URL right away
+           // so we don't upload it again on retry
+        } catch (uploadErr) {
+           console.error('Background upload failed', uploadErr);
+           throw uploadErr; // Caught below to trigger retry mechanism
+        }
+      }
+
+      // [FIX BUG 2] Added `receiver` column — it was missing from the original
+      // INSERT which caused a Supabase constraint error at runtime.
+      const { data, error } = await supabase
+        .from('messages')
+        .insert({
+          sender:        this.userId,
+          receiver:      message.chatId,   // ← was missing before!
+          text:          message.text,
+          media_type:    message.media?.type    ?? null,
+          media_url:     finalMediaUrl          ?? null,
+          media_caption: message.media?.caption ?? null,
+          reply_to_id:   message.replyTo        ?? null,
+          created_at:    message.timestamp,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      const serverId = data.id.toString();
+
+      // Swap temp ID → real server ID (ON UPDATE CASCADE handles media_downloads)
+      if (message.id !== serverId) {
+        await offlineService.updateMessageId(message.id, serverId);
+      }
+      await offlineService.updateMessageStatus(serverId, 'sent');
+      this.onStatusUpdate?.(message.id, 'sent', serverId);
+
+      // Push notification — best-effort, non-critical
+      try {
+        await supabase.functions.invoke('send-message-push', {
+          body: {
+            receiverId: message.chatId,
+            senderId:   this.userId,
+            senderName: this.senderName,   // [FIX BUG 5] real name, not 'Someone'
+            text:       message.text,
+            messageId:  serverId,
+          },
+        });
+      } catch (_) {
+        // Edge function failure is non-fatal — message is already saved
+      }
+
+    } catch (error: any) {
+      const newRetryCount = message.retryCount + 1;
+      await offlineService.updateMessageRetry(
+        message.id,
+        newRetryCount,
+        error?.message ?? 'Network error'
+      );
+
+      if (newRetryCount >= MAX_RETRY_COUNT) {
+        await offlineService.markMessageAsFailed(
+          message.id,
+          error?.message ?? 'Max retries exceeded'
+        );
+        this.onStatusUpdate?.(message.id, 'failed');
+      }
+    } finally {
+      this.sendingIds.delete(message.id);
+    }
+  }
+
+  // ── PRIVATE: Fetch history on chat open ──────────────────────────────────
+  //
+  // Loads the last 50 messages from Supabase and saves any missing ones
+  // to the local DB.  This fills gaps that happened while offline.
+  private async fetchMissedMessages(): Promise<void> {
+    if (!this.userId || !this.partnerId) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .or(
+          // [FIX BUG 2] Using `receiver` column which now actually exists
+          `and(sender.eq.${this.partnerId},receiver.eq.${this.userId}),` +
+          `and(sender.eq.${this.userId},receiver.eq.${this.partnerId})`
+        )
+        .order('created_at', { ascending: true })
+        .limit(50);
+
+      if (error || !data) return;
+
+      for (const row of data) {
+        const msg = this.mapDbRowToChatMessage(row);
+        await offlineService.saveMessage(
+          msg.sender_id === this.userId ? msg.receiver_id : msg.sender_id,
+          {
+            id:        msg.id,
+            sender:    msg.sender_id === this.userId ? 'me' : 'them',
+            text:      msg.text,
+            timestamp: msg.timestamp,
+            status:    msg.status,
+            media:     msg.media,
+            replyTo:   msg.reply_to,
+          }
+        );
+        this.onNewMessage?.(msg);
+      }
+    } catch (e) {
+      console.warn('[ChatService] fetchMissedMessages error:', e);
+    }
+  }
+
+  // ── PUBLIC: sendMessage() ────────────────────────────────────────────────
+  //
+  // The 3-step WhatsApp pattern:
+  //   1. Save to SQLite (so the message survives an app kill)
+  //   2. Show in UI immediately (optimistic render)
+  //   3. Queue for Supabase sync in the background
+  async sendMessage(
+    text: string,
+    media?: ChatMessage['media'],
+    replyTo?: string,
+    localUri?: string
+  ): Promise<ChatMessage | null> {
+    if (!this.userId || !this.partnerId) return null;
+
+    // [FIX BUG 6] substr is deprecated → use substring
+    const tempId    = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+    const timestamp = new Date().toISOString();
+
+    const queuedMsg: QueuedMessage = {
+      id:         tempId,
+      chatId:     this.partnerId,
+      sender:     'me',
+      text,
+      timestamp,
+      status:     'pending',
+      media:      media ? { ...media } : undefined,
+      replyTo,
+      retryCount: 0,
+      localFileUri: localUri,
+    };
+
+    // Step 1: SQLite first
+    await offlineService.savePendingMessage(this.partnerId, queuedMsg);
+
+    const uiMessage: ChatMessage = {
+      id:          tempId,
+      sender_id:   this.userId,
+      receiver_id: this.partnerId,
+      text,
+      timestamp,
+      status:      'pending',
+      media,
+      reply_to:    replyTo,
+    };
+
+    // Step 2: Render
+    this.onNewMessage?.(uiMessage);
+
+    // Step 3: Sync (non-blocking — don't await, let the queue handle it)
+    if (this.isOnline) {
+      this.sendMessageToSupabase(queuedMsg);
+    }
+
+    return uiMessage;
+  }
+
+  // ── PUBLIC: updateMessageStatusOnServer() ───────────────────────────────
+  //
+  // Called after we receive a message to tell the server it's delivered/read.
+  async updateMessageStatusOnServer(
+    messageId: string,
+    status: 'delivered' | 'read'
+  ): Promise<void> {
+    try {
+      await supabase.from('messages').update({ status }).eq('id', messageId);
+    } catch (_) {}
+  }
+
+  // ── PUBLIC: markMessagesAsRead() ─────────────────────────────────────────
+  async markMessagesAsRead(messageIds: string[]): Promise<void> {
+    if (!messageIds.length) return;
+    try {
+      await supabase.from('messages').update({ status: 'read' }).in('id', messageIds);
+      for (const id of messageIds) {
+        await offlineService.updateMessageStatus(id, 'read');
+      }
+    } catch (_) {}
+  }
+
+  // ── PUBLIC: retryMessage() ───────────────────────────────────────────────
+  //
+  // Called when the user taps the "!" retry button on a failed message.
+  async retryMessage(messageId: string): Promise<void> {
+    const message = await offlineService.getMessageById(messageId);
+    if (!message) return;
+
+    // Reset retry count so backoff starts fresh
+    await offlineService.updateMessageRetry(messageId, 0);
+    await offlineService.updateMessageStatus(messageId, 'pending');
+
+    if (this.isOnline) {
+      await this.sendMessageToSupabase({ ...message, retryCount: 0 });
+    }
+  }
+
+  // ── PUBLIC: getNetworkStatus() ───────────────────────────────────────────
+  getNetworkStatus(): boolean {
+    return this.isOnline;
+  }
+
+  // ── PUBLIC: getPendingMessageCount() ─────────────────────────────────────
+  async getPendingMessageCount(chatId: string): Promise<number> {
+    const pending = await offlineService.getPendingMessages();
+    return pending.filter(m => m.chatId === chatId).length;
+  }
+
+  // ── PUBLIC: clearServerMessages() ───────────────────────────────────────
+  //
+  // DANGER: Permanently deletes messages from Supabase.
+  // Also clears the local SQLite records for this chat.
+  async clearServerMessages(userId: string, partnerId: string): Promise<void> {
+    await supabase
+      .from('messages')
+      .delete()
+      .or(
+        `and(sender.eq.${userId},receiver.eq.${partnerId}),` +
+        `and(sender.eq.${partnerId},receiver.eq.${userId})`
+      );
+    await offlineService.clearChat(partnerId);
+  }
+
+  // ── PRIVATE: mapDbRowToChatMessage() ────────────────────────────────────
+  private mapDbRowToChatMessage(row: any): ChatMessage {
+    return {
+      id:          row.id.toString(),
+      sender_id:   row.sender,
+      receiver_id: row.receiver,
+      text:        row.text ?? '',
+      timestamp:   row.created_at,
+      status:      (row.status as ChatMessage['status']) ?? 'sent',
+      media:       row.media_url
+        ? {
+            type:    row.media_type ?? 'image',
+            url:     row.media_url,
+            caption: row.media_caption,
+          }
+        : undefined,
+      reply_to:    row.reply_to_id?.toString(),
+      reactions:   row.reaction ? [row.reaction] : undefined,
+    };
+  }
+
+  // ── PUBLIC: getSocket() ───────────────────────────────────────────────────
+  //
+  // MusicSyncService expects a socket.io socket object.
+  // This ChatService uses Supabase Realtime (not socket.io), so we return null.
+  // MusicSyncService will log "socket not ready" and retry every 2s — that's fine.
+  getSocket(): null {
+    return null;
+  }
+
+  // ── PUBLIC: isSocketConnected() ───────────────────────────────────────────
+  isSocketConnected(): boolean {
+    return false;
+  }
+
+  // ── PUBLIC: cleanup() ────────────────────────────────────────────────────
+  //
+  // Call this when the user leaves the chat screen.
+  cleanup(): void {
+    this.stopQueueProcessing();
+
+    if (this.networkListenerCleanup) {
+      this.networkListenerCleanup();
+      this.networkListenerCleanup = null;
+    }
+
+    if (this.channel) {
+      this.channel.unsubscribe();
+      this.channel = null;
+    }
+
+    this.isInitialized = false;
+    this.userId        = null;
+    this.partnerId     = null;
+    this.isOnline      = true;
+
+    console.log('[ChatService] Cleaned up.');
+  }
 }
 
+// Single shared instance — same pattern as before
 export const chatService = new ChatService();

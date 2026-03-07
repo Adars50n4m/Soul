@@ -23,15 +23,17 @@ export const IncomingCallModal = () => {
     const insets = useSafeAreaInsets();
     const { width, height } = useWindowDimensions();
     
-    // Determine visibility: Incoming and not yet accepted
+    // Simplified visibility: Incoming and not yet accepted
     const isVisible = !!activeCall && activeCall.isIncoming && !activeCall.isAccepted;
+
+    const contact = contacts.find(c => c.id === activeCall?.contactId);
+    const displayAvatar = contact?.avatar || activeCall?.callerAvatar || 'https://via.placeholder.com/150';
+    const displayName = contact?.name || activeCall?.callerName || activeCall?.contactId || 'Unknown User';
 
     const [timeLeft, setTimeLeft] = useState(60);
     const rippleScale = useSharedValue(1);
     const rippleOpacity = useSharedValue(0.8);
     const avatarScale = useSharedValue(1);
-
-    const contact = contacts.find(c => c.id === activeCall?.contactId);
 
     useEffect(() => {
         if (isVisible) {
@@ -87,14 +89,14 @@ export const IncomingCallModal = () => {
         transform: [{ scale: avatarScale.value }],
     }));
 
-    if (!isVisible || !contact) return null;
+    if (!isVisible) return null;
 
     return (
         <Modal visible={isVisible} transparent animationType="fade">
             <View style={styles.container}>
                 <GlassView intensity={90} tint="dark" style={styles.blurContainer} >
                     <Image
-                        source={{ uri: contact.avatar || 'https://via.placeholder.com/150' }}
+                        source={{ uri: displayAvatar }}
                         style={[StyleSheet.absoluteFillObject, { opacity: 0.3 }]}
                         blurRadius={50}
                     />
@@ -110,13 +112,12 @@ export const IncomingCallModal = () => {
                                 <Animated.View style={[styles.rippleRing, rippleStyle]} />
                                 <Animated.View style={[styles.avatarContainer, avatarAnimatedStyle]}>
                                     <Image
-                                        source={{ uri: contact.avatar || 'https://via.placeholder.com/150' }}
+                                        source={{ uri: displayAvatar }}
                                         style={styles.avatar}
                                     />
                                 </Animated.View>
                             </View>
-
-                            <Text style={styles.name}>{contact.name}</Text>
+                            <Text style={styles.name}>{displayName}</Text>
                             <Text style={styles.status}>
                                 {activeCall.type === 'video' ? 'Incoming Video Call...' : 'Incoming Voice Call...'}
                             </Text>

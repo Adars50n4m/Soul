@@ -392,7 +392,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     width: '100%',
-    backgroundColor: 'rgba(30, 30, 35, 0.6)',
+    backgroundColor: 'rgba(15, 15, 20, 0.2)',
     gap: 40,
   },
   playButton: {
@@ -409,7 +409,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.22)',
     padding: 12,
-    backgroundColor: 'rgba(30, 30, 35, 0.6)',
+    backgroundColor: 'rgba(15, 15, 20, 0.2)',
   },
   captionText: {
     color: '#fff',

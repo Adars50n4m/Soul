@@ -4,6 +4,7 @@ import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { AppState, AppStateStatus, Alert, Image, Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { Message, Contact, StatusUpdate, CallLog, ActiveCall, Song, MusicState } from '../types';
 import { musicSyncService, PlaybackState } from '../services/MusicSyncService';
 import { chatService, ChatMessage } from '../services/ChatService';
@@ -24,6 +25,7 @@ import { offlineService } from '../services/LocalDBService';
 import { storageService } from '../services/StorageService';
 import { backgroundSyncService } from '../services/BackgroundSyncService';
 import { soundService } from '../services/SoundService';
+import { authService } from '../services/AuthService';
 import { proxySupabaseUrl, SERVER_URL, serverFetch } from '../config/api';
 
 if (!offlineService) {
@@ -110,6 +112,7 @@ interface AppContextType {
     isReady: boolean;
     isCloudConnected: boolean;
     login: (username: string, password: string) => Promise<boolean>;
+    setSession: (userId: string) => Promise<void>;
     logout: () => Promise<void>;
 
     // Data
@@ -149,7 +152,7 @@ interface AppContextType {
     toggleFavoriteSong: (song: Song) => Promise<void>;
     seekTo: (position: number) => Promise<void>;
     getPlaybackPosition: () => Promise<number>;
-    sendChatMessage: (chatId: string, text: string, media?: Message['media'], replyTo?: string) => Promise<void>;
+    sendChatMessage: (chatId: string, text: string, media?: Message['media'], replyTo?: string, localUri?: string) => Promise<void>;
     updateProfile: (updates: { name?: string; bio?: string; avatar?: string; birthdate?: string; note?: string; noteTimestamp?: string }) => Promise<void>;
     addStatusView: (statusId: string) => Promise<void>;
     sendTyping: (isTyping: boolean) => void;
@@ -171,6 +174,9 @@ interface AppContextType {
     // Privacy
     privacySettings: PrivacySettings;
     updatePrivacy: (settings: Partial<PrivacySettings>) => Promise<void>;
+
+    // Upload Tracking
+    uploadProgressTracker: Record<string, number>;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -199,6 +205,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     }, []);
     const [calls, setCalls] = useState<CallLog[]>([]);
     const [statuses, setStatuses] = useState<StatusUpdate[]>([]);
+    const [uploadProgressTracker, setUploadProgressTracker] = useState<Record<string, number>>({});
     const [theme, setThemeState] = useState<ThemeName>('midnight');
     const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
     const [isReady, setIsReady] = useState(false);
@@ -255,23 +262,29 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     useEffect(() => { otherUserRef.current = otherUser; }, [otherUser]);
     useEffect(() => { activeCallRef.current = activeCall; }, [activeCall]);
 
-    // Configure Audio mode for proper playback
-    useEffect(() => {
-        const configureAudio = async () => {
-            try {
-                await Audio.setAudioModeAsync({
-                    allowsRecordingIOS: false,
-                    playsInSilentModeIOS: true,
-                    staysActiveInBackground: true,
-                    shouldDuckAndroid: true,
-                    playThroughEarpieceAndroid: false,
-                });
-            } catch (e) {
-                console.error('Failed to configure audio mode:', e);
-            }
-        };
-        configureAudio();
+    // Configure Audio mode safely (especially for Simulators)
+    const configureAudioMode = useCallback(async (enableRecording = false) => {
+        try {
+            const isSimulator = !Constants.isDevice;
+            
+            await Audio.setAudioModeAsync({
+                allowsRecordingIOS: enableRecording,
+                playsInSilentModeIOS: true,
+                staysActiveInBackground: true,
+                shouldDuckAndroid: true,
+                playThroughEarpieceAndroid: false,
+                // On simulator, avoid VoiceProcessing (VPIO) which causes timeouts/crashes
+                // react-native-webrtc usually handles this, but we assist it here
+            });
+            console.log(`[AppContext] Audio mode configured: recording=${enableRecording}`);
+        } catch (e) {
+            console.warn('[AppContext] Audio mode config failed:', e);
+        }
     }, []);
+
+    useEffect(() => {
+        configureAudioMode(false);
+    }, [configureAudioMode]);
 
     const updatePresenceInSupabase = useCallback(async (userId: string, isOnline: boolean) => {
         try {
@@ -607,6 +620,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             chatService.initialize(
                 currentUser.id,
                 otherUser.id,
+                currentUser.name || 'Someone',
                 (incomingMessage: ChatMessage) => {
                     const isFromMe = incomingMessage.sender_id === currentUser.id;
                     const newMsg: Message = {
@@ -657,85 +671,25 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                         });
                     }
                 },
-                (statusData: any) => {
-                    console.log('[AppContext] Real-time status sync via socket:', statusData.id);
-                    // 1. Save to local SQLite
-                    offlineService.saveStatus({
-                        id: statusData.id,
-                        userId: statusData.userId || statusData.user_id,
-                        type: statusData.mediaType || statusData.media_type as any,
-                        r2Key: statusData.mediaUrl || statusData.media_url,
-                        textContent: statusData.caption,
-                        createdAt: typeof statusData.createdAt === 'string' ? new Date(statusData.createdAt).getTime() : statusData.createdAt,
-                        expiresAt: typeof statusData.expiresAt === 'string' ? new Date(statusData.expiresAt).getTime() : statusData.expiresAt,
-                        isMine: statusData.userId === currentUser.id || statusData.user_id === currentUser.id
-                    }).catch(err => console.error('[AppContext] Save synced status error:', err));
-
-                    // 2. Update React State
-                    const incomingStatus: StatusUpdate = {
-                        id: statusData.id,
-                        userId: statusData.userId || statusData.user_id,
-                        contactName: statusData.userName || statusData.user_name,
-                        avatar: statusData.userAvatar || statusData.user_avatar,
-                        mediaUrl: statusData.mediaUrl || statusData.media_url,
-                        mediaType: statusData.mediaType || statusData.media_type,
-                        caption: statusData.caption,
-                        timestamp: typeof statusData.createdAt === 'number' ? new Date(statusData.createdAt).toISOString() : statusData.createdAt,
-                        expiresAt: typeof statusData.expiresAt === 'number' ? new Date(statusData.expiresAt).toISOString() : statusData.expiresAt,
-                        likes: [],
-                        views: []
-                    };
-                    
-                    setStatuses(prev => {
-                        if (prev.find(s => s.id === incomingStatus.id)) return prev;
-                        return [incomingStatus, ...prev];
-                    });
-
-                    // Resolve R2 key to displayable URL in background
-                    if (incomingStatus.mediaUrl && !incomingStatus.mediaUrl.startsWith('file://') && !incomingStatus.mediaUrl.startsWith('data:') && !incomingStatus.mediaUrl.startsWith('http')) {
-                        storageService.getMediaUrl(incomingStatus.mediaUrl).then(resolvedUrl => {
-                            if (resolvedUrl) {
-                                setStatuses(prev => prev.map(s => s.id === incomingStatus.id ? { ...s, mediaUrl: resolvedUrl } : s));
-                            }
-                        }).catch(() => {});
-                    }
-                },
-                (statusId: string, viewerId: string) => {
-                    console.log('[AppContext] Status view update received for:', statusId);
-                    setStatuses(prev => prev.map(s => {
-                        if (s.id === statusId && !s.views.includes(viewerId)) {
-                            return { ...s, views: [...(s.views || []), viewerId] };
-                        }
-                        return s;
-                    }));
-                },
                 (online: boolean) => {
                     setIsCloudConnected(online);
                 },
-                (messageId: string, reaction: string, senderId?: string) => {
-                    // Try to find which chat this message belongs to by searching current state
-                    let chatId: string | undefined;
-                    const allMessages = messagesRef.current;
-                    for (const id in allMessages) {
-                        if (allMessages[id].some(m => m.id === messageId)) {
-                            chatId = id;
-                            break;
-                        }
-                    }
-
-                    // Fallback to partnerId logic if not found in current state
-                    if (!chatId) {
-                        const currentUserId = currentUserRef.current?.id;
-                        chatId = senderId === currentUserId ? otherUserRef.current?.id : senderId;
-                    }
-
-                    if (chatId) {
-                         addReaction(chatId, messageId, reaction || null, senderId);
-                    }
+                (messageId: string, progress: number) => {
+                    // Update the localized upload progress state
+                    setUploadProgressTracker?.(prev => ({
+                       ...prev,
+                       [messageId]: progress
+                    }));
                 }
             );
+
+            // Initialize CallService with the same user
+            callService.initialize(currentUser.id);
         }
-        return () => chatService.cleanup();
+        return () => {
+            chatService.cleanup();
+            callService.cleanup();
+        };
     }, [currentUser, otherUser]);
 
     // --- REFINED DATA FETCHING ---
@@ -1109,11 +1063,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         avatar: '',
     });
 
-    const sendChatMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string) => {
+    const sendChatMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string, localUri?: string) => {
         // ChatService.sendMessage now triggers the onNewMessage callback we set up in useEffect,
         // which handles both local state update (optimistic) and sync.
         // We just need to call it.
-        await chatService.sendMessage(text, media, replyTo);
+        await chatService.sendMessage(text, media, replyTo, localUri);
     }, []);
 
     const login = useCallback(async (username: string, password: string): Promise<boolean> => {
@@ -1121,48 +1075,57 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const normalizedPass = password.toLowerCase();
 
         if (CREDENTIALS[normalizedUser] === normalizedPass) {
-            const user = USERS[normalizedUser];
-            const other = normalizedUser === 'shri' ? USERS['hari'] : USERS['shri'];
-
-            setCurrentUser(user);
-            setOtherUser(other);
-            await AsyncStorage.setItem('ss_current_user', normalizedUser);
-
-            setContacts([{
-                id: other.id,
-                name: other.name,
-                avatar: other.avatar,
-                status: 'offline',
-                about: other.bio || '',
-                lastMessage: 'Start a conversation',
-                unreadCount: 0,
-            }]);
-
-            // Sync with local DB
-            if (offlineService) {
-                offlineService.saveContact({
-                    id: other.id,
-                    name: other.name,
-                    avatar: other.avatar,
-                    status: 'offline',
-                    lastMessage: 'Start a conversation',
-                    unreadCount: 0,
-                    about: other.bio || '',
-                }).catch(() => {});
-            }
-
-            fetchProfileFromSupabase(normalizedUser);
-            fetchCallsFromSupabase(normalizedUser);
-            fetchOtherUserProfile(other.id);
-            fetchStatusesFromSupabase(normalizedUser, other.id);
-
+            await setSession(normalizedUser);
             return true;
         }
         return false;
     }, []);
 
+    const setSession = useCallback(async (userId: string) => {
+        let userObj = USERS[userId];
+        if (!userObj) {
+            userObj = { id: userId, name: userId, avatar: '', bio: '', birthdate: '' };
+        }
+        const otherId = userId === 'shri' ? 'hari' : 'shri';
+        const other = USERS[otherId];
+
+        setCurrentUser(userObj);
+        setOtherUser(other);
+        await AsyncStorage.setItem('ss_current_user', userId);
+
+        setContacts([{
+            id: other.id,
+            name: other.name,
+            avatar: other.avatar,
+            status: 'offline',
+            about: other.bio || '',
+            lastMessage: 'Start a conversation',
+            unreadCount: 0,
+        }]);
+
+        // Sync with local DB
+        if (offlineService) {
+            offlineService.saveContact({
+                id: other.id,
+                name: other.name,
+                avatar: other.avatar,
+                status: 'offline',
+                lastMessage: 'Start a conversation',
+                unreadCount: 0,
+                about: other.bio || '',
+            }).catch(() => {});
+        }
+
+        fetchProfileFromSupabase(userId);
+        fetchCallsFromSupabase(userId);
+        fetchOtherUserProfile(other.id);
+        fetchStatusesFromSupabase(userId, other.id);
+    }, []);
+
     const logout = useCallback(async () => {
         const authId = currentUserRef.current?.id;
+        console.log('[AppContext] Logging out user:', authId);
+        
         const cleanup = [];
         if (authId) {
             cleanup.push(updatePresenceInSupabase(authId, false));
@@ -1174,11 +1137,27 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         }
         
         await Promise.all(cleanup);
+        
+        // --- CRITICAL: Clear ALL session-specific state ---
         setCurrentUser(null);
         setOtherUser(null);
         setContacts([]);
+        setMessages({});
+        messagesRef.current = {};
+        setStatuses([]);
+        setCalls([]);
+        setMusicState({
+            currentSong: null,
+            isPlaying: false,
+            favorites: []
+        });
+        
+        // Reset audio for next user
+        configureAudioMode(false);
+        
+        await authService.signOut();
         await AsyncStorage.removeItem('ss_current_user');
-    }, [updatePresenceInSupabase]);
+    }, [updatePresenceInSupabase, configureAudioMode]);
 
     // ... (Keep existing profile fetchers) ...
      const fetchProfileFromSupabase = async (userId: string) => {
@@ -1266,13 +1245,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                 isPlaying: false  // will become true once audio loads
             }));
 
-            await Audio.setAudioModeAsync({
-                allowsRecordingIOS: false,
-                playsInSilentModeIOS: true,
-                staysActiveInBackground: true,
-                shouldDuckAndroid: true,
-                playThroughEarpieceAndroid: false,
-            });
+            await configureAudioMode(false);
 
             if (soundRef.current) {
                 try { await soundRef.current.unloadAsync(); } catch (e) {}
@@ -1343,13 +1316,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }
             return;
         }
-        await Audio.setAudioModeAsync({
-            allowsRecordingIOS: false,
-            playsInSilentModeIOS: true,
-            staysActiveInBackground: true,
-            shouldDuckAndroid: true,
-            playThroughEarpieceAndroid: false,
-        });
+        await configureAudioMode(false);
         const newIsPlaying = !musicStateRef.current.isPlaying;
         let currentPos = 0;
         try {
@@ -1436,28 +1403,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     }, []);
 
     const addMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string) => {
-        const newMessage: Message = {
-            id: Date.now().toString(),
-            sender: 'me',
-            text,
-            timestamp: new Date().toISOString(),
-            status: 'sent',
-            media,
-            replyTo
-        };
-
-        addMessageSafely(chatId, newMessage);
-
-        setContacts(prev => prev.map(c => 
-            c.id === chatId ? { ...c, lastMessage: media ? '📎 Attachment' : text } : c
-        ));
-
-        if (offlineService) {
-            await offlineService.saveMessage(chatId, newMessage);
-        }
-
+        // Redundant UI updates removed — chatService.sendMessage handles optimistic 
+        // insertion and persistence via its own onNewMessage callback correctly.
         await chatService.sendMessage(text, media, replyTo);
-    }, [addMessageSafely, offlineService, chatService, setContacts]);
+    }, [chatService]);
 
     const updateMessage = useCallback(async (chatId: string, messageId: string, updates: Partial<Message>) => {
         syncSetMessages(prev => {
@@ -1558,7 +1507,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         if (!senderId) {
             recentLocalReactions.current.set(messageId, Date.now());
 
-            const socket = chatService.getSocket();
+            const socket = chatService.getSocket() as any;
             if (socket?.connected) {
                 socket.emit('message:reaction', {
                     recipientId: chatId,
@@ -1966,10 +1915,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             setActiveCall(null);
         }
     }, [addCall]);
-
     const startCall = useCallback(async (contactId: string, type: 'audio' | 'video') => {
         const contact = contactsRef.current.find(c => c.id === contactId);
+        const currentUser = currentUserRef.current;
         const callId = await callService.initiateCall(contactId, type);
+
+        console.log(`[AppContext] Starting call to ${contactId}, callId: ${callId}`);
 
         setActiveCall({
             callId: callId || undefined,
@@ -2326,22 +2277,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     }, []);
 
     const contextValue = useMemo(() => ({
-        currentUser, otherUser, isLoggedIn: !!currentUser, login, logout,
+        currentUser, otherUser, isLoggedIn: !!currentUser, login, setSession, logout,
         contacts, messages, calls, statuses, theme, activeTheme: THEMES[theme], activeCall, musicState, isReady, isCloudConnected, onlineUsers,
         addMessage, updateMessage, updateMessageStatus, deleteMessage, addReaction, addCall, deleteCall, clearCalls, addStatus, deleteStatus, setTheme,
         startCall, acceptCall, endCall, toggleMinimizeCall, toggleMute, toggleVideo, playSong, togglePlayMusic, toggleFavoriteSong,
         seekTo, getPlaybackPosition, sendChatMessage, updateProfile, addStatusView, toggleStatusLike,
         typingUsers, sendTyping, saveNote, deleteNote, toggleHeart, clearChatMessages,
         biometricEnabled, pinEnabled, pin, isLocked, setBiometricEnabled, setPinEnabled, setPin, unlockApp,
-        privacySettings, updatePrivacy,
+        privacySettings, updatePrivacy, uploadProgressTracker
     }), [
         currentUser, otherUser, contacts, messages, calls, statuses, theme, activeCall, musicState, isReady, isCloudConnected, onlineUsers,
-        login, logout, addMessage, updateMessage, updateMessageStatus, deleteMessage, addReaction, addCall, deleteCall, clearCalls, addStatus, deleteStatus, setTheme,
+        login, setSession, logout, addMessage, updateMessage, updateMessageStatus, deleteMessage, addReaction, addCall, deleteCall, clearCalls, addStatus, deleteStatus, setTheme,
         startCall, acceptCall, endCall, toggleMinimizeCall, toggleMute, toggleVideo, playSong, togglePlayMusic, toggleFavoriteSong,
         seekTo, getPlaybackPosition, sendChatMessage, updateProfile, addStatusView, toggleStatusLike,
         typingUsers, sendTyping, saveNote, deleteNote, toggleHeart, clearChatMessages,
         biometricEnabled, pinEnabled, pin, isLocked, setBiometricEnabled, setPinEnabled, setPin, unlockApp,
-        privacySettings, updatePrivacy
+        privacySettings, updatePrivacy, uploadProgressTracker
     ]);
 
     return (

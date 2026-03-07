@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { callService, CallSignal } from './CallService';
 
 // Safe imports for WebRTC to prevent crashes in Expo Go
@@ -20,9 +21,49 @@ try {
 }
 
 // STUN/TURN servers for NAT traversal
-// IMPORTANT: For production (4G/5G), you MUST add a TURN server.
+//
+// WHY TURN IS CRITICAL:
+//   - STUN alone only works when both devices are on the same network (WiFi ↔ WiFi)
+//   - When either user is on 4G/5G or behind a strict NAT/firewall, STUN fails
+//   - TURN relays media through the server as a fallback — this is what WhatsApp does
+//
+// CURRENT SETUP: Metered's free open relay TURN servers
+//   - Free tier: 500 MB/month (enough for testing and small user base)
+//   - For production with many users, get your own TURN server:
+//     → https://www.metered.ca/stun-turn (paid plans)
+//     → https://www.twilio.com/docs/stun-turn (Twilio TURN)
+//     → Self-hosted: coturn (open source)
+//
 const ICE_SERVERS: RTCIceServer[] = [
+    // ── STUN servers (free, unlimited) ─────────────────────────
     { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+
+    // ── TURN servers (Metered free open relay) ─────────────────
+    // UDP — fastest, preferred for media
+    {
+        urls: 'turn:a.relay.metered.ca:80',
+        username: 'e8dd65b92f3c9b121a4b6e90',
+        credential: '01mKLoBqjOsMDP/o',
+    },
+    // TCP — works through most firewalls
+    {
+        urls: 'turn:a.relay.metered.ca:80?transport=tcp',
+        username: 'e8dd65b92f3c9b121a4b6e90',
+        credential: '01mKLoBqjOsMDP/o',
+    },
+    // TLS on port 443 — works through the strictest firewalls (looks like HTTPS)
+    {
+        urls: 'turn:a.relay.metered.ca:443',
+        username: 'e8dd65b92f3c9b121a4b6e90',
+        credential: '01mKLoBqjOsMDP/o',
+    },
+    {
+        urls: 'turns:a.relay.metered.ca:443?transport=tcp',
+        username: 'e8dd65b92f3c9b121a4b6e90',
+        credential: '01mKLoBqjOsMDP/o',
+    },
 ];
 
 type CallType = 'audio' | 'video';
@@ -401,11 +442,19 @@ class WebRTCService {
 
             this.localStream = await Promise.race([mediaPromise, timeoutPromise]);
             this.callbacks?.onLocalStream(this.localStream);
-            console.log('Local stream obtained successfully');
+            console.log('[WebRTCService] Local stream obtained successfully');
 
         } catch (error: any) {
             if (timer) clearTimeout(timer);
-            console.warn('[WebRTCService] ⚠️ getMediaStream failed:', error.message);
+            const isSimulator = !Constants.isDevice;
+            console.warn(`[WebRTCService] ⚠️ getMediaStream failed (Simulator=${isSimulator}):`, error.message);
+            
+            if (isSimulator && Platform.OS === 'ios') {
+                console.log('[WebRTCService] 🛡️ Simulator detected. Avoiding audio hardware retry to prevent SIGABRT.');
+                this.localStream = null;
+                this.callbacks?.onLocalStream(null);
+                return;
+            }
             
             // If the failure was a timeout or missing hardware, try audio-only fallback
             if ((Platform.OS === 'ios' || Platform.OS === 'android') && 
