@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
-import { View, Text, Image, Pressable, StyleSheet, StatusBar, Dimensions, Alert, FlatList, Platform } from 'react-native';
+import { View, Text, Image, Pressable, StyleSheet, StatusBar, Dimensions, Alert, FlatList, Platform, TouchableOpacity } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 
 import { useRouter, useNavigation } from 'expo-router';
@@ -327,7 +327,18 @@ export default function HomeScreen() {
 
   const visibleContacts = useMemo(() => {
     // Hide the current user from their own contact list
-    const otherContacts = contacts.filter(c => c.id !== currentUser?.id);
+    // We check both the UUID and the legacy string IDs to ensure the user never sees themselves
+    const legacyMap: Record<string, string> = {
+      '4d28b137-66ff-4417-b451-b1a421e34b25': 'shri',
+      '02e52f08-6c1e-497f-93f6-b29c275b8ca4': 'hari'
+    };
+    
+    const myLegacyId = currentUser?.id ? legacyMap[currentUser.id] : null;
+
+    const otherContacts = contacts.filter(c => 
+      c.id !== currentUser?.id && 
+      c.id !== myLegacyId
+    );
     
     const legacyIds = new Set(['shri', 'hari']);
     const hasRealContacts = otherContacts.some(c => !legacyIds.has(c.id));
@@ -540,7 +551,27 @@ export default function HomeScreen() {
 
   // Stable header component to prevent remounting and touch loss on Android
   const renderHeader = useCallback(() => (
-    <Animated.View style={[styles.statusRail, statusRailAnimStyle]}>
+    <View style={styles.homeHeaderWrapper}>
+      <View style={styles.topHeader}>
+        <SoulLogo width={32} height={32} />
+        <View style={styles.headerActions}>
+           <TouchableOpacity 
+             onPress={() => router.push('/requests')} 
+             style={styles.headerIconButton}
+             activeOpacity={0.7}
+           >
+             <MaterialIcons name="notifications-none" size={26} color="#fff" />
+           </TouchableOpacity>
+           <TouchableOpacity 
+             onPress={() => router.push('/search')} 
+             style={styles.headerIconButton}
+             activeOpacity={0.7}
+           >
+             <MaterialIcons name="person-add-alt-1" size={26} color="#fff" />
+           </TouchableOpacity>
+        </View>
+      </View>
+      <Animated.View style={[styles.statusRail, statusRailAnimStyle]}>
       <FlatList
         horizontal
         data={[{ id: 'my-status' }, ...contactsWithStories]}
@@ -637,7 +668,8 @@ export default function HomeScreen() {
           );
         }}
       />
-    </Animated.View>
+      </Animated.View>
+    </View>
   ), [contactsWithStories, myStories, currentUser, handleMyStatusPress, handleStatusPress, statusRailAnimStyle]);
 
   return (
@@ -702,7 +734,11 @@ export default function HomeScreen() {
         onClose={closeModalRobustly}
         onSelectCamera={handleSelectCamera}
         onSelectGallery={() => handleSelectGallery()}
-        onSelectAsset={handleSelectGallery}
+        onSelectAssets={(assets) => {
+            if (assets && assets.length > 0) {
+              handleSelectGallery(assets[0]);
+            }
+        }}
         onSelectAudio={() => Alert.alert("Audio Status", "Coming soon!")}
         onSelectNote={() => {
             setIsMediaPickerVisible(false);
@@ -720,7 +756,25 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  statusRail: { marginTop: 60, marginBottom: 0, overflow: 'visible' },
+  homeHeaderWrapper: { paddingTop: Platform.OS === 'ios' ? 50 : 30 },
+  topHeader: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'space-between', 
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    height: 60
+  },
+  headerActions: { flexDirection: 'row', gap: 15 },
+  headerIconButton: { 
+    width: 44, 
+    height: 44, 
+    borderRadius: 22, 
+    backgroundColor: 'rgba(255,255,255,0.08)', 
+    alignItems: 'center', 
+    justifyContent: 'center' 
+  },
+  statusRail: { marginTop: 10, marginBottom: 0, overflow: 'visible' },
   statusContent: { paddingHorizontal: 20, paddingVertical: 12, paddingTop: 8, gap: 12, overflow: 'visible' },
   statusCard: { width: 140, height: 200, borderRadius: 28, backgroundColor: '#1a1a1a', zIndex: 10, overflow: 'hidden' },
   myStatusBackground: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#121212', borderRadius: 28, overflow: 'hidden' },

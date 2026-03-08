@@ -19,7 +19,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
+import { GlassView } from '../components/ui/GlassView';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, {
   Path,
@@ -337,8 +337,8 @@ export default function LoginScreen() {
         </Animated.View>
 
         <View style={styles.cardContainer}>
-          <BlurView 
-            intensity={Platform.OS === 'ios' ? 85 : 30} 
+          <GlassView 
+            intensity={Platform.OS === 'ios' ? 85 : 90} 
             tint="dark" 
             style={StyleSheet.absoluteFill}
           />

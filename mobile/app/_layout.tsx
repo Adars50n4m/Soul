@@ -8,6 +8,7 @@ import { AppContext, AppProvider } from '../context/AppContext';
 import PipOverlay from '../components/PipOverlay';
 import { IncomingCallModal } from '../components/IncomingCallModal';
 import { SecurityLockOverlay } from '../components/SecurityLockOverlay';
+import { Toaster } from '../components/ui/Toaster';
 import '../global.css';
 import { useContext } from 'react';
 
@@ -178,6 +179,7 @@ export default function RootLayout() {
       <AppProvider>
         <ThemeProvider value={DarkTheme}>
           <RootContent />
+          <Toaster />
           <StatusBar style="light" />
         </ThemeProvider>
       </AppProvider>

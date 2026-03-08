@@ -9,11 +9,11 @@ export const HEADER_PILL_RADIUS = 32;
 export const ChatStyles = StyleSheet.create({
     messageWrapper: {
         width: '100%',
-        marginBottom: 8,
+        marginBottom: 4,
         alignItems: 'flex-start',
     },
     messageWrapperWithReactions: {
-        marginBottom: 8,
+        marginBottom: 6,
     },
     messageWrapperMe: {
         alignItems: 'flex-end',
@@ -62,8 +62,8 @@ export const ChatStyles = StyleSheet.create({
         borderTopLeftRadius: 4,
     },
     messageContent: {
-        paddingVertical: 6,
-        paddingHorizontal: 16,
+        paddingVertical: 4,
+        paddingHorizontal: 12,
         zIndex: 2,
         overflow: 'hidden',
     },
@@ -73,9 +73,9 @@ export const ChatStyles = StyleSheet.create({
     },
     quotedContainer: {
         flexDirection: 'row',
-        gap: 10,
-        marginBottom: 10,
-        padding: 10,
+        gap: 8,
+        marginBottom: 6,
+        padding: 8,
         backgroundColor: 'rgba(255,255,255,0.15)', // Lighter background for quote block inside crimson
         borderRadius: 10,
         alignSelf: 'stretch',

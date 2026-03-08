@@ -222,6 +222,325 @@ app.post('/api/status/view', async (req, res) => {
         res.status(500).json({ error: 'Failed' });
     }
 });
+
+// Middleware to authenticate user via Header (Dev/Prototype style)
+const authenticateUser = (req, res, next) => {
+    const userId = req.headers['x-user-id'] || req.query.userId || req.body.userId;
+    if (!userId) {
+        return res.status(401).json({ error: 'Unauthorized: No user ID provided' });
+    }
+    req.user = { id: userId };
+    next();
+};
+
+// --- USER DISCOVERY & CONNECTION ENDPOINTS ---
+
+// 1. Search Users
+app.get('/api/users/search', authenticateUser, async (req, res) => {
+    const { query } = req.query;
+    const currentUserId = req.user.id;
+
+    if (!query || query.length < 2) {
+        return res.status(400).json({ error: 'Search query must be at least 2 characters' });
+    }
+
+    try {
+        if (!supabase) throw new Error('Supabase client not initialized');
+
+        // Fetch users matching query
+        const { data: users, error } = await supabase
+            .from('users')
+            .select('id, username, full_name, avatar_url, is_online, last_seen')
+            .ilike('username', `%${query}%`)
+            .neq('id', currentUserId)
+            .limit(20);
+
+        if (error) throw error;
+
+        // Fetch connection status for these users relative to current user
+        const { data: requests } = await supabase.from('connection_requests')
+            .select('*')
+            .or(`sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`)
+            .filter('status', 'in', '("pending", "rejected")');
+
+        const { data: connections } = await supabase.from('connections')
+            .select('*')
+            .or(`user_1_id.eq.${currentUserId},user_2_id.eq.${currentUserId}`);
+
+        const enrichedUsers = users.map(u => {
+            let status = 'not_connected';
+            
+            // Check established connections
+            const isConnected = connections?.some(c => c.user_1_id === u.id || c.user_2_id === u.id);
+            if (isConnected) {
+                status = 'connected';
+            } else {
+                // Check pending/rejected requests
+                const reqData = requests?.find(r => 
+                    (r.sender_id === currentUserId && r.receiver_id === u.id) || 
+                    (r.sender_id === u.id && r.receiver_id === currentUserId)
+                );
+                
+                if (reqData) {
+                    if (reqData.status === 'pending') {
+                        status = (reqData.sender_id === currentUserId) ? 'request_sent' : 'request_received';
+                    } else if (reqData.status === 'rejected' && reqData.sender_id === currentUserId) {
+                        status = 'rejected_by_them';
+                    }
+                }
+            }
+            
+            return { ...u, connectionStatus: status };
+        });
+
+        res.json({ success: true, users: enrichedUsers });
+    } catch (err) {
+        console.error('Error searching users:', err);
+        res.status(500).json({ error: 'Search failed' });
+    }
+});
+
+// 2. Send Connection Request
+app.post('/api/connections/request', authenticateUser, async (req, res) => {
+    const { receiverId, message } = req.body;
+    const senderId = req.user.id;
+
+    if (!receiverId) return res.status(400).json({ error: 'receiverId is required' });
+    if (senderId === receiverId) return res.status(400).json({ error: 'Cannot connect with yourself' });
+
+    try {
+        if (!supabase) throw new Error('Supabase client not initialized');
+
+        // Check if already connected or request pending
+        const { data: existing } = await supabase
+            .from('connection_requests')
+            .select('id, status')
+            .match({ sender_id: senderId, receiver_id: receiverId })
+            .eq('status', 'pending')
+            .maybeSingle();
+
+        if (existing) return res.status(400).json({ error: 'Request already pending' });
+
+        const { data, error } = await supabase
+            .from('connection_requests')
+            .insert({
+                sender_id: senderId,
+                receiver_id: receiverId,
+                message,
+                status: 'pending'
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // Fetch sender username for notification
+        const { data: sender } = await supabase.from('users').select('username').eq('id', senderId).single();
+
+        // Emit socket notification to receiver
+        io.to(receiverId).emit('connection:request_received', {
+            request: data,
+            senderId: senderId,
+            senderName: sender?.username || 'Someone'
+        });
+
+        res.json({ success: true, request: data });
+    } catch (err) {
+        console.error('Error sending request:', err);
+        res.status(500).json({ error: 'Failed to send request' });
+    }
+});
+
+// 2.5 Get Pending Requests
+app.get('/api/connections/requests', authenticateUser, async (req, res) => {
+    const userId = req.user.id;
+    try {
+        if (!supabase) throw new Error('Supabase client not initialized');
+
+        // Fetch both incoming and outgoing pending requests
+        const { data: requests, error } = await supabase
+            .from('connection_requests')
+            .select('*')
+            .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+            .eq('status', 'pending');
+
+        if (error) throw error;
+
+        // Fetch profiles of all involved users (senders for incoming, receivers for outgoing)
+        const userIds = new Set();
+        requests.forEach(r => {
+            userIds.add(r.sender_id);
+            userIds.add(r.receiver_id);
+        });
+        // Remove current user from the list to fetch only others
+        userIds.delete(userId);
+
+        const { data: profiles } = await supabase
+            .from('users')
+            .select('id, username, full_name, avatar_url')
+            .in('id', Array.from(userIds));
+
+        const incoming = requests
+            .filter(r => r.receiver_id === userId)
+            .map(r => ({
+                ...r,
+                sender: profiles?.find(p => p.id === r.sender_id) || { id: r.sender_id, username: 'Unknown' }
+            }));
+
+        const outgoing = requests
+            .filter(r => r.sender_id === userId)
+            .map(r => ({
+                ...r,
+                receiver: profiles?.find(p => p.id === r.receiver_id) || { id: r.receiver_id, username: 'Unknown' }
+            }));
+
+        res.json({ success: true, incoming, outgoing });
+    } catch (err) {
+        console.error('Error fetching requests:', err);
+        res.status(500).json({ error: 'Failed to fetch requests' });
+    }
+});
+
+// 3. Accept Connection Request
+app.put('/api/connections/request/:requestId/accept', authenticateUser, async (req, res) => {
+    const { requestId } = req.params;
+    const userId = req.user.id;
+
+    try {
+        if (!supabase) throw new Error('Supabase client not initialized');
+
+        // 1. Verify request exists and is for this user
+        const { data: request, error: fetchErr } = await supabase
+            .from('connection_requests')
+            .select('*')
+            .eq('id', requestId)
+            .single();
+
+        if (fetchErr || !request) return res.status(404).json({ error: 'Request not found' });
+        if (request.receiver_id !== userId) return res.status(403).json({ error: 'Not authorized to accept this request' });
+        if (request.status !== 'pending') return res.status(400).json({ error: 'Request is no longer pending' });
+
+        // 2. Update request status
+        await supabase
+            .from('connection_requests')
+            .update({ status: 'accepted', responded_at: new Date().toISOString() })
+            .eq('id', requestId);
+
+        // 3. Create connection record (user_1_id < user_2_id)
+        const [u1, u2] = [request.sender_id, request.receiver_id].sort();
+        const { data: connection, error: connErr } = await supabase
+            .from('connections')
+            .insert({ user_1_id: u1, user_2_id: u2 })
+            .select()
+            .single();
+
+        if (connErr) throw connErr;
+        
+        // Fetch receiver (me) username for notification
+        const { data: receiver } = await supabase.from('users').select('username').eq('id', userId).single();
+
+        // 4. Notify sender
+        io.to(request.sender_id).emit('connection:request_accepted', {
+            connection,
+            receiverId: userId,
+            receiverName: receiver?.username || 'Someone'
+        });
+
+        res.json({ success: true, connection });
+    } catch (err) {
+        console.error('Error accepting request:', err);
+        res.status(500).json({ error: 'Failed to accept request' });
+    }
+});
+
+// 4. Reject/Cancel Connection Request
+app.put('/api/connections/request/:requestId/reject', authenticateUser, async (req, res) => {
+    const { requestId } = req.params;
+    const userId = req.user.id;
+
+    try {
+        if (!supabase) throw new Error('Supabase client not initialized');
+
+        const { error } = await supabase
+            .from('connection_requests')
+            .update({ status: 'rejected', responded_at: new Date().toISOString() })
+            .match({ id: requestId, receiver_id: userId });
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error rejecting request:', err);
+        res.status(500).json({ error: 'Failed to reject request' });
+    }
+});
+
+// 4.5 Cancel Connection Request (Outgoing)
+app.delete('/api/connections/request/:requestId/cancel', authenticateUser, async (req, res) => {
+    const { requestId } = req.params;
+    const userId = req.user.id;
+
+    try {
+        if (!supabase) throw new Error('Supabase client not initialized');
+
+        const { error } = await supabase
+            .from('connection_requests')
+            .delete()
+            .match({ id: requestId, sender_id: userId, status: 'pending' });
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error canceling request:', err);
+        res.status(500).json({ error: 'Failed to cancel request' });
+    }
+});
+
+// 5. Get My Connections
+app.get('/api/connections', authenticateUser, async (req, res) => {
+    const userId = req.user.id;
+
+    try {
+        if (!supabase) throw new Error('Supabase client not initialized');
+
+        const { data: conns, error } = await supabase
+            .from('connections')
+            .select(`
+                id,
+                user_1_id,
+                user_2_id,
+                is_favorite,
+                custom_name,
+                mute_notifications,
+                connected_at
+            `)
+            .or(`user_1_id.eq.${userId},user_2_id.eq.${userId}`);
+
+        if (error) throw error;
+
+        // Fetch user profiles manually for now (to avoid complex joins in one go)
+        const otherUserIds = conns.map(c => c.user_1_id === userId ? c.user_2_id : c.user_1_id);
+        const { data: profiles } = await supabase.from('users').select('id, username, full_name, avatar_url, is_online').in('id', otherUserIds);
+
+        // Flatten: return the "other" user
+        const connections = conns.map(c => {
+            const otherUserId = c.user_1_id === userId ? c.user_2_id : c.user_1_id;
+            const otherUser = profiles?.find(p => p.id === otherUserId);
+            return {
+                connection_id: c.id,
+                ...(otherUser || { id: otherUserId, username: 'Unknown' }),
+                is_favorite: c.is_favorite,
+                custom_name: c.custom_name,
+                mute_notifications: c.mute_notifications,
+                connected_at: c.connected_at
+            };
+        });
+
+        res.json({ success: true, connections });
+    } catch (err) {
+        console.error('Error fetching connections:', err);
+        res.status(500).json({ error: 'Failed to fetch connections' });
+    }
+});
 // Track active socket ID per user to prevent duplicate room members
 const userSocketMap = new Map(); // userId -> socketId
 
@@ -383,6 +702,87 @@ io.on('connection', (socket) => {
         } else {
             socket.broadcast.emit('music:playback_update', data);
         }
+    });
+
+    // --- WebRTC CALLING SIGNALS ---
+    
+    // 1. Initial Call Signaling (SDP Offer)
+    socket.on('offer', (data) => {
+        const target = data.recipientId || data.calleeId;
+        if (target) {
+            console.log(`📞 [Offer] from ${socket.userId || 'unknown'} to ${target}`);
+            io.to(target).emit('offer', data);
+        }
+    });
+
+    // 2. Call Response (SDP Answer)
+    socket.on('answer', (data) => {
+        const target = data.recipientId || data.callerId;
+        if (target) {
+            console.log(`📞 [Answer] from ${socket.userId || 'unknown'} to ${target} for call ${data.callId}`);
+            io.to(target).emit('answer', data);
+        }
+    });
+
+    // 3. ICE Candidate Exchange
+    socket.on('ice-candidate', (data) => {
+        const target = data.recipientId || (socket.userId === data.callerId ? data.calleeId : data.callerId);
+        if (target) {
+            io.to(target).emit('ice-candidate', data);
+        }
+    });
+
+    // 4. Call Life-cycle Events
+    socket.on('call-request', (data) => {
+        const target = data.recipientId || data.calleeId;
+        if (target) {
+            console.log(`🔔 [Call Request] ${data.callId} to ${target}`);
+            io.to(target).emit('call-request', data);
+        }
+    });
+
+    socket.on('call-ringing', (data) => {
+        const target = data.recipientId || data.callerId;
+        if (target) {
+            console.log(`🔕 [Call Ringing] to ${target}`);
+            io.to(target).emit('call-ringing', data);
+        }
+    });
+
+    socket.on('call-accept', (data) => {
+        const target = data.recipientId || data.callerId;
+        if (target) {
+            console.log(`✅ [Call Accepted] ${data.callId}, notifying ${target}`);
+            io.to(target).emit('call-accept', data);
+        }
+    });
+
+    socket.on('call-reject', (data) => {
+        const target = data.recipientId || data.callerId;
+        if (target) {
+            console.log(`❌ [Call Rejected] ${data.callId}, notifying ${target}`);
+            io.to(target).emit('call-reject', data);
+        }
+    });
+
+    socket.on('call-end', (data) => {
+        console.log(`🛑 [Call Ended] ${data.callId}`);
+        const target1 = data.recipientId;
+        const target2 = (socket.userId === data.callerId) ? data.calleeId : data.callerId;
+        
+        if (target1) io.to(target1).emit('call-end', data);
+        if (target2 && target2 !== target1) io.to(target2).emit('call-end', data);
+    });
+
+    // 5. Media Toggle Events
+    socket.on('video-toggle', (data) => {
+        const target = data.recipientId || (socket.userId === data.callerId ? data.calleeId : data.callerId);
+        if (target) io.to(target).emit('video-toggle', data);
+    });
+
+    socket.on('audio-toggle', (data) => {
+        const target = data.recipientId || (socket.userId === data.callerId ? data.calleeId : data.callerId);
+        if (target) io.to(target).emit('audio-toggle', data);
     });
 });
 

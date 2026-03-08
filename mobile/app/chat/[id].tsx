@@ -41,10 +41,12 @@ import Animated, {
     interpolateColor,
     Extrapolation,
     Easing,
+    FadeInDown,
+    FadeOutDown,
 } from 'react-native-reanimated';
 import 'react-native-gesture-handler';
 
-import { useApp } from '../../context/AppContext';
+import { useApp, USERS } from '../../context/AppContext';
 import { SoulAvatar } from '../../components/SoulAvatar';
 import { chatService } from '../../services/ChatService';
 import { MusicPlayerOverlay } from '../../components/MusicPlayerOverlay';
@@ -457,8 +459,20 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const hasScrolledInitial = useRef(false);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     // Derived State
-    const contact = contacts.find(c => c.id === id);
-    const chatMessages = messages[id || ''] || [];
+    const contact = useMemo(() => {
+        const found = contacts.find(c => c.id === id);
+        if (found) return found;
+        
+        // Fallback for legacy ID navigation
+        const legacyMappedUuid = id ? (USERS[id]?.id) : null;
+        if (legacyMappedUuid) {
+            console.log(`[Chat] Resolving legacy ID ${id} to UUID ${legacyMappedUuid}`);
+            return contacts.find(c => c.id === legacyMappedUuid);
+        }
+        return undefined;
+    }, [contacts, id]);
+    
+    const chatMessages = messages[id || ''] || (contact ? (messages[contact.id] || []) : []);
     const isTyping = contact ? typingUsers.includes(contact.id) : false;
 
     // Mark incoming messages as read when chat is open
@@ -471,21 +485,9 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         }
     }, [chatMessages]);
 
-    // Toggle Options Menu
+    // Toggle Options Menu (Now opens MediaPickerSheet directly)
     const toggleOptions = () => {
-        if (isExpanded) {
-            // Close
-            plusRotation.value = withSpring(0);
-            optionsHeight.value = withTiming(0);
-            optionsOpacity.value = withTiming(0);
-            setIsExpanded(false);
-        } else {
-            // Open
-            plusRotation.value = withSpring(45); // Rotate to X
-            optionsHeight.value = withTiming(90);
-            optionsOpacity.value = withTiming(1);
-            setIsExpanded(true);
-        }
+        setShowMediaPicker(true);
     };
 
     // Close options when typing
@@ -507,7 +509,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
     // Media picker state
     const [showMediaPicker, setShowMediaPicker] = useState(false);
-    const [mediaPreview, setMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' } | null>(null);
+    const [mediaPreview, setMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' }[] | null>(null);
     const [mediaCollection, setMediaCollection] = useState<{ messageId: string; items: ChatMediaItem[]; startIndex: number } | null>(null);
     const [mediaViewer, setMediaViewer] = useState<{ messageId: string; items: ChatMediaItem[]; index: number } | null>(null);
     const [selectedMediaLayout, setSelectedMediaLayout] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -814,15 +816,15 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
 
     // Instant scroll to latest message when new messages arrive (animated)
-    const prevMsgCount = useRef(chatMessages.length);
+    const prevMsgCount = useRef(chatMessages?.length || 0);
     useEffect(() => {
-        if (chatMessages.length > prevMsgCount.current) {
+        if ((chatMessages?.length || 0) > prevMsgCount.current) {
             setTimeout(() => {
                 flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
             }, 100);
         }
-        prevMsgCount.current = chatMessages.length;
-    }, [chatMessages.length]);
+        prevMsgCount.current = chatMessages?.length || 0;
+    }, [chatMessages?.length]);
 
     // Handle content size change if needed (but inverted handles most cases)
     const handleContentSizeChange = useCallback(() => {
@@ -1070,7 +1072,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 });
             }}
         >
-            <Image source={{ uri: item.url }} style={styles.mediaCollectionImage} contentFit="cover" transition={200} />
+            <Image source={{ uri: item.localFileUri || item.url }} style={styles.mediaCollectionImage} contentFit="cover" transition={200} />
             {item.type === 'video' && (
                 <View style={styles.mediaCollectionVideoBadge}>
                     <MaterialIcons name="play-arrow" size={18} color="#fff" />
@@ -1094,13 +1096,13 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         const result = await ImagePicker.launchCameraAsync({
             mediaTypes: ImagePicker.MediaTypeOptions.All,
             quality: 0.8,
-            allowsEditing: true,
+            allowsEditing: false,
             videoMaxDuration: 120,
         });
         if (!result.canceled && result.assets[0]) {
             const asset = result.assets[0];
             const type = asset.type === 'video' ? 'video' : 'image';
-            setMediaPreview({ uri: asset.uri, type });
+            setMediaPreview([{ uri: asset.uri, type }]);
         }
     };
 
@@ -1110,19 +1112,32 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         const result = await ImagePicker.launchImageLibraryAsync({
             mediaTypes: ImagePicker.MediaTypeOptions.All,
             quality: 0.8,
-            allowsEditing: true,
+            allowsEditing: false,
+            allowsMultipleSelection: true,
             videoMaxDuration: 120,
         });
-        if (!result.canceled && result.assets[0]) {
-            const asset = result.assets[0];
-            const type = asset.type === 'video' ? 'video' : 'image';
-            setMediaPreview({ uri: asset.uri, type });
+        if (!result.canceled && result.assets && result.assets.length > 0) {
+            const items: { uri: string; type: 'image' | 'video' | 'audio' }[] = result.assets.map(asset => ({
+                uri: asset.uri,
+                type: asset.type === 'video' ? 'video' : 'image'
+            }));
+            setMediaPreview(items);
         }
     };
 
     const handleSelectAudio = async () => {
         setShowMediaPicker(false);
         Alert.alert('Coming Soon', 'Audio file selection will be available soon.');
+    };
+
+    const handleSelectLocation = () => {
+        setShowMediaPicker(false);
+        Alert.alert('Coming Soon', 'Location sharing will be available soon.');
+    };
+
+    const handleSelectContact = () => {
+        setShowMediaPicker(false);
+        Alert.alert('Coming Soon', 'Contact sharing will be available soon.');
     };
 
     const handleSendMedia = async (mediaList: { uri: string; type: 'image'|'video'|'audio' }[], caption?: string) => {
@@ -1183,6 +1198,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                 contentContainerStyle={styles.messagesContent}
                                 showsVerticalScrollIndicator={false}
                                 removeClippedSubviews={Platform.OS === 'android'}
+                                 ListHeaderComponent={null}
                                 ListEmptyComponent={
                                     <View style={styles.emptyChat}>
                                         <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
@@ -1194,22 +1210,22 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
 
 
-                            {/* iOS-style Progressive Blur Effects */}
-                            <ProgressiveBlur position="top" height={280} intensity={120} />
-                            <ProgressiveBlur position="bottom" height={200} intensity={120} />
-
-                            {/* Typing Indicator — animated 3-dot bubble */}
-                            {isTyping && (
-                                <View style={styles.typingContainer}>
-                                    <View style={styles.typingBubble}>
-                                        <TypingDots />
-                                    </View>
-                                </View>
-                            )}
+                            {/* Progressive Blur — Telegram/iOS style, works on Android too */}
+                            <ProgressiveBlur position="top" height={160} intensity={80} />
+                            <ProgressiveBlur position="bottom" height={160} intensity={80} />
                         </Animated.View>
 
                         {/* Input Area */}
                         <Animated.View style={[styles.inputArea, inputAreaAnimatedStyle]}>
+                            {/* Typing Indicator above input */}
+                            {isTyping && (
+                                <Animated.View entering={FadeInDown} exiting={FadeOutDown} style={styles.typingIndicatorWrapper}>
+                                    <View style={styles.typingBubbleMini}>
+                                        <Text style={styles.typingText}>{contact.name} is typing</Text>
+                                        <TypingDots />
+                                    </View>
+                                </Animated.View>
+                            )}
                         {/* Reply Preview */}
                         {replyingTo && (() => {
                             const mediaItems = getMessageMediaItems(replyingTo);
@@ -1246,33 +1262,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                         <View style={styles.unifiedPillContainer}>
                             <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill}  />
                             
-                            {/* Expandable Options Menu - Now above inputWrapper to open upwards */}
-                            <Animated.View style={[styles.optionsMenu, animatedOptionsStyle]}>
-                                 <Pressable style={styles.optionItem} onPress={handleSelectGallery}>
-                                    <View style={[styles.optionIcon, { backgroundColor: '#3b82f6' }]}>
-                                        <MaterialIcons name="image" size={24} color="white" />
-                                    </View>
-                                    <Text style={styles.optionText}>Gallery</Text>
-                                 </Pressable>
-                                 <Pressable style={styles.optionItem} onPress={handleSelectCamera}>
-                                    <View style={[styles.optionIcon, { backgroundColor: '#ef4444' }]}>
-                                        <MaterialIcons name="camera-alt" size={24} color="white" />
-                                    </View>
-                                    <Text style={styles.optionText}>Camera</Text>
-                                 </Pressable>
-                                 <Pressable style={styles.optionItem}>
-                                    <View style={[styles.optionIcon, { backgroundColor: '#a855f7' }]}>
-                                        <MaterialIcons name="location-pin" size={24} color="white" />
-                                    </View>
-                                    <Text style={styles.optionText}>Location</Text>
-                                 </Pressable>
-                                 <Pressable style={styles.optionItem}>
-                                    <View style={[styles.optionIcon, { backgroundColor: '#10b981' }]}>
-                                        <MaterialIcons name="person" size={24} color="white" />
-                                    </View>
-                                    <Text style={styles.optionText}>Contact</Text>
-                                 </Pressable>
-                            </Animated.View>
+                            {/* Expandable Options Menu - REMOVED for MediaPickerSheet */}
 
                             <View
                                 style={[styles.inputWrapper, isRecording && styles.inputWrapperHidden]}
@@ -1482,11 +1472,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                     <Text style={styles.contactName}>{contact.name}</Text>
                                 </Animated.View>
                                 <Animated.View style={headerAccessoryAnimatedStyle}>
-                                    {isTyping ? (
-                                        <Text style={[styles.statusText, { color: '#22c55e' }]}>
-                                            typing...
-                                        </Text>
-                                    ) : musicState.currentSong ? (
+                                    {musicState.currentSong ? (
                                         <View style={styles.nowPlayingStatus}>
                                             <MaterialIcons name="audiotrack" size={12} color={activeTheme.primary} />
                                             <Text style={[styles.statusText, { color: activeTheme.primary }]} numberOfLines={1}>
@@ -1594,6 +1580,14 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 onClose={() => setShowMediaPicker(false)}
                 onSelectCamera={handleSelectCamera}
                 onSelectGallery={handleSelectGallery}
+                onSelectAssets={(assets) => {
+                    setShowMediaPicker(false);
+                    const formattedAssets = assets.map(a => ({
+                        uri: a.uri,
+                        type: a.mediaType === 'video' ? 'video' : 'image'
+                    }));
+                    setMediaPreview(formattedAssets as any);
+                }}
                 onSelectAudio={handleSelectAudio}
                 onSelectNote={() => {
                     setShowMediaPicker(false);
@@ -1603,9 +1597,8 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
             {/* Media Preview Modal */}
             <MediaPreviewModal
-                visible={!!mediaPreview}
-                mediaUri={mediaPreview?.uri || ''}
-                mediaType={mediaPreview?.type || 'image'}
+                visible={!!mediaPreview && mediaPreview.length > 0}
+                initialMediaItems={mediaPreview || undefined}
                 onClose={() => setMediaPreview(null)}
                 onSend={handleSendMedia}
                 isUploading={isUploading}
@@ -1835,6 +1828,26 @@ const styles = StyleSheet.create({
         paddingHorizontal: 20,
         paddingBottom: 10,
         alignItems: 'flex-start' as const,
+    },
+    typingIndicatorWrapper: {
+        position: 'absolute',
+        bottom: 85,
+        left: 20,
+        zIndex: 100,
+    },
+    typingBubbleMini: {
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        borderRadius: 16,
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    typingText: {
+        color: 'rgba(255,255,255,0.5)',
+        fontSize: 12,
+        fontWeight: '500',
     },
     typingBubble: {
         backgroundColor: 'rgba(255,255,255,0.08)',

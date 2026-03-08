@@ -1,5 +1,5 @@
 import React from 'react';
-import { StyleSheet, ViewProps, StyleProp, ViewStyle, Platform } from 'react-native';
+import { View, StyleSheet, ViewProps, StyleProp, ViewStyle, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 
 export interface GlassViewProps extends ViewProps {
@@ -17,20 +17,15 @@ export const GlassView = ({
     ...rest
 }: GlassViewProps) => {
     if (Platform.OS === 'android') {
-        // On Android, use dimezisBlurView for real backdrop blur.
-        // blurReductionFactor reduces the perceived intensity on Android
-        // to match iOS visually. Increase intensity to compensate for the reduction.
         return (
-            <BlurView
-                intensity={Math.min(intensity * 2.5, 100)}
-                tint={tint}
-                experimentalBlurMethod="dimezisBlurView"
-                blurReductionFactor={4}
-                style={[styles.container, style]}
-                {...rest}
-            >
+            <View style={[styles.container, style, { backgroundColor: tint === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.4)' }]}>
+                <BlurView
+                    intensity={Math.min(intensity * 1.5, 100)}
+                    tint={tint}
+                    style={StyleSheet.absoluteFill}
+                />
                 {children}
-            </BlurView>
+            </View>
         );
     }
 

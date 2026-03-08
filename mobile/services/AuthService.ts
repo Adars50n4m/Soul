@@ -36,6 +36,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { supabase } from '../config/supabase';
+
+const SHRI_ID = '4d28b137-66ff-4417-b451-b1a421e34b25';
+const HARI_ID = '02e52f08-6c1e-497f-93f6-b29c275b8ca4';
 import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
@@ -98,7 +101,7 @@ class AuthService {
           success: true,
           isNewUser: false,
           user: {
-            id: 'shri',
+            id: SHRI_ID,
             username: 'shri',
             name: 'Shri Ram',
             display_name: 'Shri Ram',
@@ -114,11 +117,14 @@ class AuthService {
           success: true,
           isNewUser: false,
           user: {
-            id: 'hari',
+            id: HARI_ID,
             username: 'hari',
-            name: 'Hari',
-            display_name: 'Hari',
-          } as any,
+            displayName: 'Hari',
+            avatarUrl: null,
+            bio: null,
+            email: 'hari@example.com', // Placeholder email
+            createdAt: new Date().toISOString(),
+          },
         };
       }
 

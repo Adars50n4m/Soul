@@ -84,6 +84,25 @@ const MessageBubble = React.memo(({
     const bubbleRef = useRef<View>(null);
 
     const mediaItems = useMemo(() => getMessageMediaItems(msg), [msg]);
+    
+    React.useEffect(() => {
+        if (!isMe && onMediaDownload) {
+            mediaItems.forEach((media, index) => {
+                // If it's a key (doesn't look like a URL or file path) and we don't have it locally, auto-download
+                const isKey = media.url && 
+                             !media.url.startsWith('http') && 
+                             !media.url.startsWith('file:') && 
+                             !media.url.startsWith('data:');
+                
+                if (isKey && !media.localFileUri && !downloadingIndices.includes(index)) {
+                    console.log(`[MessageBubble] Auto-downloading media key: ${media.url}`);
+                    setDownloadingIndices(prev => [...prev, index]);
+                    onMediaDownload(msg.id, media.url, index);
+                }
+            });
+        }
+    }, [isMe, msg.id, mediaItems, onMediaDownload, downloadingIndices]);
+
     const hasText = !!msg.text;
     const hasCaption = !!msg.media?.caption;
     const isMediaOnly = mediaItems.length > 0 && !hasText && !hasCaption && mediaItems[0].type !== 'audio';
@@ -207,6 +226,8 @@ const MessageBubble = React.memo(({
             }
 
             const currentAspectRatio = aspectRatio || 1;
+            const mediaWidth = 260;
+            const mediaHeight = mediaWidth / currentAspectRatio;
 
             return (
                 <Pressable
@@ -215,19 +236,21 @@ const MessageBubble = React.memo(({
                         ChatStyles.mediaSurface,
                         isMe ? ChatStyles.mediaSurfaceMe : ChatStyles.mediaSurfaceThem,
                         !hasText && !hasCaption && ChatStyles.mediaSingleNoGap,
-                        { aspectRatio: currentAspectRatio }
+                        { 
+                            width: mediaWidth,
+                            height: mediaHeight,
+                            backgroundColor: 'rgba(255,255,255,0.05)',
+                        }
                     ]}
                 >
                     <AnimatedImage 
-                        source={{ uri: media.localFileUri || media.url }} 
-                        style={[
-                            ChatStyles.mediaSingle,
-                            { 
-                                aspectRatio: currentAspectRatio, 
-                                height: undefined, 
-                                width: '100%',
-                            }
-                        ]} 
+                        source={(media.localFileUri || (media.url && (media.url.startsWith('http') || media.url.startsWith('file:') || media.url.startsWith('data:')))) 
+                            ? { uri: media.localFileUri || media.url } 
+                            : undefined} 
+                        style={{ 
+                            width: mediaWidth,
+                            height: mediaHeight,
+                        }} 
                         contentFit="cover"
                         transition={200}
                         blurRadius={(!isMe && !media.localFileUri) ? 20 : 0}
@@ -282,8 +305,10 @@ const MessageBubble = React.memo(({
                                 style={ChatStyles.mediaGridTile}
                                 onPress={() => handleMediaPress(index, showMore)}
                             >
-                                <AnimatedImage 
-                                     source={{ uri: media.localFileUri || media.url }} 
+                                 <AnimatedImage 
+                                     source={(media.localFileUri || (media.url && (media.url.startsWith('http') || media.url.startsWith('file:') || media.url.startsWith('data:')))) 
+                                         ? { uri: media.localFileUri || media.url } 
+                                         : undefined} 
                                      style={ChatStyles.mediaGridImage} 
                                      contentFit="cover" 
                                      transition={200} 
@@ -440,7 +465,8 @@ const MessageBubble = React.memo(({
                                             const hasQuoteMedia = quoteMedia.length > 0;
                                             const firstQuoteMedia = hasQuoteMedia ? quoteMedia[0] : null;
                                             if (hasQuoteMedia && firstQuoteMedia?.type !== 'audio' && firstQuoteMedia?.url) {
-                                                return <Image source={{ uri: firstQuoteMedia.url }} style={ChatStyles.quoteThumbnail} contentFit="cover" />;
+                                                const isValid = firstQuoteMedia.url.startsWith('http') || firstQuoteMedia.url.startsWith('file:') || firstQuoteMedia.url.startsWith('data:');
+                                                return <Image source={(firstQuoteMedia.localFileUri || isValid) ? { uri: firstQuoteMedia.localFileUri || firstQuoteMedia.url } : undefined} style={ChatStyles.quoteThumbnail} contentFit="cover" />;
                                             }
                                             return null;
                                         })()}

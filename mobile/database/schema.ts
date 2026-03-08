@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 3;
+const DB_TARGET_VERSION = 4;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -212,6 +212,22 @@ async function migration_v3(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v4 — Add is_unsent and retry_count to old tables
+//
+// These columns existed in migration_v1 for NEW installs, but users who
+// upgraded from very old builds might be missing them, leading to crashes.
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v4(db: any): Promise<void> {
+  const safeAlter = async (sql: string) => {
+    try { await db.execAsync(sql); } catch (_) { /* already exists */ }
+  };
+  await safeAlter(`ALTER TABLE messages ADD COLUMN is_unsent INTEGER DEFAULT 0;`);
+  await safeAlter(`ALTER TABLE messages ADD COLUMN retry_count INTEGER DEFAULT 0;`);
+  await safeAlter(`ALTER TABLE messages ADD COLUMN last_retry_at TEXT;`);
+  await safeAlter(`ALTER TABLE messages ADD COLUMN error_message TEXT;`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
@@ -240,6 +256,9 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
           break;
         case 3:
           await migration_v3(db);
+          break;
+        case 4:
+          await migration_v4(db);
           break;
         // ── Add future cases here ──────────────────────────────────────────
         // case 3:

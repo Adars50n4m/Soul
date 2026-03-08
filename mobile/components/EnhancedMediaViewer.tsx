@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     View,
     Text,
-    Image,
     Pressable,
     StyleSheet,
     useWindowDimensions,
@@ -13,6 +12,7 @@ import {
     ActivityIndicator,
     Modal,
 } from 'react-native';
+import { Image } from 'expo-image';
 import GlassView from './ui/GlassView';
 import { MaterialIcons } from '@expo/vector-icons';
 import Animated, {
@@ -44,6 +44,7 @@ interface EnhancedMediaViewerProps {
         url: string;
         type: 'image' | 'video' | 'audio' | 'status_reply';
         caption?: string;
+        localFileUri?: string;
     } | null;
     sourceLayout: LayoutRect | null;
     onClose: () => void;
@@ -228,14 +229,19 @@ export const EnhancedMediaViewer: React.FC<EnhancedMediaViewerProps> = ({
                 <Animated.View style={animatedMediaStyle}>
                     {media.type === 'video' ? (
                         <Video
-                            source={{ uri: media.url }}
+                            source={{ uri: media.localFileUri || media.url }}
                             style={styles.fullMedia}
                             resizeMode={ResizeMode.COVER}
                             shouldPlay
                             isLooping
                         />
                     ) : (
-                        <Image source={{ uri: media.url }} style={styles.fullMedia} resizeMode="cover" />
+                        <Image 
+                            source={{ uri: media.localFileUri || media.url }} 
+                            style={styles.fullMedia} 
+                            contentFit="cover" 
+                            transition={200}
+                        />
                     )}
                     
                 </Animated.View>

@@ -11,15 +11,17 @@ export interface ChatMediaItem {
 export const getMessageMediaItems = (msg: Message | any): ChatMediaItem[] => {
     if (!msg?.media) return [];
 
+    const hasSource = (m: any) => !!(m?.url || msg.localFileUri);
+
     if (Array.isArray(msg.media)) {
-        return msg.media.filter((m: any) => m?.url).map((m: any) => ({ ...m, localFileUri: msg.localFileUri }));
+        return msg.media.filter(hasSource).map((m: any) => ({ ...m, localFileUri: msg.localFileUri }));
     }
 
     if (Array.isArray(msg.media?.items)) {
-        return msg.media.items.filter((m: any) => m?.url).map((m: any) => ({ ...m, localFileUri: msg.localFileUri }));
+        return msg.media.items.filter(hasSource).map((m: any) => ({ ...m, localFileUri: msg.localFileUri }));
     }
 
-    if (msg.media?.url) {
+    if (msg.media?.url || msg.localFileUri) {
         return [{ ...msg.media, localFileUri: msg.localFileUri }];
     }
 

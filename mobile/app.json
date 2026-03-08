@@ -107,7 +107,9 @@
       "expo-local-authentication",
       "expo-font",
       "@react-native-community/datetimepicker",
-      "expo-pip"
+      "expo-pip",
+      "./plugins/withAndroidPiP",
+      "./plugins/withIosPiP"
     ],
     "experiments": {
       "typedRoutes": true,

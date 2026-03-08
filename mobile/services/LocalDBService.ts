@@ -141,10 +141,12 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
 // ─────────────────────────────────────────────────────────────────────────────
 function rowToQueuedMessage(row: any): QueuedMessage {
   let media: QueuedMessage['media'] | undefined;
-  if (row.media_url) {
+  // If we have an intentional media type, or a populated URL/local file, we MUST recreate the media object.
+  // We use `row.media_url != null` to capture empty strings correctly.
+  if (row.media_url != null || row.media_type || row.local_file_uri) {
     media = {
       type: row.media_type ?? 'image',
-      url: row.media_url,
+      url: row.media_url ?? '',
       name: row.media_name ?? undefined,
       caption: row.media_caption ?? undefined,
     };
@@ -185,8 +187,8 @@ class OfflineService {
       `INSERT OR REPLACE INTO messages
          (id, chat_id, sender, receiver, text,
           media_type, media_url, media_caption,
-          reply_to_id, timestamp, status, local_file_uri)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+          reply_to_id, timestamp, status, local_file_uri, is_unsent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);`,
       [
         msg.id,
         chatId,
@@ -215,8 +217,8 @@ class OfflineService {
       `INSERT OR REPLACE INTO messages
          (id, chat_id, sender, receiver, text,
           media_type, media_url, media_caption,
-          reply_to_id, timestamp, status, retry_count, local_file_uri)
-       VALUES (?, ?, 'me', ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?);`,
+          reply_to_id, timestamp, status, retry_count, local_file_uri, is_unsent)
+       VALUES (?, ?, 'me', ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, 1);`,
       [
         msg.id,
         chatId,
@@ -237,7 +239,7 @@ class OfflineService {
     const db = await getDb();
     const rows = await db.getAllAsync(
       `SELECT * FROM messages
-       WHERE chat_id = ? AND is_unsent = 0
+       WHERE chat_id = ?
        ORDER BY timestamp ASC
        LIMIT ?;`,
       [chatId, limit]
@@ -281,6 +283,15 @@ class OfflineService {
     );
   }
 
+  // ── WRITE: Update media url after background upload ──────────────────────
+  async updateMessageMediaUrl(messageId: string, url: string): Promise<void> {
+    const db = await getDb();
+    await db.runAsync(
+      `UPDATE messages SET media_url = ? WHERE id = ?;`,
+      [url, messageId]
+    );
+  }
+
   // ── WRITE: Update localFileUri for downloaded media ──────────────────────
   async updateMessageLocalUri(messageId: string, uri: string): Promise<void> {
     const db = await getDb();
@@ -299,19 +310,16 @@ class OfflineService {
   // updates automatically — no manual fix needed.
   async updateMessageId(oldId: string, newId: string): Promise<void> {
     const db = await getDb();
-    // SQLite doesn't support updating a PRIMARY KEY directly with a simple UPDATE
-    // on tables that other tables reference via FK.  The ON UPDATE CASCADE in
-    // media_downloads handles the child row, but we need to do the parent update
-    // inside a transaction to be safe.
-    await db.execAsync('BEGIN;');
+    // A single UPDATE is atomic in SQLite. 
+    // ON UPDATE CASCADE in media_downloads will automatically handle the child row seamlessly.
+    // Manual BEGIN/COMMIT over a shared connection causes overlapping transaction crashes 
+    // when multiple messages are sent concurrently.
     try {
       await db.runAsync(
         `UPDATE messages SET id = ? WHERE id = ?;`,
         [newId, oldId]
       );
-      await db.execAsync('COMMIT;');
     } catch (e) {
-      await db.execAsync('ROLLBACK;');
       console.error('[LocalDB] updateMessageId failed:', e);
       throw e;
     }

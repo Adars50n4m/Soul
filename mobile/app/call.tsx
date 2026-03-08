@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { BlurView } from 'expo-blur';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
     useWindowDimensions, Platform, Alert, AppState, ActivityIndicator
@@ -34,17 +35,24 @@ const getWebRTCModules = () => {
         const webrtc = require('react-native-webrtc');
         return {
             RTCView: webrtc.RTCView,
+            RTCPIPView: webrtc.RTCPIPView,
+            startIOSPIP: webrtc.startIOSPIP,
+            stopIOSPIP: webrtc.stopIOSPIP,
             MediaStream: webrtc.MediaStream,
             webRTCService: require('../services/WebRTCService').webRTCService
         };
     } catch (e) {
         console.log('[CallScreen] Native WebRTC not available (Expo Go)');
-        return { RTCView: null, MediaStream: null, webRTCService: null };
+        return { RTCView: null, RTCPIPView: null, startIOSPIP: null, stopIOSPIP: null, MediaStream: null, webRTCService: null };
     }
 };
 
 const webrtcModules = getWebRTCModules();
 const RTCView = webrtcModules.RTCView;
+const RTCPIPView = webrtcModules.RTCPIPView;
+const RemoteVideoComponent = RTCPIPView || RTCView;
+const startIOSPIP = webrtcModules.startIOSPIP;
+const stopIOSPIP = webrtcModules.stopIOSPIP;
 const webRTCService = webrtcModules.webRTCService;
 
 
@@ -70,30 +78,49 @@ export default function CallScreen() {
     // Picture-in-Picture (Android) State
     const { isInPipMode: androidIsInPipMode } = Platform.OS === 'android' ? ExpoPip.useIsInPip() : { isInPipMode: false };
     const [iosIsInPipMode, setIosIsInPipMode] = useState(false);
+    const [showDiagnostics, setShowDiagnostics] = useState(false); // For user verification
 
     // Track if we are in PiP manually via AppState for iOS UI treatment
     useEffect(() => {
-        if (Platform.OS !== 'ios') return;
         let timeout: NodeJS.Timeout;
         const subscription = AppState.addEventListener('change', nextAppState => {
-            // If the app goes to background during an active video call, treat UI as PiP
-            if (nextAppState.match(/inactive|background/) && activeCall?.type === 'video' && activeCall?.isAccepted && !isMinimizing.current) {
-                // Short delay to allow iOS native PiP animation to start before hiding UI
-                timeout = setTimeout(() => setIosIsInPipMode(true), 150);
+            const isVideoCall = activeCall?.type === 'video' && activeCall?.isAccepted && !isMinimizing.current;
+            
+            if (nextAppState.match(/inactive|background/)) {
+                if (isVideoCall) {
+                    if (Platform.OS === 'ios') {
+                        if (startIOSPIP && rtcPipRef.current) {
+                            try { startIOSPIP(rtcPipRef); } catch (e) { console.warn('startIOSPIP error:', e); }
+                        }
+                        timeout = setTimeout(() => setIosIsInPipMode(true), 150);
+                    } else if (Platform.OS === 'android') {
+                        try { 
+                            ExpoPip.enterPipMode({ 
+                                width: Math.floor(width), 
+                                height: Math.floor(height),
+                                autoEnterEnabled: true 
+                            }); 
+                        } catch (e) { console.warn('ExpoPip error:', e); }
+                    }
+                }
             } else if (nextAppState === 'active') {
-                setIosIsInPipMode(false);
+                if (Platform.OS === 'ios') {
+                    setIosIsInPipMode(false);
+                    if (stopIOSPIP) try { stopIOSPIP(); } catch (e) {}
+                }
             }
         });
         return () => {
-            clearTimeout(timeout);
+            if (timeout) clearTimeout(timeout);
             subscription.remove();
         };
-    }, [activeCall]);
+    }, [activeCall?.type, activeCall?.isAccepted, width, height]);
 
     const isInPipMode = Platform.OS === 'android' ? androidIsInPipMode : iosIsInPipMode;
 
     // Track if we are minimizing to prevent ending call on unmount
     const isMinimizing = useRef(false);
+    const rtcPipRef = useRef(null);
 
     // Keep a ref to the latest endAppCall to avoid stale closures in listeners
     const endAppCallRef = useRef(endAppCall);
@@ -112,6 +139,40 @@ export default function CallScreen() {
 
     const contact = contacts.find(c => c.id === activeCall?.contactId);
     const isVideo = activeCall?.type === 'video';
+
+    const handleMinimize = useCallback(() => {
+        isMinimizing.current = true;
+        toggleMinimizeCall(true);
+        if (navigation.canGoBack()) navigation.goBack();
+    }, [navigation, toggleMinimizeCall]);
+
+    const handleToggleMute = useCallback(() => {
+        toggleAppMute();
+    }, [toggleAppMute]);
+
+    const handleToggleVideo = useCallback(() => {
+        if (toggleVideo) {
+            toggleVideo();
+        }
+    }, [toggleVideo]);
+
+    const handleToggleSpeaker = useCallback(() => {
+        setIsSpeaker(prev => !prev);
+    }, []);
+
+    const handleSwitchCamera = useCallback(() => {
+        if (webRTCService) {
+            try { webRTCService.switchCamera(); } catch (e) { }
+        }
+    }, []);
+
+    const handleAcceptCall = useCallback(async () => {
+        try {
+            await acceptAppCall();
+        } catch (e) {
+            console.error('[CallScreen] handleAcceptCall failed:', e);
+        }
+    }, [acceptAppCall]);
 
     // Gesture for draggable video
     const panGesture = Gesture.Pan()
@@ -398,40 +459,6 @@ export default function CallScreen() {
     }, [restoreMusicAudioMode]);
 
 
-    const handleToggleMute = () => {
-        toggleAppMute();
-    };
-
-    const handleToggleVideo = () => {
-        if (toggleVideo) {
-            toggleVideo();
-        }
-    };
-
-    const handleToggleSpeaker = () => {
-        setIsSpeaker(!isSpeaker);
-        // Implement actual speaker toggle logic if needed
-    };
-
-    const handleSwitchCamera = () => {
-        if (webRTCService) {
-            try { webRTCService.switchCamera(); } catch (e) { }
-        }
-    };
-
-    const handleAcceptCall = async () => {
-        try {
-            await acceptAppCall();
-        } catch (e) {
-            console.error('[CallScreen] handleAcceptCall failed:', e);
-        }
-    };
-
-    const handleMinimize = () => {
-        isMinimizing.current = true;
-        toggleMinimizeCall(true);
-        if (navigation.canGoBack()) navigation.goBack();
-    };
 
     if (!activeCall || !contact) {
         return (
@@ -461,9 +488,10 @@ export default function CallScreen() {
                         )}
                         <View style={styles.overlay} />
 
-                        {/* Remote Video Stream — zOrder=1 so it renders ABOVE the RN window on Android */}
-                        {isVideo && RTCView && remoteStream && activeCall.isAccepted && !activeCall.remoteVideoOff && (
-                            <RTCView
+                        {/* Remote Video Stream */}
+                        {isVideo && RemoteVideoComponent && remoteStream && activeCall.isAccepted && !activeCall.remoteVideoOff && (
+                            <RemoteVideoComponent
+                                ref={rtcPipRef}
                                 streamURL={typeof remoteStream.toURL === 'function' ? remoteStream.toURL() : remoteStream}
                                 style={styles.remoteVideo}
                                 objectFit="cover"
@@ -494,6 +522,33 @@ export default function CallScreen() {
                     {/* 2. Main Content (Visible ONLY when NOT in PiP) */}
                     {!isInPipMode ? (
                         <View style={styles.content}>
+                            {/* Diagnostics Overlay (Toggled via long press on status) */}
+                            {showDiagnostics && (
+                                <View style={styles.diagnosticsContainer}>
+                                    <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+                                    <Text style={styles.diagnosticTitle}>Connection Diagnostics</Text>
+                                    <View style={styles.diagnosticRow}>
+                                        <Text style={styles.diagnosticLabel}>Audio Stream:</Text>
+                                        <Text style={[styles.diagnosticValue, { color: localStream?.getAudioTracks().length ? '#22c55e' : '#ef4444' }]}>
+                                            {localStream?.getAudioTracks().length ? 'ACTIVE' : 'NONE'}
+                                        </Text>
+                                    </View>
+                                    <View style={styles.diagnosticRow}>
+                                        <Text style={styles.diagnosticLabel}>Remote Video:</Text>
+                                        <Text style={[styles.diagnosticValue, { color: remoteStream ? '#22c55e' : '#ef4444' }]}>
+                                            {remoteStream ? 'CONNECTED' : 'WAITING...'}
+                                        </Text>
+                                    </View>
+                                    <View style={styles.diagnosticRow}>
+                                        <Text style={styles.diagnosticLabel}>Call State:</Text>
+                                        <Text style={styles.diagnosticValue}>{callState.toUpperCase()}</Text>
+                                    </View>
+                                    <Pressable onPress={() => setShowDiagnostics(false)} style={styles.closeDiagnostics}>
+                                        <Text style={{color: '#fff', fontWeight: 'bold'}}>CLOSE</Text>
+                                    </Pressable>
+                                </View>
+                            )}
+
                             {/* Header */}
                             <View style={[styles.header, { marginTop: Math.max(insets.top, 20) }]}>
                                 <Pressable onPress={handleMinimize} style={styles.iconButton}>
@@ -518,13 +573,18 @@ export default function CallScreen() {
 
                                     <View style={styles.textContainer}>
                                         <Text style={styles.contactName}>{contact.name}</Text>
-                                        <Text style={styles.callStatus}>
-                                            {callState === 'connected' ? formatDuration(callDuration) : 
-                                             callState === 'ended' ? 'Ending...' :
-                                             (activeCall.isIncoming && !activeCall.isAccepted) ? 'Incoming Soul Call...' : 
-                                             (callState === 'ringing' && !activeCall.isIncoming) ? 'Ringing...' : 
-                                             'Connecting...'}
-                                        </Text>
+                                        <Pressable 
+                                            onLongPress={() => setShowDiagnostics(true)}
+                                            delayLongPress={2000}
+                                        >
+                                            <Text style={styles.callStatus}>
+                                                {callState === 'connected' ? formatDuration(callDuration) : 
+                                                callState === 'ended' ? 'Ending...' :
+                                                (activeCall.isIncoming && !activeCall.isAccepted) ? 'Incoming Soul Call...' : 
+                                                (callState === 'ringing' && !activeCall.isIncoming) ? 'Ringing...' : 
+                                                'Connecting...'}
+                                            </Text>
+                                        </Pressable>
                                     </View>
                                 </View>
                             )}
@@ -632,6 +692,47 @@ const styles = StyleSheet.create({
     container: {
         flex: 1,
         backgroundColor: '#000',
+    },
+    diagnosticsContainer: {
+        position: 'absolute',
+        top: 100,
+        left: 20,
+        right: 20,
+        padding: 20,
+        borderRadius: 20,
+        backgroundColor: 'rgba(0,0,0,0.8)',
+        zIndex: 1000,
+        overflow: 'hidden',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)',
+    },
+    diagnosticTitle: {
+        color: '#fff',
+        fontSize: 18,
+        fontWeight: 'bold',
+        marginBottom: 15,
+        textAlign: 'center',
+    },
+    diagnosticRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        marginBottom: 10,
+    },
+    diagnosticLabel: {
+        color: 'rgba(255,255,255,0.6)',
+        fontSize: 14,
+    },
+    diagnosticValue: {
+        color: '#fff',
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    closeDiagnostics: {
+        marginTop: 15,
+        backgroundColor: '#BC002A',
+        padding: 10,
+        borderRadius: 10,
+        alignItems: 'center',
     },
     backgroundImage: {
         resizeMode: 'cover',

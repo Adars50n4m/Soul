@@ -35,35 +35,29 @@ try {
 //     → Self-hosted: coturn (open source)
 //
 const ICE_SERVERS: RTCIceServer[] = [
-    // ── STUN servers (free, unlimited) ─────────────────────────
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-
-    // ── TURN servers (Metered free open relay) ─────────────────
-    // UDP — fastest, preferred for media
-    {
-        urls: 'turn:a.relay.metered.ca:80',
-        username: 'e8dd65b92f3c9b121a4b6e90',
-        credential: '01mKLoBqjOsMDP/o',
-    },
-    // TCP — works through most firewalls
-    {
-        urls: 'turn:a.relay.metered.ca:80?transport=tcp',
-        username: 'e8dd65b92f3c9b121a4b6e90',
-        credential: '01mKLoBqjOsMDP/o',
-    },
-    // TLS on port 443 — works through the strictest firewalls (looks like HTTPS)
-    {
-        urls: 'turn:a.relay.metered.ca:443',
-        username: 'e8dd65b92f3c9b121a4b6e90',
-        credential: '01mKLoBqjOsMDP/o',
-    },
-    {
-        urls: 'turns:a.relay.metered.ca:443?transport=tcp',
-        username: 'e8dd65b92f3c9b121a4b6e90',
-        credential: '01mKLoBqjOsMDP/o',
-    },
+  // Primary STUN Servers (Free, works for WiFi/LAN)
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  
+  // Backup STUN Servers
+  { urls: 'stun:stun4.l.google.com:19302' },
+  
+  // Production TURN Server (Paid, required for 4G/5G/Corporate networks)
+  // Get credentials from: https://www.twilio.com/stun-turn or openrelay.net
+  {
+    urls: ['turn:' + (process.env.TURN_SERVER || 'turnserver.yourdomain.com:3478')],
+    username: process.env.TURN_USERNAME || 'your_username',
+    credential: process.env.TURN_PASSWORD || 'your_password'
+  },
+  
+  // Alternative TURN Server (for redundancy)
+  {
+    urls: ['turn:' + (process.env.TURN_SERVER_2 || 'backup-turnserver.yourdomain.com:3478')],
+    username: process.env.TURN_USERNAME_2 || 'backup_username',
+    credential: process.env.TURN_PASSWORD_2 || 'backup_password'
+  }
 ];
 
 type CallType = 'audio' | 'video';
@@ -86,6 +80,13 @@ class WebRTCService {
     private isInitiator: boolean = false;
     private partnerHasAccepted: boolean = false;
     private pendingCandidates: RTCIceCandidate[] = [];
+    private mediaStreamAttempted: boolean = false;
+
+    // Recovery tracking
+    private reconnectAttempts: number = 0;
+    private maxReconnectAttempts: number = 5;
+    private reconnectTimeout: NodeJS.Timeout | null = null;
+    private lastDisconnectTime: number = 0;
 
     /**
      * Initialize WebRTC service with callbacks
@@ -105,6 +106,7 @@ class WebRTCService {
         } else {
             // Fresh call
             this.localStream = null;
+            this.mediaStreamAttempted = false;
             this.remoteStream = null;
             this.partnerHasAccepted = false;
             this.setState('idle');
@@ -167,8 +169,8 @@ class WebRTCService {
             this.isInitiator = true;
             this.setState('ringing');
 
-            // Ensure media is ready (if not already)
-            if (!this.localStream) {
+            // Ensure media is ready (if not already and hasn't failed yet)
+            if (!this.localStream && !this.mediaStreamAttempted) {
                 await this.prepareCall(this.callType);
             }
 
@@ -226,8 +228,8 @@ class WebRTCService {
             this.isInitiator = false;
             this.setState('connecting');
 
-            // Ensure media is ready
-            if (!this.localStream) {
+            // Ensure media is ready (if not already and hasn't failed yet)
+            if (!this.localStream && !this.mediaStreamAttempted) {
                 await this.prepareCall(callType);
             }
 
@@ -423,6 +425,9 @@ class WebRTCService {
         let timer: NodeJS.Timeout | null = null;
         try {
             console.log('Getting media stream for', this.callType);
+            
+            // Mark as attempted so we don't try again and cause a double 8-second delay
+            this.mediaStreamAttempted = true;
 
             const constraints: any = {
                 audio: true,
@@ -528,7 +533,7 @@ class WebRTCService {
             }
         });
 
-        // Handle connection state changes
+        // Update connection state handler with recovery logic
         pc.addEventListener('connectionstatechange', () => {
             const state = pc.connectionState;
             console.log('[WebRTCService] Connection state:', state);
@@ -536,36 +541,92 @@ class WebRTCService {
             switch (state) {
                 case 'connected':
                     this.setState('connected');
+                    // Reset recovery attempts on successful reconnection
+                    this.reconnectAttempts = 0;
+                    if (this.reconnectTimeout) {
+                        clearTimeout(this.reconnectTimeout);
+                        this.reconnectTimeout = null;
+                    }
                     break;
+
                 case 'disconnected':
-                    // 'disconnected' is a TRANSIENT, recoverable state.
-                    // WebRTC will attempt to reconnect. Do NOT end the call here.
-                    console.warn('[WebRTCService] Connection transiently disconnected. Waiting for recovery...');
+                    // IMPORTANT: 'disconnected' is TRANSIENT state, NOT final
+                    // WebRTC stack will automatically attempt to recover
+                    this.lastDisconnectTime = Date.now();
+                    console.warn('[WebRTCService] ⚠️ Connection transiently disconnected. Waiting for automatic recovery...');
+
+                    // Give WebRTC 10 seconds to auto-recover before manual intervention
+                    if (!this.reconnectTimeout) {
+                        this.reconnectTimeout = setTimeout(() => {
+                            // After 10 seconds, if still disconnected, attempt manual recovery
+                            if (pc.connectionState === 'disconnected' && this.reconnectAttempts < this.maxReconnectAttempts) {
+                                this.reconnectAttempts++;
+                                console.log(`[WebRTCService] Attempting manual recovery (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+                                this.attemptRecovery();
+                            } else if (pc.connectionState === 'disconnected') {
+                                console.error('[WebRTCService] Max recovery attempts exceeded. Ending call.');
+                                this.endCall('recovery-exhausted');
+                            }
+                        }, 10000);
+                    }
                     break;
+
                 case 'failed':
                 case 'closed':
-                    // 'failed' and 'closed' are final states indicating the connection is truly lost.
+                    // 'failed' and 'closed' ARE FINAL states
                     console.warn(`[WebRTCService] Connection permanently ${state}. Ending call.`);
+                    if (this.reconnectTimeout) {
+                        clearTimeout(this.reconnectTimeout);
+                        this.reconnectTimeout = null;
+                    }
+                    this.reconnectAttempts = 0;
                     this.endCall(`pc-state-${state}`);
                     break;
             }
         });
 
-        // Handle ICE connection state
+        // Add ICE connection state handler with recovery
         pc.addEventListener('iceconnectionstatechange', () => {
             const iceState = pc.iceConnectionState;
             console.log('[WebRTCService] ICE state:', iceState);
-            if (iceState === 'connected' || iceState === 'completed') {
-                this.setState('connected');
-            } else if (iceState === 'disconnected') {
-                // 'disconnected' is transient – ICE will attempt to repair. Do NOT end call.
-                console.warn('[WebRTCService] ICE transiently disconnected. Waiting for recovery...');
-            } else if (iceState === 'failed') {
-                console.warn('[WebRTCService] ICE failed permanently. If on 4G/5G, a TURN server is required.');
-                this.endCall();
-            } else if (iceState === 'closed') {
-                console.log('[WebRTCService] ICE closed.');
-                this.endCall();
+
+            switch (iceState) {
+                case 'connected':
+                case 'completed':
+                    this.setState('connected');
+                    this.reconnectAttempts = 0;
+                    console.log('[WebRTCService] ✅ ICE connection established');
+                    break;
+
+                case 'disconnected':
+                    // ICE layer disconnection is often transient
+                    // Wait for auto-recovery before taking action
+                    console.warn('[WebRTCService] ⚠️ ICE transiently disconnected. Waiting for auto-repair...');
+
+                    // Give ICE 8 seconds to auto-repair
+                    setTimeout(() => {
+                        if (pc.iceConnectionState === 'disconnected') {
+                            console.log('[WebRTCService] ICE still disconnected after 8 seconds. Checking connection state...');
+                            // Don't end call yet - let connection state handler decide
+                        }
+                    }, 8000);
+                    break;
+
+                case 'checking':
+                    console.log('[WebRTCService] ICE is checking connection candidates...');
+                    break;
+
+                case 'failed':
+                    console.warn('[WebRTCService] ❌ ICE connection failed');
+                    console.warn('[WebRTCService] Note: On 4G/5G networks, ensure TURN server is configured');
+                    // Don't immediately end - connection state will handle it
+                    break;
+
+                case 'closed':
+                    console.log('[WebRTCService] ICE connection closed');
+                    this.reconnectAttempts = 0;
+                    this.endCall('ice-closed');
+                    break;
             }
         });
 
@@ -620,6 +681,40 @@ class WebRTCService {
     private setState(state: CallState): void {
         this.callState = state;
         this.callbacks?.onStateChange(state);
+    }
+
+    // Add recovery attempt method
+    private async attemptRecovery(): Promise<void> {
+        try {
+            console.log('[WebRTCService] Attempting manual recovery...');
+            
+            if (!this.peerConnection) {
+                console.log('[WebRTCService] No peer connection available');
+                return;
+            }
+            
+            // Strategy 1: Restart ICE gathering (soft restart)
+            if ('restartIce' in this.peerConnection) {
+                console.log('[WebRTCService] Restarting ICE gathering...');
+                await (this.peerConnection as any).restartIce();
+            }
+            
+            // Strategy 2: Check local streams are still active
+            if (this.localStream) {
+                const audioTracks = this.localStream.getAudioTracks();
+                const videoTracks = this.localStream.getVideoTracks();
+                
+                if (audioTracks.length === 0 || videoTracks.length === 0) {
+                    console.log('[WebRTCService] Local stream tracks lost. Attempting to refresh...');
+                    // Optionally re-get media here
+                }
+            }
+            
+            console.log('[WebRTCService] Recovery attempt initiated. Waiting for reconnection...');
+            
+        } catch (error) {
+            console.error('[WebRTCService] Recovery attempt failed:', error);
+        }
     }
 
     /**

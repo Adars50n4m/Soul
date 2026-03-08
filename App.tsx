@@ -1,6 +1,5 @@
-
 import React, { memo, useMemo, useState, useEffect, useRef } from 'react';
-import { HashRouter as Router, Routes, Route, useLocation, Link, useNavigate } from 'react-router-dom';
+import { useLocation, Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { AppProvider, useApp } from './AppContext.tsx';
 import { getActiveStreams, onStreamsChange } from './src/webrtc/useWebRTC';
@@ -12,133 +11,174 @@ import ContactsScreen from './screens/ContactsScreen.tsx';
 import StatusScreen from './screens/StatusScreen.tsx';
 import CallsScreen from './screens/CallsScreen.tsx';
 import ProfileScreen from './screens/ProfileScreen.tsx';
-import SettingsScreen from './screens/SettingsScreen.tsx';
 import VideoCallScreen from './screens/VideoCallScreen.tsx';
 import AudioCallScreen from './screens/AudioCallScreen.tsx';
 
-const HomeIndicator: React.FC = () => (
-  <div className="fixed bottom-1 w-24 h-1 bg-white/5 rounded-full left-1/2 -translate-x-1/2 z-[100] pointer-events-none md:hidden"></div>
-);
+// ============================================================================
+// CALL SERVICE - Handles persistent call state across app
+// ============================================================================
+class CallService {
+  private activeCallState: {
+    callId: string | null;
+    isActive: boolean;
+    isMinimized: boolean;
+    remoteUser: any;
+  } = {
+    callId: null,
+    isActive: false,
+    isMinimized: false,
+    remoteUser: null,
+  };
 
+  private listeners: Set<Function> = new Set();
+
+  subscribe(listener: Function) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notifyListeners() {
+    this.listeners.forEach((listener) => listener(this.activeCallState));
+  }
+
+  startCall(callId: string, remoteUser: any) {
+    this.activeCallState = {
+      callId,
+      isActive: true,
+      isMinimized: false,
+      remoteUser,
+    };
+    this.notifyListeners();
+  }
+
+  minimizeCall(minimize: boolean) {
+    this.activeCallState.isMinimized = minimize;
+    this.notifyListeners();
+  }
+
+  endCall() {
+    this.activeCallState = {
+      callId: null,
+      isActive: false,
+      isMinimized: false,
+      remoteUser: null,
+    };
+    this.notifyListeners();
+  }
+
+  getState() {
+    return { ...this.activeCallState };
+  }
+
+  isCallActive() {
+    return this.activeCallState.isActive;
+  }
+}
+
+const callService = new CallService();
+
+// ============================================================================
+// PIP OVERLAY - Reliable Picture-in-Picture Video Window
+// ============================================================================
 const PipOverlay: React.FC = () => {
   const { activeCall, contacts, toggleMinimizeCall } = useApp();
-  const navigate = useNavigate();
-  const [position, setPosition] = useState({ x: window.innerWidth - 130, y: 80 });
+  const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
-  const [hasMoved, setHasMoved] = useState(false);
-  const dragStart = useRef({ x: 0, y: 0 });
-  const lastTap = useRef<number>(0);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const dragStart = useRef({ current: { x: 0, y: 0 } });
   const pipVideoRef = useRef<HTMLVideoElement>(null);
-  const [hasRemoteStream, setHasRemoteStream] = useState(false);
+  const [callState, setCallState] = useState(callService.getState());
 
-  const contact = contacts.find(c => c.id === activeCall?.contactId);
-
-  // Subscribe to active WebRTC streams for live PiP video
+  // Subscribe to global call state
   useEffect(() => {
-    const updateStream = () => {
-      const { remote } = getActiveStreams();
-      if (pipVideoRef.current && remote) {
-        pipVideoRef.current.srcObject = remote;
-        setHasRemoteStream(true);
-      } else {
-        setHasRemoteStream(false);
-      }
-    };
-    updateStream();
-    const unsub = onStreamsChange(updateStream);
-    return unsub;
-  }, [activeCall]);
+    const unsubscribe = callService.subscribe((state) => {
+      setCallState(state);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Restore position from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('pip-position');
+    if (saved) {
+      try {
+        const pos = JSON.parse(saved);
+        setPosition(pos);
+      } catch {}
+    }
+    setHasHydrated(true);
+  }, []);
+
+  // Handle resize and keep PiP in bounds
+  const handleResize = () => {
+    setPosition((prev) => ({
+      x: Math.min(prev.x, window.innerWidth - 120),
+      y: Math.min(prev.y, window.innerHeight - 150),
+    }));
+  };
 
   useEffect(() => {
-    const handleResize = () => {
-      setPosition(prev => ({
-        x: Math.min(window.innerWidth - 120, prev.x),
-        y: Math.min(window.innerHeight - 160, prev.y)
-      }));
-    };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  if (!activeCall || !activeCall.isMinimized || !contact) return null;
-
+  // Drag handlers with proper touch support
   const handleStart = (e: any) => {
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
     setIsDragging(true);
-    setHasMoved(false);
-    dragStart.current = { x: clientX - position.x, y: clientY - position.y };
+    setHasHydrated(true);
+    dragStart.current = { current: { x: clientX - position.x, y: clientY - position.y } };
   };
 
   const handleMove = (e: any) => {
     if (!isDragging) return;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    const newX = clientX - dragStart.current.current.x;
+    const newY = clientY - dragStart.current.current.y;
 
-    let newX = clientX - dragStart.current.x;
-    let newY = clientY - dragStart.current.y;
-
-    if (Math.abs(newX - position.x) > 5 || Math.abs(newY - position.y) > 5) {
-      setHasMoved(true);
-    }
-
+    let newX_bounded = newX;
+    let newY_bounded = newY;
     const margin = 12;
-    newX = Math.max(margin, Math.min(window.innerWidth - 110 - margin, newX));
-    newY = Math.max(margin, Math.min(window.innerHeight - 150 - margin, newY));
-
-    setPosition({ x: newX, y: newY });
+    newX_bounded = Math.max(margin, Math.min(window.innerWidth - 110 - margin, newX_bounded));
+    newY_bounded = Math.max(margin, Math.min(window.innerHeight - 150 - margin, newY_bounded));
+    setPosition({ x: newX_bounded, y: newY_bounded });
   };
 
   const handleEnd = () => {
     setIsDragging(false);
+    localStorage.setItem('pip-position', JSON.stringify(position));
   };
 
   useEffect(() => {
-    if (isDragging) {
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleEnd);
-      window.addEventListener('touchmove', handleMove);
-      window.addEventListener('touchend', handleEnd);
-    } else {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleMove);
-      window.removeEventListener('touchend', handleEnd);
-    }
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('touchend', handleEnd);
     return () => {
-      window.removeEventListener('mousemove', handleMove);
       window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleMove);
       window.removeEventListener('touchend', handleEnd);
     };
-  }, [isDragging]);
+  }, [position]);
 
-  const handleInteraction = () => {
-    if (hasMoved) return;
-
-    const now = Date.now();
-    const isDoubleTap = now - lastTap.current < 300;
-    lastTap.current = now;
-
-    toggleMinimizeCall(false);
-    const route = activeCall.type === 'video' ? `/video-call/${contact.id}` : `/audio-call/${contact.id}`;
-    navigate(route);
-  };
+  // Return null if no active call or not hydrated
+  if (!hasHydrated || !callState.isActive) return null;
 
   return (
     <div
       onMouseDown={handleStart}
       onTouchStart={handleStart}
-      onClick={handleInteraction}
+      onMouseMove={handleMove}
+      onTouchMove={handleMove}
+      onClick={() => {}}
       style={{
         left: `${position.x}px`,
         top: `${position.y}px`,
-        transition: isDragging ? 'none' : 'all 0.15s cubic-bezier(0.2, 0.8, 0.2, 1)'
+        transition: isDragging ? 'none' : 'all 0.15s cubic-bezier',
       }}
-      className={`fixed z-[999] w-[110px] h-[150px] rounded-[2.2rem] overflow-hidden border border-white/20 shadow-[0_20px_50px_rgba(0,0,0,0.6)] cursor-grab active:cursor-grabbing transform-gpu select-none ${isDragging ? 'scale-105 shadow-[0_30px_70px_rgba(0,0,0,0.7)]' : 'hover:scale-105'} animate-ios-pop`}
+      className="fixed z-[999] w-[110px] h-[150px] rounded-[2.5rem]"
     >
-      <div className="absolute inset-0 bg-black/80 backdrop-blur-xl">
-        {activeCall.type === 'video' ? (
+      <div className="absolute inset-0 bg-black/80 backdrop-blur rounded-[2.5rem] overflow-hidden">
+        {callState.isActive && activeCall.type === 'video' ? (
           <video
             ref={pipVideoRef}
             autoPlay
@@ -147,46 +187,50 @@ const PipOverlay: React.FC = () => {
             className="w-full h-full object-cover opacity-70"
             draggable={false}
           />
-        ) : (
-          <div className="w-full h-full flex flex-col items-center justify-center gap-3">
-            <div className="size-14 rounded-full border border-primary/30 p-1 animate-pulse shadow-[0_0_20px_rgba(244,63,94,0.3)]">
-              <img src={contact.avatar} className="w-full h-full rounded-full object-cover" alt="avatar" draggable={false} />
-            </div>
-            <div className="flex gap-1.5 items-center">
-              <div className="size-1.5 bg-primary rounded-full animate-bounce"></div>
-              <div className="size-1.5 bg-primary rounded-full animate-bounce [animation-delay:0.2s]"></div>
-              <div className="size-1.5 bg-primary rounded-full animate-bounce [animation-delay:0.4s]"></div>
-            </div>
-          </div>
-        )}
+        ) : null}
       </div>
-      <div className="absolute inset-0 bg-gradient-to-tr from-white/10 via-transparent to-transparent pointer-events-none"></div>
-      <div className="absolute top-3 right-3">
-        <div className="size-2 rounded-full bg-primary animate-pulse shadow-[0_0_8px_var(--color-primary)]"></div>
-      </div>
-      <div className="absolute bottom-3 left-0 right-0 text-center">
-        <span className="text-[7px] font-black uppercase tracking-[0.2em] text-white/30">Spectral Sync</span>
+
+      <div className="w-full h-full flex flex-col items-center justify-center">
+        <div className="flex gap-1.5 items-center">
+          <div className="size-1.5 bg-primary rounded-full animate-pulse" />
+          <span className="size-1.5 bg-primary rounded-full"></span>
+        </div>
       </div>
     </div>
   );
 };
 
-const BottomNav: React.FC = memo(() => {
+// ============================================================================
+// HOME INDICATOR - Safe Area Bottom Indicator
+// ============================================================================
+const HomeIndicator: React.FC = () => (
+  <div className="fixed bottom-1 w-24 h-1 bg-white/5 rounded-full"></div>
+);
+
+// ============================================================================
+// BOTTOM NAVIGATION
+// ============================================================================
+const BottomNav = memo(() => {
   const location = useLocation();
-  const tabs = useMemo(() => [
-    { path: '/', icon: 'home', label: 'Sync' },
-    { path: '/status', icon: 'blur_circular', label: 'Pulse' },
-    { path: '/calls', icon: 'call', label: 'Mesh' },
-    { path: '/settings', icon: 'settings', label: 'Core' },
-  ], []);
+  const tabs = useMemo(
+    () => [
+      { path: '/', icon: 'home', label: 'Sync' },
+      { path: '/status', icon: 'blur_circular', label: 'Pulse' },
+      { path: '/calls', icon: 'call', label: 'Mesh' },
+      { path: '/contacts', icon: 'contacts', label: 'Web' },
+      { path: '/settings', icon: 'settings', label: 'Core' },
+    ],
+    []
+  );
 
   const activeTab = useMemo(() => {
     if (location.pathname === '/') return '/';
-    const match = tabs.find(t => t.path !== '/' && location.pathname.startsWith(t.path));
-    return match ? match.path : '/';
+    const match = tabs.find((t) => t.path !== '/' && location.pathname.startsWith(t.path));
+    return match?.path ?? '/';
   }, [location.pathname, tabs]);
 
-  const hideNav = location.pathname.includes('/chat/') ||
+  const hideNav =
+    location.pathname.includes('/chat/') ||
     location.pathname.includes('/video-call/') ||
     location.pathname.includes('/audio-call/') ||
     location.pathname.includes('/profile/');
@@ -194,33 +238,65 @@ const BottomNav: React.FC = memo(() => {
   if (hideNav) return null;
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-[80] px-6 pb-[calc(1.2rem+env(safe-area-inset-bottom,20px))] pt-4 bg-gradient-to-t from-black via-black/90 to-transparent">
-      <div className="liquid-glass rounded-[2rem] p-2 flex items-center justify-around border-white/10 shadow-2xl max-w-lg mx-auto backdrop-blur-3xl">
-        {tabs.map((tab) => {
-          const isActive = activeTab === tab.path;
-          return (
-            <Link
-              key={tab.path}
-              to={tab.path}
-              className={`flex flex-col items-center gap-1.5 px-6 py-2.5 rounded-full transition-all duration-500 ios-active relative ${isActive ? 'bg-primary/10 text-primary shadow-[0_0_20px_rgba(244,63,94,0.1)]' : 'text-white/30 hover:text-white/50'}`}
-            >
-              <span className={`material-symbols-outlined text-[24px] ${isActive ? 'fill-1' : ''}`}>
-                {tab.icon}
-              </span>
-              <span className={`text-[8px] font-black uppercase tracking-[0.2em] ${isActive ? 'opacity-100' : 'opacity-0 scale-75'} transition-all`}>
-                {tab.label}
-              </span>
-              {isActive && (
-                <div className="absolute -top-1 size-1 bg-primary rounded-full shadow-[0_0_8px_var(--color-primary)]"></div>
-              )}
-            </Link>
-          );
-        })}
+    <nav className="fixed bottom-0 left-0 right-0 z-[80] px-6 pb-6">
+      <div className="liquid-glass rounded-[2rem] p-2 flex items-center">
+        {tabs.map((tab) => (
+          <Link
+            key={tab.path}
+            to={tab.path}
+            className="size-14 rounded-full border border-primary/30 flex items-center justify-center text-primary"
+          >
+            <i className="material-icons">{tab.icon}</i>
+          </Link>
+        ))}
       </div>
     </nav>
   );
 });
 
+// ============================================================================
+// MAIN APP CONTENT
+// ============================================================================
+const AppContent: React.FC = () => {
+  const location = useLocation();
+  const { activeCall, isCallMinimized } = useApp();
+
+  return (
+    <div>
+      <LayoutGroup>
+        <AnimatePresence initial={false} custom={location.pathname}>
+          <motion.div
+            key={location.pathname}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <Routes location={location} key={location.pathname}>
+              <Route path="/" element={<HomeScreen key="home" />} />
+              <Route path="/chat/:id" element={<SingleChatScreen key="chat" />} />
+              <Route path="/status" element={<StatusScreen key="status" />} />
+              <Route path="/calls" element={<CallsScreen key="calls" />} />
+              <Route path="/contacts" element={<ContactsScreen key="contacts" />} />
+              <Route path="/profile/:id" element={<ProfileScreen key="profile" />} />
+              <Route path="/settings" element={<SettingsScreen key="settings" />} />
+              <Route path="/video-call/:id" element={<VideoCallScreen key="video" />} />
+              <Route path="/audio-call/:id" element={<AudioCallScreen key="audio" />} />
+            </Routes>
+          </motion.div>
+        </AnimatePresence>
+
+        <BottomNav />
+        <PipOverlay />
+        <HomeIndicator />
+      </LayoutGroup>
+    </div>
+  );
+};
+
+// ============================================================================
+// MAIN APP COMPONENT
+// ============================================================================
 const App: React.FC = () => {
   return (
     <AppProvider>
@@ -231,31 +307,5 @@ const App: React.FC = () => {
   );
 };
 
-const AppContent: React.FC = () => {
-  const location = useLocation();
-
-  return (
-    <LayoutGroup>
-      <AnimatePresence initial={false} custom={location}>
-        <motion.div className="relative h-screen w-full bg-black text-white overflow-hidden font-sans select-none">
-          <Routes location={location} key={location.pathname}>
-            <Route path="/" element={<HomeScreen key="home" />} />
-            <Route path="/chat/:id" element={<SingleChatScreen key="chat" />} />
-            <Route path="/status" element={<StatusScreen key="status" />} />
-            <Route path="/calls" element={<CallsScreen key="calls" />} />
-            <Route path="/contacts" element={<ContactsScreen key="contacts" />} />
-            <Route path="/profile/:id" element={<ProfileScreen key="profile" />} />
-            <Route path="/settings" element={<SettingsScreen key="settings" />} />
-            <Route path="/video-call/:id" element={<VideoCallScreen key="video-call" />} />
-            <Route path="/audio-call/:id" element={<AudioCallScreen key="audio-call" />} />
-          </Routes>
-          <BottomNav />
-          <PipOverlay />
-          <HomeIndicator />
-        </motion.div>
-      </AnimatePresence>
-    </LayoutGroup>
-  );
-};
-
 export default App;
+export { callService };

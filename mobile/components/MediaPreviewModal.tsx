@@ -24,8 +24,9 @@ import { CropImageModal } from './CropImageModal';
 
 interface MediaPreviewModalProps {
   visible: boolean;
-  mediaUri: string;
-  mediaType: 'image' | 'video' | 'audio';
+  mediaUri?: string;
+  mediaType?: 'image' | 'video' | 'audio';
+  initialMediaItems?: { uri: string; type: 'image' | 'video' | 'audio' }[];
   onClose: () => void;
   onSend: (mediaList: { uri: string; type: 'image' | 'video' | 'audio' }[], caption?: string) => void;
   isUploading?: boolean;
@@ -67,6 +68,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   visible,
   mediaUri,
   mediaType,
+  initialMediaItems,
   onClose,
   onSend,
   isUploading = false,
@@ -83,7 +85,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   // Crop modal state
   const [showCropModal, setShowCropModal] = useState(false);
 
-  const currentMedia = mediaItems[currentIndex] || { uri: mediaUri, type: mediaType };
+  const currentMedia = mediaItems[currentIndex] || (initialMediaItems ? initialMediaItems[0] : { uri: mediaUri || '', type: mediaType || 'image' });
   const currentUri = currentMedia.uri;
   const currentType = currentMedia.type;
 
@@ -105,13 +107,19 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
 
   useEffect(() => {
     Promise.resolve().then(() => {
-        setMediaItems([{ uri: mediaUri, type: mediaType }]);
+        if (initialMediaItems && initialMediaItems.length > 0) {
+            setMediaItems(initialMediaItems);
+        } else if (mediaUri && mediaType) {
+            setMediaItems([{ uri: mediaUri, type: mediaType }]);
+        } else {
+            setMediaItems([]);
+        }
         setCaption('');
         setCurrentIndex(0);
         setPaths([]);
         setTextOverlays([]);
     });
-  }, [mediaUri, mediaType]);
+  }, [mediaUri, mediaType, initialMediaItems]);
 
   useEffect(() => {
     if (visible) {
@@ -166,22 +174,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
 
   const handlePickGallery = async () => {
     if (isUploading) return;
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.All,
-      allowsEditing: false,
-      quality: 1,
-      allowsMultipleSelection: true,
-    });
-    if (!result.canceled && result.assets && result.assets.length > 0) {
-      const newItems: {uri: string, type: 'image'|'video'|'audio'}[] = result.assets.map(a => ({
-        uri: a.uri,
-        type: a.type === 'video' ? 'video' : 'image'
-      }));
-      setMediaItems(prev => [...prev, ...newItems]);
-      setCurrentIndex(mediaItems.length); // go to the newly added first element
-      setPaths([]);
-      setTextOverlays([]);
-    }
+    Alert.alert('Use Built-In Gallery', 'Please go back and select all photos at once from the custom inline gallery.');
   };
 
   const handleCrop = () => {

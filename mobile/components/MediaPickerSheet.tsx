@@ -1,10 +1,11 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { View, Pressable, StyleSheet, Animated, PanResponder, useWindowDimensions, FlatList, Text, ActivityIndicator, Platform } from 'react-native';
+import { View, Pressable, StyleSheet, Animated, PanResponder, useWindowDimensions, FlatList, Text, ActivityIndicator, Platform, ScrollView } from 'react-native';
 import { Image } from 'expo-image';
 import GlassView from './ui/GlassView';
 import * as Haptics from 'expo-haptics';
 import * as MediaLibrary from 'expo-media-library';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
+import Reanimated, { FadeInDown, FadeOutDown } from 'react-native-reanimated';
 import { SwiftUIButton } from './SwiftUIButton';
 
 interface MediaPickerSheetProps {
@@ -14,7 +15,9 @@ interface MediaPickerSheetProps {
   onSelectGallery: () => void; // Keeps the gallery picker as a fallback or full view if needed
   onSelectAudio: () => void;
   onSelectNote: () => void;
-  onSelectAsset?: (asset: MediaLibrary.Asset) => void;
+  onSelectAssets?: (assets: MediaLibrary.Asset[]) => void;
+  onSelectLocation?: () => void;
+  onSelectContact?: () => void;
 }
 
 export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
@@ -24,7 +27,9 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
   onSelectGallery,
   onSelectAudio,
   onSelectNote,
-  onSelectAsset,
+  onSelectAssets,
+  onSelectLocation,
+  onSelectContact,
 }) => {
   const slideAnim = useMemo(() => new Animated.Value(0), []);
   const opacityAnim = useMemo(() => new Animated.Value(0), []);
@@ -38,6 +43,21 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
   const [viewMode, setViewMode] = useState<'photos' | 'albums'>('photos');
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [hasNextPage, setHasNextPage] = useState(true);
+  const [endCursor, setEndCursor] = useState<string | undefined>(undefined);
+  const [isLowerLoading, setIsLowerLoading] = useState(false);
+  const [selectedAssets, setSelectedAssets] = useState<MediaLibrary.Asset[]>([]);
+
+  const toggleAssetSelection = (asset: MediaLibrary.Asset) => {
+      setSelectedAssets(current => {
+          const isSelected = current.some(a => a.id === asset.id);
+          if (isSelected) {
+              return current.filter(a => a.id !== asset.id);
+          } else {
+              return [...current, asset];
+          }
+      });
+  };
 
   const panResponder = useMemo(() => 
     PanResponder.create({
@@ -60,21 +80,43 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
       },
     }), [slideAnim]);
 
-  const loadPhotos = async (album?: MediaLibrary.Album) => {
-      setIsLoading(true);
+  const loadPhotos = async (album?: MediaLibrary.Album, after?: string) => {
+      if (after) {
+          setIsLowerLoading(true);
+      } else {
+          setIsLoading(true);
+          setPhotos([]);
+          setHasNextPage(true);
+          setEndCursor(undefined);
+      }
+
       const { status } = await MediaLibrary.requestPermissionsAsync();
       setHasPermission(status === 'granted');
       
       if (status === 'granted') {
           const assets = await MediaLibrary.getAssetsAsync({
-              first: 50,
+              first: 51, // Load one extra to see if there's more? No, getAssetsAsync handles it via hasNextPage
+              after,
               sortBy: ['creationTime'],
               mediaType: ['photo', 'video'],
               album: album ? album.id : undefined,
           });
-          setPhotos(assets.assets);
+          
+          if (after) {
+              setPhotos(prev => [...prev, ...assets.assets]);
+          } else {
+              setPhotos(assets.assets);
+          }
+          setHasNextPage(assets.hasNextPage);
+          setEndCursor(assets.endCursor);
       }
       setIsLoading(false);
+      setIsLowerLoading(false);
+  };
+
+  const loadMorePhotos = () => {
+      if (!hasNextPage || isLoading || isLowerLoading) return;
+      loadPhotos(selectedAlbum || undefined, endCursor);
   };
 
   const loadAlbums = async () => {
@@ -137,7 +179,7 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
   }, [visible]);
 
   const handleClose = () => {
-    // Just trigger the prop; the useEffect will handle the animation
+    setSelectedAssets([]);
     onClose();
   };
 
@@ -173,9 +215,11 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
       if (photoIndex >= photos.length || photoIndex < 0) return null;
       const asset = photos[photoIndex];
 
+      const isSelected = selectedAssets.some(a => a.id === asset.id);
+
       return (
           <Pressable 
-            onPress={() => onSelectAsset ? onSelectAsset(asset) : onSelectGallery()}
+            onPress={() => toggleAssetSelection(asset)}
             style={{ width: tileSize, height: tileSize, padding: 1 }}
           >
               <Image
@@ -183,6 +227,13 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
                 style={{ width: '100%', height: '100%' }}
                 contentFit="cover"
               />
+              {isSelected && (
+                  <View style={styles.selectedOverlay}>
+                      <View style={styles.checkCircle}>
+                          <Ionicons name="checkmark" size={16} color="#fff" />
+                      </View>
+                  </View>
+              )}
               {asset.mediaType === 'video' && (
                   <View style={styles.videoIndicator}>
                       <Text style={styles.videoDuration}>{formatDuration(asset.duration)}</Text>
@@ -280,7 +331,12 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
           </View>
 
           {/* Quick Options Row */}
-          <View style={styles.optionsRow}>
+          <ScrollView 
+            horizontal 
+            showsHorizontalScrollIndicator={false} 
+            style={{ flexGrow: 0, height: 65, flexShrink: 0 }}
+            contentContainerStyle={styles.optionsRow}
+          >
               <Pressable style={styles.optionButton} onPress={onSelectNote}>
                   <View style={[styles.optionIcon, { backgroundColor: '#1e1e24' }]}>
                       <Text style={{color: '#fff', fontWeight: 'bold', fontSize: 16}}>Aa</Text>
@@ -294,8 +350,21 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
                   </View>
                   <Text style={styles.optionLabel}>Music</Text>
               </Pressable>
-               
-          </View>
+
+              <Pressable style={styles.optionButton} onPress={onSelectLocation}>
+                  <View style={[styles.optionIcon, { backgroundColor: '#1e1e24' }]}>
+                      <Ionicons name="location" size={20} color="#fff" />
+                  </View>
+                  <Text style={styles.optionLabel}>Location</Text>
+              </Pressable>
+
+              <Pressable style={styles.optionButton} onPress={onSelectContact}>
+                  <View style={[styles.optionIcon, { backgroundColor: '#1e1e24' }]}>
+                      <Ionicons name="person" size={20} color="#fff" />
+                  </View>
+                  <Text style={styles.optionLabel}>Contact</Text>
+              </Pressable>
+          </ScrollView>
 
           {/* Handler Bar */}
           <View style={styles.dragHandleContainer}>
@@ -313,9 +382,35 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
                 renderItem={renderItem}
                 keyExtractor={(item, index) => index.toString()}
                 numColumns={3}
+                style={{ flex: 1 }}
                 contentContainerStyle={styles.gridContent}
                 showsVerticalScrollIndicator={false}
+                onEndReached={loadMorePhotos}
+                onEndReachedThreshold={0.5}
+                ListFooterComponent={() => isLowerLoading ? (
+                    <View style={{ padding: 20 }}>
+                        <ActivityIndicator color="#BC002A" />
+                    </View>
+                ) : null}
             />
+          )}
+
+          {/* Floating Confirm Button */}
+          {selectedAssets.length > 0 && (
+              <Reanimated.View entering={FadeInDown} exiting={FadeOutDown} style={styles.floatingConfirm}>
+                  <Pressable 
+                      style={styles.confirmButton}
+                      onPress={() => {
+                          if (onSelectAssets) onSelectAssets(selectedAssets);
+                          setSelectedAssets([]);
+                      }}
+                  >
+                      <Text style={styles.confirmText}>Send {selectedAssets.length} item{selectedAssets.length > 1 ? 's' : ''}</Text>
+                      <View style={styles.confirmIconWrap}>
+                         <MaterialIcons name="arrow-forward" size={18} color="#BC002A" />
+                      </View>
+                  </Pressable>
+              </Reanimated.View>
           )}
 
         </GlassView>
@@ -363,8 +458,8 @@ const styles = StyleSheet.create({
       alignItems: 'center',
       justifyContent: 'space-between',
       paddingHorizontal: 16,
-      paddingTop: 16,
-      paddingBottom: 10,
+      paddingTop: 12,
+      paddingBottom: 6,
   },
   headerButton: {
       width: 60,
@@ -385,24 +480,24 @@ const styles = StyleSheet.create({
   headerTitle: {
       color: 'rgba(255,255,255,0.5)',
       fontWeight: '600',
-      fontSize: 14,
+      fontSize: 13,
   },
 
   // Options Row
   optionsRow: {
       flexDirection: 'row',
       paddingHorizontal: 16,
-      marginBottom: 10,
-      gap: 16,
+      marginBottom: 8,
+      gap: 10,
   },
   optionButton: {
-      width: 80,
-      height: 60,
+      width: 75,
+      height: 54,
       backgroundColor: '#1c1c1e',
       borderRadius: 12,
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 6,
+      gap: 4,
   },
   optionIcon: {
       width: 32,
@@ -413,7 +508,7 @@ const styles = StyleSheet.create({
   },
   optionLabel: {
       color: '#fff',
-      fontSize: 12,
+      fontSize: 11,
       fontWeight: '500',
   },
 
@@ -497,6 +592,58 @@ const styles = StyleSheet.create({
       fontWeight: '600',
       marginTop: 4,
       paddingHorizontal: 2,
+  },
+  selectedOverlay: {
+      position: 'absolute',
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0,0,0,0.4)',
+      borderWidth: 2,
+      borderColor: '#BC002A',
+  },
+  checkCircle: {
+      position: 'absolute',
+      bottom: 8,
+      right: 8,
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      backgroundColor: '#BC002A',
+      alignItems: 'center',
+      justifyContent: 'center',
+  },
+  floatingConfirm: {
+      position: 'absolute',
+      bottom: 40,
+      left: 0,
+      right: 0,
+      alignItems: 'center',
+  },
+  confirmButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#BC002A',
+      paddingHorizontal: 20,
+      paddingVertical: 12,
+      borderRadius: 30,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.3,
+      shadowRadius: 5,
+      elevation: 8,
+  },
+  confirmText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+      marginRight: 8,
+  },
+  confirmIconWrap: {
+      width: 28,
+      height: 28,
+      borderRadius: 14,
+      backgroundColor: '#fff',
+      alignItems: 'center',
+      justifyContent: 'center',
   },
 });
 

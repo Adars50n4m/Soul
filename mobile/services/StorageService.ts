@@ -68,16 +68,7 @@ export const storageService = {
             return key; 
         } catch (e: any) {
             console.warn('Upload failed:', e.message);
-            
-            // Fallback to Base64 Data URI if offline or server is down
-            try {
-               const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
-               let contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-               const base64Fallback = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-               return `data:${contentType};base64,${base64Fallback}`;
-            } catch (fallbackError) {
-               throw e; 
-            }
+            throw e; // Do NOT fallback to Base64. A 5MB+ Base64 payload will exceed Supabase's 1MB Realtime limit and silently drop the message for the receiver!
         }
     },
 

@@ -34,6 +34,30 @@ const sanitizeSongTitle = (title: string): string => {
         .trim();
 };
 
+// Animated 3-dot typing indicator (WhatsApp / iMessage style)
+const TypingDots = () => {
+    const [dot, setDot] = useState(0);
+    useEffect(() => {
+        const id = setInterval(() => setDot(d => (d + 1) % 3), 400);
+        return () => clearInterval(id);
+    }, []);
+    return (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+            {[0, 1, 2].map(i => (
+                <View
+                    key={i}
+                    style={{
+                        width: 5,
+                        height: 5,
+                        borderRadius: 2.5,
+                        backgroundColor: dot === i ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.3)',
+                    }}
+                />
+            ))}
+        </View>
+    );
+};
+
 const HeartPop = ({ active, onFinish }: { active: boolean, onFinish: () => void }) => {
     const scale = useSharedValue(0);
     const opacity = useSharedValue(0);
@@ -417,6 +441,15 @@ export default function RemoteChat() {
                 style={styles.messagesList}
                 contentContainerStyle={styles.messagesContent}
                 showsVerticalScrollIndicator={false}
+                ListFooterComponent={
+                    isTyping ? (
+                        <View style={styles.typingContainer}>
+                            <View style={styles.typingBubble}>
+                                <TypingDots />
+                            </View>
+                        </View>
+                    ) : null
+                }
                 ListEmptyComponent={
                     <View style={styles.emptyChat}>
                         <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
@@ -425,13 +458,6 @@ export default function RemoteChat() {
                     </View>
                 }
             />
-
-            {/* Typing Indicator */}
-            {isTyping && (
-                <View style={styles.typingContainer}>
-                    <Text style={styles.typingText}>SYNCHRONIZING...</Text>
-                </View>
-            )}
 
             {/* Reply Preview */}
             {replyingTo && (
@@ -768,12 +794,14 @@ const styles = StyleSheet.create({
     typingContainer: {
         paddingHorizontal: 20,
         paddingBottom: 10,
+        alignItems: 'flex-start' as const,
     },
-    typingText: {
-        fontSize: 8,
-        fontWeight: '900',
-        color: '#f43f5e',
-        letterSpacing: 4,
+    typingBubble: {
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        borderRadius: 16,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderTopLeftRadius: 4,
     },
     replyPreview: {
         marginHorizontal: 16,

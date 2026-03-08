@@ -17,34 +17,43 @@ export function getSupabaseUrl(): string {
 }
 
 // Node.js sync server (for R2 and real-time Socket.io)
-const LOCAL_IP = '192.168.1.38';
+const LOCAL_IP = '192.168.1.44';
 
 const getFinalServerUrl = () => {
-    // iOS Simulator is on the same Mac → always use localhost directly (bypass tunnel)
+    const envUrl = process.env.EXPO_PUBLIC_SERVER_URL;
+    if (envUrl) {
+        console.log('[API Config] Using EXPO_PUBLIC_SERVER_URL:', envUrl);
+        return envUrl;
+    }
+
+    // Default to Localtunnel if active — most reliable for physical device testing
+    const TUNNEL_URL = 'https://soulsync-v3-1772996787.loca.lt';
+    
+    // iOS (Simulator or Physical on same WiFi)
     if (__DEV__ && Platform.OS === 'ios') {
-        console.log('[API Config] iOS Simulator detected — using localhost:3000');
-        return 'http://localhost:3000';
+        // If we have a tunnel, it's often more reliable than LAN IP which can change
+        return TUNNEL_URL;
     }
 
     // Android Emulator: 10.0.2.2 maps to Mac's localhost
     if (__DEV__ && Platform.OS === 'android') {
-        const envUrl = process.env.EXPO_PUBLIC_SERVER_URL;
-        if (envUrl) return envUrl;
-        
-        console.log('[API Config] Android detected — using 10.0.2.2/LAN IP');
-        return `http://10.0.2.2:3000`; // Standard for Android Emulator
+        return TUNNEL_URL;
     }
 
-    // Physical devices (production or Expo Go on real phone): use tunnel
-    return process.env.EXPO_PUBLIC_SERVER_URL || `http://${LOCAL_IP}:3000`;
+    // Fallback
+    return TUNNEL_URL;
 };
 
 export const SERVER_URL = getFinalServerUrl();
 console.log('[API Config] Final SERVER_URL:', SERVER_URL);
 
-// Cloudflare Tunnel bypass — Cloudflare doesn't require headers for quick tunnels, 
-// but we'll keep the structure clean
-const isTunnel = SERVER_URL.includes('trycloudflare.com') || SERVER_URL.includes('.loca.lt');
+// Tunnel bypass — include all common tunnel providers
+const isTunnel = 
+    SERVER_URL.includes('trycloudflare.com') || 
+    SERVER_URL.includes('.loca.lt') || 
+    SERVER_URL.includes('.localtunnel.me') || 
+    SERVER_URL.includes('.ngrok-free.app');
+
 export const serverFetch = (url: string, init?: RequestInit): Promise<Response> =>
     fetch(url, {
         ...init,

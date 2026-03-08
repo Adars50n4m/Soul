@@ -27,6 +27,8 @@ import { backgroundSyncService } from '../services/BackgroundSyncService';
 import { soundService } from '../services/SoundService';
 import { authService } from '../services/AuthService';
 import { proxySupabaseUrl, SERVER_URL, serverFetch } from '../config/api';
+import { sileo } from '../components/ui/Sileo';
+import { getSocket } from '../src/webrtc/socket';
 
 if (!offlineService) {
     console.warn('[AppContext] LocalDBService failed to load. Check native modules.');
@@ -80,25 +82,43 @@ const DEFAULT_PRIVACY: PrivacySettings = {
     readReceipts: true,
 };
 
-// Fixed Users - Shri and Hari
-const USERS: Record<string, User> = {
+// Fixed Users - Shri and Hari with actual Database UUIDs
+const SHRI_ID = '4d28b137-66ff-4417-b451-b1a421e34b25';
+const HARI_ID = '02e52f08-6c1e-497f-93f6-b29c275b8ca4';
+
+export const USERS: Record<string, User> = {
     'shri': {
-        id: 'shri',
+        id: SHRI_ID,
         name: 'SHRI',
         avatar: '',
-        bio: '笨ｨ Connected through the stars',
+        bio: '✨ Connected through the stars',
         birthdate: '2000-01-01',
     },
     'hari': {
-        id: 'hari',
+        id: HARI_ID,
         name: 'HARI',
         avatar: '',
-        bio: '牒 Forever in sync',
+        bio: '🔗 Forever in sync',
+        birthdate: '2000-01-01',
+    },
+    // Add UUID keys as well for fast reverse lookup
+    [SHRI_ID]: {
+        id: SHRI_ID,
+        name: 'SHRI',
+        avatar: '',
+        bio: '✨ Connected through the stars',
+        birthdate: '2000-01-01',
+    },
+    [HARI_ID]: {
+        id: HARI_ID,
+        name: 'HARI',
+        avatar: '',
+        bio: '🔗 Forever in sync',
         birthdate: '2000-01-01',
     },
 };
 
-// Credentials
+// Credentials - Using username keys for login lookup
 const CREDENTIALS: Record<string, string> = {
     'shri': 'hari',  // Shri's password is Hari
     'hari': 'shri',  // Hari's password is Shri
@@ -288,14 +308,31 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     const updatePresenceInSupabase = useCallback(async (userId: string, isOnline: boolean) => {
         try {
-            await supabase
-                .from('profiles')
-                .update({
+            console.log(`[Presence] Updating status: ${userId} -> ${isOnline ? 'ONLINE' : 'OFFLINE'}`);
+            const timestamp = new Date().toISOString();
+            
+            // Update both profiles (UI matching) AND users (Auth system) tables
+            const results = await Promise.all([
+                supabase.from('profiles').update({
                     is_online: isOnline,
-                    last_seen: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                })
-                .eq('id', userId);
+                    last_seen: timestamp,
+                    updated_at: timestamp,
+                }).eq('id', userId),
+                supabase.from('users').update({
+                   is_online: isOnline,
+                   last_seen: timestamp,
+                }).eq('id', userId)
+            ]);
+
+            const profileError = results[0].error;
+            const userError = results[1].error;
+
+            if (profileError) console.warn('[Presence] Profile update error:', profileError.message);
+            if (userError) console.warn('[Presence] User table update error:', userError.message);
+            
+            if (!profileError && !userError) {
+                console.log('[Presence] Status updated successfully in both tables');
+            }
         } catch (e) {
             console.warn('[AppContext] Failed to update presence in DB:', e);
         }
@@ -318,14 +355,18 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             const state = channel.presenceState();
             const onlineIds = Object.keys(state);
             setOnlineUsers(onlineIds);
-            setContacts(prev => prev.map(c => ({
-                ...c,
-                status: onlineIds.includes(c.id) ? 'online' : 'offline',
-                // When user goes offline, stamp lastSeen with current time
-                lastSeen: !onlineIds.includes(c.id) && c.status === 'online'
-                    ? new Date().toISOString()
-                    : c.lastSeen,
-            })));
+            
+            // NOTE: We no longer force-offline users here because Supabase Realtime 
+            // is often blocked by ISPs. We rely on the polling function below for 
+            // the primary status, and only use this as a 'fast-path' for online status.
+            if (onlineIds.length > 0) {
+                setContacts(prev => prev.map(c => {
+                    if (onlineIds.includes(c.id)) {
+                        return { ...c, status: 'online' as const };
+                    }
+                    return c;
+                }));
+            }
         });
 
         // Typing broadcast listener
@@ -371,6 +412,44 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             updatePresenceInSupabase(currentUser.id, false);
         };
     }, [currentUser, updatePresenceInSupabase]);
+
+    // Separate Reliable Polling Effect (Works even if Realtime is blocked)
+    useEffect(() => {
+        if (!currentUser) return;
+
+        const pollOtherUserStatus = async () => {
+            const otherId = otherUserRef.current?.id;
+            if (!otherId) return;
+            
+            console.log(`[Presence] Polling status for: ${otherId}`);
+            try {
+                const { data, error } = await supabase
+                    .from('profiles')
+                    .select('is_online, last_seen, name')
+                    .eq('id', otherId)
+                    .single();
+
+                if (!error && data) {
+                    console.log(`[Presence] Poll result for ${otherId}: is_online=${data.is_online}`);
+                    setContacts(prev => prev.map(c => c.id === otherId ? {
+                        ...c,
+                        status: data.is_online ? 'online' : 'offline',
+                        lastSeen: data.last_seen || c.lastSeen,
+                    } : c));
+                } else if (error) {
+                    console.warn('[Presence] Polling error response:', error.message);
+                }
+            } catch (err) {
+                console.warn('[Presence] Polling exception:', err);
+            }
+        };
+
+        // Poll immediately and then every 15 seconds
+        pollOtherUserStatus();
+        const pollInterval = setInterval(pollOtherUserStatus, 15_000);
+
+        return () => clearInterval(pollInterval);
+    }, [currentUser]);
 
     // Initialize Music Sync (uses Socket.io via ChatService, not Supabase Realtime)
     useEffect(() => {
@@ -432,7 +511,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                         try { userObj = JSON.parse(storedProfileStr); } catch (e) {}
                     }
                     
-                    const otherId = userId === 'shri' ? 'hari' : 'shri';
+                    const otherId = userObj.id === SHRI_ID ? 'hari' : 'shri';
                     const other = USERS[otherId];
                     
                     setCurrentUser(userObj);
@@ -559,6 +638,43 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         return sound ? () => { sound.unloadAsync(); } : undefined;
     }, [sound]);
 
+    // --- REAL-TIME CONNECTION NOTIFICATIONS ---
+    useEffect(() => {
+        if (currentUser?.id) {
+            const socket = getSocket();
+            
+            const handleRequestReceived = (data: any) => {
+                sileo.info({
+                    title: 'New Connection Request',
+                    description: `${data.senderName || 'Someone'} wants to connect with you.`,
+                    button: {
+                        title: 'View Requests',
+                        onClick: () => router.push('/requests')
+                    }
+                });
+            };
+
+            const handleRequestAccepted = (data: any) => {
+                sileo.success({
+                    title: 'Request Accepted!',
+                    description: `You are now connected with ${data.receiverName || 'someone'}.`,
+                    button: {
+                        title: 'Chat',
+                        onClick: () => router.push(`/chat/${data.receiverId}`)
+                    }
+                });
+            };
+
+            socket.on('connection:request_received', handleRequestReceived);
+            socket.on('connection:request_accepted', handleRequestAccepted);
+
+            return () => {
+                socket.off('connection:request_received', handleRequestReceived);
+                socket.off('connection:request_accepted', handleRequestAccepted);
+            };
+        }
+    }, [currentUser?.id]);
+
     // Background Sync Runner (Process pending actions)
     useEffect(() => {
         let syncInterval: NodeJS.Timeout;
@@ -623,6 +739,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                 currentUser.name || 'Someone',
                 (incomingMessage: ChatMessage) => {
                     const isFromMe = incomingMessage.sender_id === currentUser.id;
+                    const partnerId = isFromMe ? incomingMessage.receiver_id : incomingMessage.sender_id;
                     const newMsg: Message = {
                         id: incomingMessage.id,
                         sender: isFromMe ? 'me' : 'them',
@@ -632,12 +749,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                         media: incomingMessage.media,
                         replyTo: incomingMessage.reply_to || undefined,
                         reactions: incomingMessage.reactions || [],
+                        localFileUri: incomingMessage.localFileUri,
                     };
                     
-                    addMessageSafely(otherUser.id, newMsg);
+                    addMessageSafely(partnerId, newMsg);
 
                     setContacts(prevContacts => prevContacts.map(c =>
-                        c.id === otherUser.id ? {
+                        c.id === partnerId ? {
                             ...c,
                             lastMessage: incomingMessage.media ? 'Attachment' : incomingMessage.text,
                             unreadCount: !isFromMe ? (c.unreadCount || 0) + 1 : c.unreadCount
@@ -646,12 +764,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
                     if (!isFromMe) {
                         soundService.playNotification();
-                        if (AppState.currentState !== 'active' || (otherUser && otherUser.id !== incomingMessage.sender_id)) {
+                        // If we are NOT focused on this chat (partnerId here), show a notification
+                        if (AppState.currentState !== 'active') {
                              const sender = contacts.find(c => c.id === incomingMessage.sender_id);
                              notificationService.showIncomingMessage({
                                 chatId: incomingMessage.sender_id,
                                 senderId: incomingMessage.sender_id,
-                                senderName: incomingMessage.sender_id === USERS.shri.id ? USERS.shri.name : sender?.name || 'Someone',
+                                senderName: sender?.name || (Object.values(USERS).find(u => u.id === incomingMessage.sender_id)?.name) || 'Someone',
                                 text: incomingMessage.media ? 'Attachment' : incomingMessage.text,
                                 messageId: incomingMessage.id
                             });
@@ -1066,8 +1185,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     const sendChatMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string, localUri?: string) => {
         // ChatService.sendMessage now triggers the onNewMessage callback we set up in useEffect,
         // which handles both local state update (optimistic) and sync.
-        // We just need to call it.
-        await chatService.sendMessage(text, media, replyTo, localUri);
+        // We just need to call it with the explicit chatId.
+        await chatService.sendMessage(chatId, text, media, replyTo, localUri);
     }, []);
 
     const login = useCallback(async (username: string, password: string): Promise<boolean> => {
@@ -1086,7 +1205,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         if (!userObj) {
             userObj = { id: userId, name: userId, avatar: '', bio: '', birthdate: '' };
         }
-        const otherId = userId === 'shri' ? 'hari' : 'shri';
+        const otherId = userObj.id === SHRI_ID ? 'hari' : 'shri';
         const other = USERS[otherId];
 
         setCurrentUser(userObj);
@@ -1116,10 +1235,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }).catch(() => {});
         }
 
-        fetchProfileFromSupabase(userId);
-        fetchCallsFromSupabase(userId);
+        fetchProfileFromSupabase(userObj.id);
+        fetchCallsFromSupabase(userObj.id);
         fetchOtherUserProfile(other.id);
-        fetchStatusesFromSupabase(userId, other.id);
+        fetchStatusesFromSupabase(userObj.id, other.id);
     }, []);
 
     const logout = useCallback(async () => {
@@ -1405,7 +1524,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     const addMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string) => {
         // Redundant UI updates removed — chatService.sendMessage handles optimistic 
         // insertion and persistence via its own onNewMessage callback correctly.
-        await chatService.sendMessage(text, media, replyTo);
+        await chatService.sendMessage(chatId, text, media, replyTo);
     }, [chatService]);
 
     const updateMessage = useCallback(async (chatId: string, messageId: string, updates: Partial<Message>) => {

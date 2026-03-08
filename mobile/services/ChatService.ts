@@ -37,9 +37,9 @@ export interface ChatMessage {
   receiver_id: string;
   text: string;
   timestamp: string;
-  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+  status: MessageStatus;
   media?: {
-    type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
+    type: 'image' | 'video' | 'audio' | 'file' | 'status_reply'; // 'image' | 'video' | 'audio' | 'file' | 'status_reply';
     url: string;
     name?: string;
     caption?: string;
@@ -91,6 +91,10 @@ class ChatService {
   private sendingIds:           Set<string> = new Set();
   private networkListenerCleanup: (() => void) | null = null;
 
+  // Polling fallback (when Realtime WebSocket is blocked by ISP)
+  private pollTimer:            ReturnType<typeof setInterval> | null = null;
+  private lastPollAt:           string | null = null;
+
   // ── PUBLIC: initialize() ────────────────────────────────────────────────
   //
   // Call this when the user opens a chat screen.
@@ -131,6 +135,7 @@ class ChatService {
     await this.setupNetworkListener();
     await this.fetchMissedMessages();
     this.subscribeToRealtime();
+    this.startMessagePolling();
   }
 
   // ── PRIVATE: subscribeToRealtime() ──────────────────────────────────────
@@ -319,8 +324,13 @@ class ChatService {
     this.sendingIds.clear();
   }
 
+  private isProcessingQueue:          boolean = false;
+
   private async processQueue(): Promise<void> {
     if (!this.isOnline) return;
+    if (this.isProcessingQueue) return;
+
+    this.isProcessingQueue = true;
 
     try {
       const pendingMessages = await offlineService.getPendingMessages();
@@ -360,8 +370,9 @@ class ChatService {
           }
         }
 
-        // Fire and forget — each message sends independently
-        this.sendMessageToSupabase(message);
+        // Await each message to ensure sequential processing and avoid overwhelming SQLite
+        // with concurrent reads/writes that trigger "shared object already released" bugs.
+        await this.sendMessageToSupabase(message);
       }
 
       // Schedule the next poll cycle now that we know the queue size
@@ -381,6 +392,8 @@ class ChatService {
           IDLE_POLL_INTERVAL
         ) as any;
       }
+    } finally {
+      this.isProcessingQueue = false;
     }
   }
 
@@ -405,12 +418,14 @@ class ChatService {
              }
            ) || undefined;
            
-           if (!finalMediaUrl) throw new Error('Upload failed');
+           if (!finalMediaUrl) throw new Error('Upload failed: Server returned an empty URL/Key');
            
-           // Optionally update local DB to reflect the new remote URL right away
-           // so we don't upload it again on retry
-        } catch (uploadErr) {
-           console.error('Background upload failed', uploadErr);
+           console.log(`[ChatService] Media uploaded successfully. Key: ${finalMediaUrl}`);
+        } catch (uploadErr: any) {
+           console.error('[ChatService] Media upload failed:', uploadErr.message);
+           if (uploadErr.message?.includes('R2 Service not configured')) {
+              console.warn('CRITICAL: Your server R2 credentials are not set in server/.env!');
+           }
            throw uploadErr; // Caught below to trigger retry mechanism
         }
       }
@@ -440,6 +455,12 @@ class ChatService {
       if (message.id !== serverId) {
         await offlineService.updateMessageId(message.id, serverId);
       }
+      
+      // Update local db with final remote url so we have it if cache gets cleared
+      if (finalMediaUrl && finalMediaUrl !== message.media?.url) {
+        await offlineService.updateMessageMediaUrl(serverId, finalMediaUrl);
+      }
+      
       await offlineService.updateMessageStatus(serverId, 'sent');
       this.onStatusUpdate?.(message.id, 'sent', serverId);
 
@@ -527,12 +548,14 @@ class ChatService {
   //   2. Show in UI immediately (optimistic render)
   //   3. Queue for Supabase sync in the background
   async sendMessage(
+    chatId: string,
     text: string,
     media?: ChatMessage['media'],
     replyTo?: string,
     localUri?: string
   ): Promise<ChatMessage | null> {
-    if (!this.userId || !this.partnerId) return null;
+    const targetChatId = chatId || this.partnerId;
+    if (!this.userId || !targetChatId) return null;
 
     // [FIX BUG 6] substr is deprecated → use substring
     const tempId    = Date.now().toString() + Math.random().toString(36).substring(2, 9);
@@ -540,7 +563,7 @@ class ChatService {
 
     const queuedMsg: QueuedMessage = {
       id:         tempId,
-      chatId:     this.partnerId,
+      chatId:     targetChatId,
       sender:     'me',
       text,
       timestamp,
@@ -552,17 +575,18 @@ class ChatService {
     };
 
     // Step 1: SQLite first
-    await offlineService.savePendingMessage(this.partnerId, queuedMsg);
+    await offlineService.savePendingMessage(targetChatId, queuedMsg);
 
     const uiMessage: ChatMessage = {
       id:          tempId,
       sender_id:   this.userId,
-      receiver_id: this.partnerId,
+      receiver_id: targetChatId,
       text,
       timestamp,
       status:      'pending',
       media,
       reply_to:    replyTo,
+      localFileUri: localUri,
     };
 
     // Step 2: Render
@@ -570,7 +594,9 @@ class ChatService {
 
     // Step 3: Sync (non-blocking — don't await, let the queue handle it)
     if (this.isOnline) {
-      this.sendMessageToSupabase(queuedMsg);
+      // Push to the queue instead of bypassing it to prevent concurrent SQLite DB queries
+      // that trigger "Shared object released" crashes.
+      this.processQueue();
     }
 
     return uiMessage;
@@ -611,7 +637,7 @@ class ChatService {
     await offlineService.updateMessageStatus(messageId, 'pending');
 
     if (this.isOnline) {
-      await this.sendMessageToSupabase({ ...message, retryCount: 0 });
+      this.processQueue();
     }
   }
 
@@ -676,11 +702,68 @@ class ChatService {
     return false;
   }
 
+  // ── PRIVATE: Message polling fallback ───────────────────────────────────
+  //
+  // When Supabase Realtime WebSocket is blocked by ISP (Jio/Airtel),
+  // poll for new messages every 10 seconds via REST (goes through Cloudflare proxy).
+  private startMessagePolling(): void {
+    if (this.pollTimer) return;
+    this.lastPollAt = new Date().toISOString();
+    this.pollTimer = setInterval(() => this.pollForNewMessages(), 10_000) as any;
+  }
+
+  private stopMessagePolling(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer as any);
+      this.pollTimer = null;
+    }
+  }
+
+  private async pollForNewMessages(): Promise<void> {
+    if (!this.userId || !this.partnerId || !this.lastPollAt) return;
+    const since = this.lastPollAt;
+    this.lastPollAt = new Date().toISOString();
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .or(
+          `and(sender.eq.${this.partnerId},receiver.eq.${this.userId}),` +
+          `and(sender.eq.${this.userId},receiver.eq.${this.partnerId})`
+        )
+        .gt('created_at', since)
+        .order('created_at', { ascending: true });
+
+      if (error || !data || data.length === 0) return;
+
+      for (const row of data) {
+        const msg = this.mapDbRowToChatMessage(row);
+        await offlineService.saveMessage(
+          msg.sender_id === this.userId ? msg.receiver_id : msg.sender_id,
+          {
+            id:        msg.id,
+            sender:    msg.sender_id === this.userId ? 'me' : 'them',
+            text:      msg.text,
+            timestamp: msg.timestamp,
+            status:    msg.status,
+            media:     msg.media,
+            replyTo:   msg.reply_to,
+          }
+        );
+        this.onNewMessage?.(msg);
+        if (msg.sender_id === this.partnerId) {
+          this.updateMessageStatusOnServer(msg.id, 'delivered');
+        }
+      }
+    } catch (_) {}
+  }
+
   // ── PUBLIC: cleanup() ────────────────────────────────────────────────────
   //
   // Call this when the user leaves the chat screen.
   cleanup(): void {
     this.stopQueueProcessing();
+    this.stopMessagePolling();
 
     if (this.networkListenerCleanup) {
       this.networkListenerCleanup();
@@ -696,6 +779,7 @@ class ChatService {
     this.userId        = null;
     this.partnerId     = null;
     this.isOnline      = true;
+    this.lastPollAt    = null;
 
     console.log('[ChatService] Cleaned up.');
   }
