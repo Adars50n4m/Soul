@@ -1,20 +1,14 @@
-/**
- * Cloudflare R2 Storage Configuration (FREE TIER)
- *
- * Configure these values based on your FREE Cloudflare Worker deployment
- */
+import * as Env from './env';
 
 export const R2_CONFIG = {
-  // Cloudflare Worker URL (FREE workers.dev subdomain)
-  // Get this after running: npm run deploy
-  WORKER_URL: process.env.EXPO_PUBLIC_R2_WORKER_URL || 'https://soulsync-upload-worker.YOUR-SUBDOMAIN.workers.dev',
+  // Cloudflare Worker URL
+  WORKER_URL: Env.R2_WORKER_URL,
 
-  // R2 public domain (FREE r2.dev subdomain)
-  // Get this from: R2 Dashboard → soulsync-media → Settings → Public Access
-  PUBLIC_URL: process.env.EXPO_PUBLIC_R2_PUBLIC_URL || 'https://pub-XXXXXXXXXXXX.r2.dev',
+  // R2 public domain
+  PUBLIC_URL: Env.R2_PUBLIC_URL,
 
-  // Feature flag: Use R2 for uploads to bypass ISP blocks on Supabase Storage
-  USE_R2: false,
+  // Feature flag
+  USE_R2: Env.USE_R2,
 
   // Upload timeout in milliseconds
   UPLOAD_TIMEOUT: 30000,

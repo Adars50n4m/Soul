@@ -1,14 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
-import { SUPABASE_ENDPOINT, SUPABASE_ANON_KEY, SUPABASE_URL } from './api';
+import * as Env from './env';
 
 // Use direct SUPABASE_URL so Realtime WebSocket connects directly (proxy can't handle WS upgrades).
 // HTTP REST calls are routed through the Cloudflare proxy via custom fetch to bypass ISP blocks.
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
     global: {
         fetch: (url: RequestInfo | URL, options?: RequestInit) => {
             // Rewrite direct Supabase HTTP calls → proxy URL (bypasses Jio/Airtel blocks)
             const urlString = typeof url === 'string' ? url : url.toString();
-            const proxied = urlString.replace(SUPABASE_URL, SUPABASE_ENDPOINT);
+            const proxied = urlString.replace(Env.SUPABASE_URL, Env.SUPABASE_PROXY_URL);
             return fetch(proxied, options);
         },
     },
@@ -24,7 +24,7 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
  * Always uses the direct Supabase URL since the proxy can't handle WebSocket.
  */
 export const getRealtimeUrl = (): string => {
-    return SUPABASE_URL.replace('https://', 'wss://') + '/realtime/v1';
+    return Env.SUPABASE_URL.replace('https://', 'wss://') + '/realtime/v1';
 };
 
 /**

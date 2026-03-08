@@ -1,51 +1,18 @@
 import { Platform } from 'react-native';
+import * as Env from './env';
 
-// Supabase Configuration
-export const SUPABASE_URL = 'https://xuipxbyvsawhuldopvjn.supabase.co';
-export const SUPABASE_ANON_KEY = 'sb_publishable_9cVY_6oQHMZnV9CaxmMs9Q_7QlUxqlD';
+// Configuration from centralized env.ts
+export const SUPABASE_URL = Env.SUPABASE_URL;
+export const SUPABASE_ANON_KEY = Env.SUPABASE_ANON_KEY;
+export const SUPABASE_ENDPOINT = Env.SUPABASE_PROXY_URL;
+export const SERVER_URL = Env.SERVER_URL;
 
-// Smart Gateway: Always use the Cloudflare Workers proxy to bypass ISP blocks (Jio/Airtel)
-// The proxy forwards requests to Supabase but is accessible without VPN
-const PROXY_URL = process.env.EXPO_PUBLIC_SUPABASE_PROXY_URL || 'https://soulsync-supabase-proxy.adarshark.workers.dev';
-console.log('[API Config] PROXY_URL:', PROXY_URL);
-export const SUPABASE_ENDPOINT = PROXY_URL;
-
-console.log('[API Config] Using Supabase endpoint:', SUPABASE_ENDPOINT);
+console.log('[API Config] SUPABASE_ENDPOINT:', SUPABASE_ENDPOINT);
+console.log('[API Config] SERVER_URL:', SERVER_URL);
 
 export function getSupabaseUrl(): string {
     return SUPABASE_ENDPOINT;
 }
-
-// Node.js sync server (for R2 and real-time Socket.io)
-const LOCAL_IP = '192.168.1.44';
-
-const getFinalServerUrl = () => {
-    const envUrl = process.env.EXPO_PUBLIC_SERVER_URL;
-    if (envUrl) {
-        console.log('[API Config] Using EXPO_PUBLIC_SERVER_URL:', envUrl);
-        return envUrl;
-    }
-
-    // Default to Localtunnel if active — most reliable for physical device testing
-    const TUNNEL_URL = 'https://soulsync-v3-1772996787.loca.lt';
-    
-    // iOS (Simulator or Physical on same WiFi)
-    if (__DEV__ && Platform.OS === 'ios') {
-        // If we have a tunnel, it's often more reliable than LAN IP which can change
-        return TUNNEL_URL;
-    }
-
-    // Android Emulator: 10.0.2.2 maps to Mac's localhost
-    if (__DEV__ && Platform.OS === 'android') {
-        return TUNNEL_URL;
-    }
-
-    // Fallback
-    return TUNNEL_URL;
-};
-
-export const SERVER_URL = getFinalServerUrl();
-console.log('[API Config] Final SERVER_URL:', SERVER_URL);
 
 // Tunnel bypass — include all common tunnel providers
 const isTunnel = 
@@ -55,7 +22,7 @@ const isTunnel =
     SERVER_URL.includes('.ngrok-free.app');
 
 export const serverFetch = (url: string, init?: RequestInit): Promise<Response> =>
-    fetch(url, {
+    smartFetch(url, {
         ...init,
         headers: {
             ...(isTunnel ? { 'bypass-tunnel-reminder': 'true' } : {}),
@@ -63,9 +30,40 @@ export const serverFetch = (url: string, init?: RequestInit): Promise<Response> 
         },
     });
 
-// JioSaavn API (Fallback to public instance as Supabase function is inactive)
-export const SAAVN_BASE_URL = 'https://saavn.sumit.co';
-export const SAAVN_API_URL = `${SAAVN_BASE_URL}/api`;
+/**
+ * Enhanced fetch with automatic retries and exponential backoff.
+ * Essential for mobile apps on flaky networks (WiFi -> LTE transitions).
+ */
+export async function smartFetch(
+    url: string,
+    init?: RequestInit,
+    retries = 3,
+    backoff = 1000
+): Promise<Response> {
+    try {
+        const response = await fetch(url, init);
+        
+        // Retry on 5xx server errors or 429 rate limits
+        if (retries > 0 && (response.status >= 500 || response.status === 429)) {
+            console.warn(`[Network] Retrying ${url} (${response.status})... ${retries} attempts left`);
+            await new Promise(resolve => setTimeout(resolve, backoff));
+            return smartFetch(url, init, retries - 1, backoff * 2);
+        }
+        
+        return response;
+    } catch (error) {
+        // Retry on network-level errors (DNS, timeout, connection lost)
+        if (retries > 0) {
+            console.warn(`[Network] Connection error for ${url}. Retrying in ${backoff}ms...`, error);
+            await new Promise(resolve => setTimeout(resolve, backoff));
+            return smartFetch(url, init, retries - 1, backoff * 2);
+        }
+        throw error;
+    }
+}
+
+// JioSaavn API
+export const SAAVN_API_URL = Env.MUSIC_API_URL;
 
 // Get the API URL
 export const getSaavnApiUrl = () => SAAVN_API_URL;

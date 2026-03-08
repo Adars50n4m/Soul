@@ -22,6 +22,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { supabase } from '../config/supabase';
+import { RealtimeChannel } from '@supabase/supabase-js';
+import * as Crypto from 'expo-crypto';
+import NetInfo from '@react-native-community/netinfo';
 import { SUPABASE_ENDPOINT } from '../config/api';
 import { offlineService, type QueuedMessage, type MessageStatus } from './LocalDBService';
 import { storageService } from './StorageService';
@@ -423,6 +426,9 @@ class ChatService {
            if (!finalMediaUrl) throw new Error('Upload failed: Server returned an empty URL/Key');
            
            console.log(`[ChatService] Media uploaded successfully. Key: ${finalMediaUrl}`);
+
+           // PERSIST IMMEDIATELY so we don't re-upload if the message INSERT fails
+           await offlineService.updateMessageMediaUrl(message.id, finalMediaUrl);
         } catch (uploadErr: any) {
            console.error('[ChatService] Media upload failed:', uploadErr.message);
            if (uploadErr.message?.includes('R2 Service not configured')) {
@@ -437,8 +443,9 @@ class ChatService {
       const { data, error } = await supabase
         .from('messages')
         .insert({
+          id:            message.id,       // Provide our client-side UUID for idempotency
           sender:        this.userId,
-          receiver:      message.chatId,   // ← was missing before!
+          receiver:      message.chatId,
           text:          message.text,
           media_type:    message.media?.type    ?? null,
           media_url:     finalMediaUrl          ?? null,
@@ -559,12 +566,11 @@ class ChatService {
     const targetChatId = chatId || this.partnerId;
     if (!this.userId || !targetChatId) return null;
 
-    // [FIX BUG 6] substr is deprecated → use substring
-    const tempId    = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+    const messageId = Crypto.randomUUID();
     const timestamp = new Date().toISOString();
 
     const queuedMsg: QueuedMessage = {
-      id:         tempId,
+      id:         messageId,
       chatId:     targetChatId,
       sender:     'me',
       text,
@@ -580,7 +586,7 @@ class ChatService {
     await offlineService.savePendingMessage(targetChatId, queuedMsg);
 
     const uiMessage: ChatMessage = {
-      id:          tempId,
+      id:          messageId,
       sender_id:   this.userId,
       receiver_id: targetChatId,
       text,
@@ -690,19 +696,7 @@ class ChatService {
     };
   }
 
-  // ── PUBLIC: getSocket() ───────────────────────────────────────────────────
-  //
-  // MusicSyncService expects a socket.io socket object.
-  // This ChatService uses Supabase Realtime (not socket.io), so we return null.
-  // MusicSyncService will log "socket not ready" and retry every 2s — that's fine.
-  getSocket(): null {
-    return null;
-  }
-
-  // ── PUBLIC: isSocketConnected() ───────────────────────────────────────────
-  isSocketConnected(): boolean {
-    return false;
-  }
+  // Socket.io removed in favor of Supabase Broadcast
 
   // ── PRIVATE: Message polling fallback ───────────────────────────────────
   //

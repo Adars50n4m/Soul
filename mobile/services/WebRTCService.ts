@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { callService, CallSignal } from './CallService';
+import * as ENV from '../config/env';
 
 // Safe imports for WebRTC to prevent crashes in Expo Go
 let RTCPeerConnection: any;
@@ -35,29 +36,23 @@ try {
 //     → Self-hosted: coturn (open source)
 //
 const ICE_SERVERS: RTCIceServer[] = [
-  // Primary STUN Servers (Free, works for WiFi/LAN)
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
   
-  // Backup STUN Servers
-  { urls: 'stun:stun4.l.google.com:19302' },
-  
-  // Production TURN Server (Paid, required for 4G/5G/Corporate networks)
-  // Get credentials from: https://www.twilio.com/stun-turn or openrelay.net
-  {
-    urls: ['turn:' + (process.env.TURN_SERVER || 'turnserver.yourdomain.com:3478')],
-    username: process.env.TURN_USERNAME || 'your_username',
-    credential: process.env.TURN_PASSWORD || 'your_password'
-  },
+  // Production TURN Server (dynamic via ENV)
+  ...(ENV.TURN_SERVER ? [{
+    urls: ['turn:' + ENV.TURN_SERVER],
+    username: ENV.TURN_USERNAME,
+    credential: ENV.TURN_PASSWORD
+  }] : []),
   
   // Alternative TURN Server (for redundancy)
-  {
-    urls: ['turn:' + (process.env.TURN_SERVER_2 || 'backup-turnserver.yourdomain.com:3478')],
-    username: process.env.TURN_USERNAME_2 || 'backup_username',
-    credential: process.env.TURN_PASSWORD_2 || 'backup_password'
-  }
+  ...(ENV.TURN_SERVER_2 ? [{
+    urls: ['turn:' + ENV.TURN_SERVER_2],
+    username: ENV.TURN_USERNAME_2,
+    credential: ENV.TURN_PASSWORD_2
+  }] : [])
 ];
 
 type CallType = 'audio' | 'video';
@@ -86,6 +81,7 @@ class WebRTCService {
     private reconnectAttempts: number = 0;
     private maxReconnectAttempts: number = 5;
     private reconnectTimeout: NodeJS.Timeout | null = null;
+    private connectionWatchdog: NodeJS.Timeout | null = null;
     private lastDisconnectTime: number = 0;
 
     /**
@@ -285,13 +281,16 @@ class WebRTCService {
                     break;
 
                 case 'ice-candidate':
-                    // console.log('Received ICE candidate'); // Too noisy
                     if (signal.payload) {
-                        const candidate = new RTCIceCandidate(signal.payload);
-                        if (this.peerConnection?.remoteDescription) {
-                            await this.peerConnection.addIceCandidate(candidate);
-                        } else {
-                            this.pendingCandidates.push(candidate);
+                        try {
+                            const candidate = new RTCIceCandidate(signal.payload);
+                            if (this.peerConnection?.remoteDescription) {
+                                await this.peerConnection.addIceCandidate(candidate);
+                            } else {
+                                this.pendingCandidates.push(candidate);
+                            }
+                        } catch (e) {
+                            console.warn('[WebRTCService] Failed to add ICE candidate:', e);
                         }
                     }
                     break;
@@ -356,11 +355,9 @@ class WebRTCService {
         // The endCall signal is sent by AppContext.endCall() to avoid
         // a double-signal loop (AppContext -> webRTCService.endCall() -> callService.endCall() -> signal loop).
 
-        this.setState('ended');
-
         // Reset state after short delay, but only if not cleaned up
         setTimeout(() => {
-            if (this.callbacks) {
+            if (this.callbacks && this.callState === 'ended') {
                 this.setState('idle');
             }
         }, 1000);
@@ -679,8 +676,25 @@ class WebRTCService {
     }
 
     private setState(state: CallState): void {
+        console.log(`[WebRTCService] State change: ${this.callState} -> ${state}`);
         this.callState = state;
         this.callbacks?.onStateChange(state);
+
+        // Connection Watchdog: If we stay in 'connecting' too long, fail the call
+        if (this.connectionWatchdog) {
+            clearTimeout(this.connectionWatchdog);
+            this.connectionWatchdog = null;
+        }
+
+        if (state === 'connecting') {
+            this.connectionWatchdog = setTimeout(() => {
+                if (this.callState === 'connecting') {
+                    console.warn('[WebRTCService] 🚨 Connection watchdog timeout! Call failed to connect in 20s.');
+                    this.endCall('connection-timeout');
+                    this.callbacks?.onError('Call connection timed out. Please check your network.');
+                }
+            }, 20000);
+        }
     }
 
     // Add recovery attempt method
@@ -693,21 +707,21 @@ class WebRTCService {
                 return;
             }
             
-            // Strategy 1: Restart ICE gathering (soft restart)
-            if ('restartIce' in this.peerConnection) {
-                console.log('[WebRTCService] Restarting ICE gathering...');
-                await (this.peerConnection as any).restartIce();
-            }
-            
-            // Strategy 2: Check local streams are still active
-            if (this.localStream) {
-                const audioTracks = this.localStream.getAudioTracks();
-                const videoTracks = this.localStream.getVideoTracks();
-                
-                if (audioTracks.length === 0 || videoTracks.length === 0) {
-                    console.log('[WebRTCService] Local stream tracks lost. Attempting to refresh...');
-                    // Optionally re-get media here
-                }
+            // Strategy: ICE Restart
+            // In modern WebRTC, we create a new offer with { iceRestart: true }
+            if (this.isInitiator) {
+                console.log('[WebRTCService] Initiating ICE Restart (creating new offer)...');
+                const offerOptions = {
+                    iceRestart: true,
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: this.callType === 'video',
+                };
+                const offer = await this.peerConnection.createOffer(offerOptions);
+                await this.peerConnection.setLocalDescription(offer);
+                callService.sendOffer(offer);
+            } else {
+                console.log('[WebRTCService] Waiting for Initiator to restart ICE...');
+                // Callee usually waits, but can also trigger negotiationneeded
             }
             
             console.log('[WebRTCService] Recovery attempt initiated. Waiting for reconnection...');

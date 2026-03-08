@@ -1203,7 +1203,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                     <View style={styles.emptyChat}>
                                         <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
                                         <Text style={styles.emptyChatText}>No messages yet</Text>
-                                        <Text style={styles.emptyChatHint}>Say hi to {contact.name}!</Text>
+                                        <Text style={styles.emptyChatHint}>Say hi to {contact?.name || 'your contact'}!</Text>
                                     </View>
                                 }
                             />
@@ -1221,7 +1221,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                             {isTyping && (
                                 <Animated.View entering={FadeInDown} exiting={FadeOutDown} style={styles.typingIndicatorWrapper}>
                                     <View style={styles.typingBubbleMini}>
-                                        <Text style={styles.typingText}>{contact.name} is typing</Text>
+                                        <Text style={styles.typingText}>{contact?.name || 'Someone'} is typing</Text>
                                         <TypingDots />
                                     </View>
                                 </Animated.View>
@@ -1244,7 +1244,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                         <View style={[ChatStyles.quoteBar, { backgroundColor: activeTheme.primary }]} />
                                         <View style={styles.replyTextContainer}>
                                             <Text style={[styles.replySender, { color: activeTheme.primary }]}>
-                                                {replyingTo.sender === 'me' ? 'You' : contact.name}
+                                                {replyingTo.sender === 'me' ? 'You' : (contact?.name || 'Someone') }
                                             </Text>
                                             <Text numberOfLines={1} style={styles.replyText}>{replyText}</Text>
                                         </View>
@@ -1438,25 +1438,25 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                 <Pressable 
                                     style={styles.avatarWrapper} 
                                     onPress={() => {
-                                        if (contact.stories && contact.stories.length > 0) {
-                                            router.push(`/profile/${contact.id}` as any);
+                                        if (contact?.stories && contact.stories.length > 0) {
+                                            router.push(`/profile/${contact?.id}` as any);
                                         } else {
-                                            router.push(`/profile/${contact.id}` as any);
+                                            router.push(`/profile/${contact?.id}` as any);
                                         }
                                     }}
                                 >
                                     <SoulAvatar
-                                        uri={contact.avatar}
+                                        uri={contact?.avatar}
                                         size={40}
                                         style={[
-                                            contact.stories && contact.stories.length > 0 && {
+                                            contact?.stories && contact.stories.length > 0 && {
                                                 borderWidth: 2,
                                                 borderColor: contact.stories.some(s => !s.seen) ? '#3b82f6' : 'rgba(255,255,255,0.4)',
                                                 padding: 2
                                             }
                                         ]}
                                     />
-                                    {contact.status === 'online' && <View style={styles.onlineIndicator} />}
+                                    {contact?.status === 'online' && <View style={styles.onlineIndicator} />}
                                 </Pressable>
                             </Animated.View>
 
@@ -1469,7 +1469,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                         }
                                         : {})}
                                 >
-                                    <Text style={styles.contactName}>{contact.name}</Text>
+                                    <Text style={styles.contactName}>{contact?.name || '...'}</Text>
                                 </Animated.View>
                                 <Animated.View style={headerAccessoryAnimatedStyle}>
                                     {musicState.currentSong ? (
@@ -1479,13 +1479,13 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                                 {sanitizeSongTitle(musicState.currentSong.name)}
                                             </Text>
                                         </View>
-                                    ) : contact.status === 'online' ? (
+                                    ) : contact?.status === 'online' ? (
                                         <Text style={[styles.statusText, { color: '#22c55e' }]}>
                                             online
                                         </Text>
                                     ) : (
                                         <Text style={[styles.statusText, { color: 'rgba(255,255,255,0.35)' }]}>
-                                            {contact.lastSeen
+                                            {contact?.lastSeen
                                                 ? `last seen ${formatLastSeen(contact.lastSeen)}`
                                                 : 'offline'}
                                         </Text>
@@ -1571,7 +1571,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             <MusicPlayerOverlay
                 isOpen={showMusicPlayer}
                 onClose={() => setShowMusicPlayer(false)}
-                contactName={contact.name}
+                contactName={contact?.name || 'Someone'}
             />
 
             {/* Media Picker Sheet */}

@@ -95,7 +95,6 @@
     "react-native-webrtc": "^124.0.7",
     "react-waypoint": "^10.3.0",
     "sileo": "^0.1.5",
-    "socket.io-client": "^4.8.3",
     "tailwindcss": "3.3.2"
   },
   "devDependencies": {

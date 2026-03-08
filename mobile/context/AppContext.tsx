@@ -21,6 +21,7 @@ import { nativeCallBridge } from '../services/NativeCallBridge';
 import { nativeCallService } from '../services/NativeCallService';
 
 import { supabase } from '../config/supabase';
+import { RealtimeChannel } from '@supabase/supabase-js';
 import { offlineService } from '../services/LocalDBService';
 import { storageService } from '../services/StorageService';
 import { backgroundSyncService } from '../services/BackgroundSyncService';
@@ -28,7 +29,6 @@ import { soundService } from '../services/SoundService';
 import { authService } from '../services/AuthService';
 import { proxySupabaseUrl, SERVER_URL, serverFetch } from '../config/api';
 import { sileo } from '../components/ui/Sileo';
-import { getSocket } from '../src/webrtc/socket';
 
 if (!offlineService) {
     console.warn('[AppContext] LocalDBService failed to load. Check native modules.');
@@ -157,7 +157,6 @@ interface AppContextType {
     addCall: (call: Omit<CallLog, 'id'>) => Promise<void>;
     deleteCall: (id: string) => Promise<void>;
     clearCalls: () => Promise<void>;
-    addStatus: (status: Omit<StatusUpdate, 'id' | 'likes' | 'views'> & { localUri?: string }) => Promise<void>;
     deleteStatus: (id: string) => Promise<void>;
     toggleStatusLike: (statusId: string) => Promise<void>;
     setTheme: (theme: ThemeName) => void;
@@ -645,36 +644,37 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // --- REAL-TIME CONNECTION NOTIFICATIONS ---
     useEffect(() => {
         if (currentUser?.id) {
-            const socket = getSocket();
-            
-            const handleRequestReceived = (data: any) => {
-                sileo.info({
-                    title: 'New Connection Request',
-                    description: `${data.senderName || 'Someone'} wants to connect with you.`,
-                    button: {
-                        title: 'View Requests',
-                        onClick: () => router.push('/requests')
-                    }
-                });
-            };
+            // ── Supabase Broadcast for User Signals (Requests, Notifications) ────────
+            const channelName = `user_signals_${currentUser.id}`;
+            const signalChannel = supabase.channel(channelName, {
+                config: { broadcast: { self: false } },
+            });
 
-            const handleRequestAccepted = (data: any) => {
-                sileo.success({
-                    title: 'Request Accepted!',
-                    description: `You are now connected with ${data.receiverName || 'someone'}.`,
-                    button: {
-                        title: 'Chat',
-                        onClick: () => router.push(`/chat/${data.receiverId}`)
-                    }
-                });
-            };
-
-            socket.on('connection:request_received', handleRequestReceived);
-            socket.on('connection:request_accepted', handleRequestAccepted);
+            signalChannel
+                .on('broadcast', { event: 'connection_request' }, ({ payload }) => {
+                    sileo.info({
+                        title: 'New Connection Request',
+                        description: `${payload.senderName || 'Someone'} wants to connect with you.`,
+                        button: {
+                            title: 'View Requests',
+                            onClick: () => router.push('/requests')
+                        }
+                    });
+                })
+                .on('broadcast', { event: 'request_accepted' }, ({ payload }) => {
+                    sileo.success({
+                        title: 'Request Accepted!',
+                        description: `You are now connected with ${payload.receiverName || 'someone'}.`,
+                        button: {
+                            title: 'Chat',
+                            onClick: () => router.push(`/chat/${payload.receiverId}`)
+                        }
+                    });
+                })
+                .subscribe();
 
             return () => {
-                socket.off('connection:request_received', handleRequestReceived);
-                socket.off('connection:request_accepted', handleRequestAccepted);
+                signalChannel.unsubscribe();
             };
         }
     }, [currentUser?.id]);
@@ -1629,15 +1629,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Only emit and persist if WE initiated the reaction (no senderId)
         if (!senderId) {
             recentLocalReactions.current.set(messageId, Date.now());
-
-            const socket = chatService.getSocket() as any;
-            if (socket?.connected) {
-                socket.emit('message:reaction', {
-                    recipientId: chatId,
-                    messageId: messageId,
-                    reaction: emoji || ''
-                });
-            }
+            
+            // Reactions are synced via Supabase 'messages' table UPDATE
 
             try {
                 await Promise.all([

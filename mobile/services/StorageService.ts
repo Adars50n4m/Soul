@@ -115,7 +115,7 @@ export const storageService = {
 
         try {
             // 1. Check local SQLite cache
-            const cachedPath = await offlineService.getCachedMedia(r2Key);
+            const cachedPath = await offlineService.getMediaDownload(r2Key);
             if (cachedPath) {
                 const info = await FileSystem.getInfoAsync(cachedPath);
                 if (info.exists) {
@@ -136,7 +136,7 @@ export const storageService = {
                 throw new Error('Failed to get download presigned URL');
             }
 
-            const { presignedUrl } = await res.json();
+            const { presignedUrl } = await res.json() as { presignedUrl: string };
             if (!presignedUrl) return r2Key.startsWith('http') ? r2Key : null;
 
             // 3. Download the file locally
@@ -152,7 +152,7 @@ export const storageService = {
             }
 
             // 4. Save to Cache tracking
-            await offlineService.saveCachedMedia(r2Key, localUri, undefined, downloadRes.headers['Content-Length'] ? parseInt(downloadRes.headers['Content-Length']) : undefined);
+            await offlineService.saveMediaDownload(r2Key, presignedUrl, localUri, downloadRes.headers['Content-Length'] ? parseInt(downloadRes.headers['Content-Length']) : undefined);
 
             return localUri;
         } catch (error) {
