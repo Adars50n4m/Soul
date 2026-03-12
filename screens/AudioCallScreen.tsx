@@ -12,7 +12,7 @@ const AudioCallScreen: React.FC = () => {
 
   const contact = contacts.find(c => c.id === id) || (activeCall ? contacts.find(c => c.id === activeCall.contactId) : null);
 
-  const roomId = contact ? `callRoom-${contact.id}` : '';
+  const roomId = activeCall?.roomId || (contact ? `callRoom-${contact.id}` : '');
 
   const { remoteStream, cleanup } = useWebRTC({
     roomId,

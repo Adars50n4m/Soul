@@ -591,6 +591,101 @@ class AuthService {
   onAuthStateChange(callback: (event: string, session: any) => void) {
     return supabase.auth.onAuthStateChange(callback);
   }
+
+  // FIX #18: Token refresh handling - auto-refresh and session management
+  private tokenRefreshCallback: ((isRefreshing: boolean) => void) | null = null;
+  private lastSessionToken: string | null = null;
+
+  /**
+   * Setup automatic token refresh handling
+   * Should be called on app startup after login
+   */
+  setupTokenRefreshHandling(onTokenRefresh?: (isRefreshing: boolean) => void): () => void {
+    this.tokenRefreshCallback = onTokenRefresh ?? null;
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log(`[Auth] Auth event: ${event}`);
+
+      // FIX #18: Detect token refresh by comparing access tokens
+      const currentToken = session?.access_token ?? null;
+      if (currentToken && this.lastSessionToken && currentToken !== this.lastSessionToken) {
+        console.log('[Auth] ✅ Token automatically refreshed');
+        this.tokenRefreshCallback?.(false);
+      }
+      this.lastSessionToken = currentToken;
+
+      if (event === 'SIGNED_OUT') {
+        console.log('[Auth] User signed out');
+        this.tokenRefreshCallback?.(false);
+        this.lastSessionToken = null;
+      } else if (event === 'TOKEN_REFRESHED') {
+        console.log('[Auth] 🔄 Token refreshed');
+        this.tokenRefreshCallback?.(false);
+      } else if (event === 'SIGNED_IN') {
+        // Check if session was refreshed (not a fresh login)
+        if (session?.expires_in && session.expires_in < 3600) {
+          // Session has short expiry, likely a refresh
+          console.log('[Auth] 🔄 Session refreshed');
+        }
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }
+
+  /**
+   * Handle token refresh failure - clear session and notify user
+   * Called when TOKEN_REFRESHED event fails
+   */
+  async handleTokenRefreshFailure(): Promise<void> {
+    try {
+      // Clear local session data
+      await supabase.auth.signOut();
+      // Notify via AsyncStorage for other parts of the app to react
+      const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+      await AsyncStorage.setItem('auth_token_expired', 'true');
+      console.log('[Auth] Session cleared after token refresh failure');
+    } catch (error) {
+      console.error('[Auth] Error handling token refresh failure:', error);
+    }
+  }
+
+  /**
+   * Manually refresh the session
+   * Returns true if refresh was successful
+   */
+  async refreshSession(): Promise<boolean> {
+    try {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) {
+        console.warn('[Auth] Manual token refresh failed:', error.message);
+        return false;
+      }
+      return !!data.session;
+    } catch (error) {
+      console.error('[Auth] Manual token refresh error:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Check if current session is valid and not about to expire
+   * Returns remaining time in seconds, or null if no session
+   */
+  async getSessionExpiry(): Promise<number | null> {
+    try {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) return null;
+
+      const expiresAt = data.session.expires_at;
+      const now = Math.floor(Date.now() / 1000);
+
+      return Math.max(0, expiresAt - now);
+    } catch {
+      return null;
+    }
+  }
 }
 
 export const authService = new AuthService();

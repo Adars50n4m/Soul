@@ -66,12 +66,12 @@ const IOS_KEYBOARD_SAFE_ADJUST = 0;
 const HEADER_PILL_TOP = 62;
 const LIST_PILL_HEIGHT = 72;
 const LIST_PILL_RADIUS = 36;
-const MORPH_IN_OUT_DURATION = 720;
-const MORPH_OUT_HANDOFF = Math.round(MORPH_IN_OUT_DURATION * 0.38);
+const MORPH_IN_OUT_DURATION = 1020;
+const MORPH_OUT_HANDOFF = Math.round(MORPH_IN_OUT_DURATION * 0.16);
 const pillSharedTransition = SharedTransition.custom((values) => {
     'worklet';
     const morph = {
-        duration: 720,
+        duration: 1020,
         easing: Easing.bezier(0.2, 1, 0.36, 1),
     };
     return {
@@ -120,24 +120,65 @@ const formatLastSeen = (isoString: string): string => {
     }
 };
 
-// Animated 3-dot typing indicator (WhatsApp / iMessage style)
 const TypingDots = () => {
-    const [dot, setDot] = useState(0);
+    const dot1 = useMemo(() => new RNAnimated.Value(0.35), []);
+    const dot2 = useMemo(() => new RNAnimated.Value(0.35), []);
+    const dot3 = useMemo(() => new RNAnimated.Value(0.35), []);
+
     useEffect(() => {
-        const id = setInterval(() => setDot(d => (d + 1) % 3), 400);
-        return () => clearInterval(id);
-    }, []);
+        const createLoop = (value: RNAnimated.Value, delay: number) =>
+            RNAnimated.loop(
+                RNAnimated.sequence([
+                    RNAnimated.delay(delay),
+                    RNAnimated.timing(value, {
+                        toValue: 1,
+                        duration: 380,
+                        useNativeDriver: true,
+                    }),
+                    RNAnimated.timing(value, {
+                        toValue: 0.35,
+                        duration: 380,
+                        useNativeDriver: true,
+                    }),
+                ])
+            );
+        const animations = [
+            createLoop(dot1, 0),
+            createLoop(dot2, 140),
+            createLoop(dot3, 280),
+        ];
+        animations.forEach((animation) => animation.start());
+        return () => {
+            animations.forEach((animation) => animation.stop());
+            dot1.stopAnimation();
+            dot2.stopAnimation();
+            dot3.stopAnimation();
+        };
+    }, [dot1, dot2, dot3]);
+
     return (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-            {[0, 1, 2].map(i => (
-                <View
-                    key={i}
-                    style={{
-                        width: 5,
-                        height: 5,
-                        borderRadius: 2.5,
-                        backgroundColor: dot === i ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.3)',
-                    }}
+        <View style={styles.typingAnimationWrap}>
+            {[
+                { key: 'dot-1', value: dot1 },
+                { key: 'dot-2', value: dot2 },
+                { key: 'dot-3', value: dot3 },
+            ].map(({ key, value }) => (
+                <RNAnimated.View
+                    key={key}
+                    style={[
+                        styles.typingDot,
+                        {
+                            opacity: value,
+                            transform: [
+                                {
+                                    scale: value.interpolate({
+                                        inputRange: [0.35, 1],
+                                        outputRange: [0.92, 1.15],
+                                    }),
+                                },
+                            ],
+                        },
+                    ]}
                 />
             ))}
         </View>
@@ -212,8 +253,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const [showCallModal, setShowCallModal] = useState(false);
     const [isReady, setIsReady] = useState(false);
 
-    // Memoize reversed messages to avoid expensive array operations in render
-    const reversedMessages = useMemo(() => [...(messages[id] || [])].reverse(), [messages, id]);
+
 
     // Defer heavy rendering until transition completes
     useEffect(() => {
@@ -413,11 +453,12 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 duration: MORPH_IN_OUT_DURATION,
                 easing: Easing.bezier(0.22, 1, 0.36, 1),
             });
-            // Show Home during return morph (status/nav appear without end-delay).
+            // Small handoff delay keeps the return motion closer to the
+            // entry feel without changing the pill animation itself.
             setTimeout(() => finishBack(), MORPH_OUT_HANDOFF);
             return;
         }
-        headerAccessoryOpacity.value = withTiming(0, { duration: 1000 });
+        headerAccessoryOpacity.value = withTiming(0, { duration: 1280 });
         requestAnimationFrame(() => {
             finishBack();
         });
@@ -473,8 +514,12 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         }
         return undefined;
     }, [contacts, id]);
-    
-    const chatMessages = messages[id || ''] || (contact ? (messages[contact.id] || []) : []);
+
+    // FIX: Use contact.id (UUID) for message lookup, not the raw id param
+    const messageKey = contact?.id || id || '';
+    const chatMessages = messages[messageKey] || [];
+    // Memoize reversed messages to avoid expensive array operations in render
+    const reversedMessages = useMemo(() => [...chatMessages].reverse(), [chatMessages]);
     const isTyping = contact ? typingUsers.includes(contact.id) : false;
 
     // Mark incoming messages as read when chat is open
@@ -487,14 +532,29 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         }
     }, [chatMessages]);
 
-    // Toggle Options Menu (Now opens MediaPickerSheet directly)
+    // Toggle inline sharing options above the composer
     const toggleOptions = () => {
-        setShowMediaPicker(true);
+        const nextExpanded = !isExpanded;
+        setIsExpanded(nextExpanded);
+        plusRotation.value = withTiming(nextExpanded ? 45 : 0, {
+            duration: 220,
+            easing: Easing.out(Easing.cubic),
+        });
+        optionsHeight.value = withTiming(nextExpanded ? 92 : 0, {
+            duration: 240,
+            easing: Easing.out(Easing.cubic),
+        });
+        optionsOpacity.value = withTiming(nextExpanded ? 1 : 0, {
+            duration: nextExpanded ? 180 : 120,
+            easing: Easing.out(Easing.cubic),
+        });
     };
 
     // Close options when typing
     const handleFocus = () => {
-        if (isExpanded) toggleOptions();
+        if (isExpanded) {
+            toggleOptions();
+        }
     };
 
     const animatedPlusStyle = useAnimatedStyle(() => ({
@@ -684,7 +744,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             };
             
             // Instantly send message to local DB, passing the local uri for background upload
-            sendChatMessage(id, '', media, undefined, uri);
+            sendChatMessage(messageKey,'', media, undefined, uri);
         } catch (error: any) {
             Alert.alert('Send Failed', error.message || 'Please try again.');
         }
@@ -876,8 +936,9 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         const content = inputText.trim();
         setInputText('');
 
+        // FIX: Use messageKey (UUID) for sending messages
         const replyToId = replyingTo ? replyingTo.id : undefined;
-        sendChatMessage(id, content, undefined, replyToId);
+        sendChatMessage(messageKey, content, undefined, replyToId);
 
         setReplyingTo(null);
     };
@@ -1137,16 +1198,19 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     };
 
     const handleSelectAudio = async () => {
+        if (isExpanded) toggleOptions();
         setShowMediaPicker(false);
         Alert.alert('Coming Soon', 'Audio file selection will be available soon.');
     };
 
     const handleSelectLocation = () => {
+        if (isExpanded) toggleOptions();
         setShowMediaPicker(false);
         Alert.alert('Coming Soon', 'Location sharing will be available soon.');
     };
 
     const handleSelectContact = () => {
+        if (isExpanded) toggleOptions();
         setShowMediaPicker(false);
         Alert.alert('Coming Soon', 'Contact sharing will be available soon.');
     };
@@ -1183,7 +1247,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 const msgText = i === 0 ? (caption || '') : '';
 
                 // Instantly send to local UI and background queue
-                await sendChatMessage(id, msgText, media, undefined, item.uri);
+                await sendChatMessage(messageKey,msgText, media, undefined, item.uri);
             }
             setMediaPreview(null);
         } catch (error: any) {
@@ -1250,7 +1314,6 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                             {isTyping && (
                                 <Animated.View entering={FadeInDown} exiting={FadeOutDown} style={styles.typingIndicatorWrapper}>
                                     <View style={styles.typingBubbleMini}>
-                                        <Text style={styles.typingText}>{contact?.name || 'Someone'} is typing</Text>
                                         <TypingDots />
                                     </View>
                                 </Animated.View>
@@ -1291,7 +1354,32 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                         <View style={styles.unifiedPillContainer}>
                             <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill}  />
                             
-                            {/* Expandable Options Menu - REMOVED for MediaPickerSheet */}
+                            <Animated.View style={[styles.optionsMenu, animatedOptionsStyle]}>
+                                <Pressable style={styles.optionItem} onPress={handleSelectCamera}>
+                                    <View style={[styles.optionIcon, { backgroundColor: 'rgba(244,63,94,0.16)' }]}>
+                                        <MaterialIcons name="photo-camera" size={20} color="#f43f5e" />
+                                    </View>
+                                    <Text style={styles.optionText}>Camera</Text>
+                                </Pressable>
+                                <Pressable style={styles.optionItem} onPress={handleSelectGallery}>
+                                    <View style={[styles.optionIcon, { backgroundColor: 'rgba(59,130,246,0.16)' }]}>
+                                        <MaterialIcons name="photo-library" size={20} color="#60a5fa" />
+                                    </View>
+                                    <Text style={styles.optionText}>Gallery</Text>
+                                </Pressable>
+                                <Pressable style={styles.optionItem} onPress={handleSelectAudio}>
+                                    <View style={[styles.optionIcon, { backgroundColor: 'rgba(34,197,94,0.16)' }]}>
+                                        <MaterialIcons name="audiotrack" size={20} color="#4ade80" />
+                                    </View>
+                                    <Text style={styles.optionText}>Audio</Text>
+                                </Pressable>
+                                <Pressable style={styles.optionItem} onPress={handleSelectContact}>
+                                    <View style={[styles.optionIcon, { backgroundColor: 'rgba(255,255,255,0.12)' }]}>
+                                        <MaterialIcons name="person-outline" size={20} color="rgba(255,255,255,0.82)" />
+                                    </View>
+                                    <Text style={styles.optionText}>Contact</Text>
+                                </Pressable>
+                            </Animated.View>
 
                             <View
                                 style={[styles.inputWrapper, isRecording && styles.inputWrapperHidden]}
@@ -1729,7 +1817,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 }}
                 onSendComment={(comment) => {
                     if (id && comment.trim()) {
-                        sendChatMessage(id, comment);
+                        sendChatMessage(messageKey,comment);
                     }
                 }}
                 onDownload={handleSaveCurrentMedia}
@@ -1883,18 +1971,34 @@ const styles = StyleSheet.create({
         zIndex: 100,
     },
     typingBubbleMini: {
-        backgroundColor: 'rgba(255,255,255,0.08)',
-        borderRadius: 16,
-        paddingHorizontal: 12,
-        paddingVertical: 6,
+        backgroundColor: 'rgba(255,255,255,0.12)',
+        borderRadius: 999,
+        minWidth: 74,
+        height: 38,
+        paddingHorizontal: 18,
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 8,
+        justifyContent: 'center',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.06)',
+        shadowColor: '#000',
+        shadowOpacity: 0.18,
+        shadowRadius: 14,
+        shadowOffset: { width: 0, height: 8 },
     },
-    typingText: {
-        color: 'rgba(255,255,255,0.5)',
-        fontSize: 12,
-        fontWeight: '500',
+    typingAnimationWrap: {
+        width: 42,
+        height: 18,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 7,
+    },
+    typingDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 999,
+        backgroundColor: 'rgba(255,255,255,0.9)',
     },
     typingBubble: {
         backgroundColor: 'rgba(255,255,255,0.08)',

@@ -35,6 +35,7 @@ import { NoteBubble } from '../../components/NoteBubble';
 import { NoteCreatorModal } from '../../components/NoteCreatorModal';
 const DEFAULT_AVATAR = '';
 const ENABLE_SHARED_TRANSITIONS = Platform.OS === 'ios';
+const HOME_MORPH_DURATION = 680;
 
 const resolveStatusAssetUri = async (asset: ImagePicker.ImagePickerAsset): Promise<string> => {
   let resolvedUri = asset.uri;
@@ -268,10 +269,26 @@ export default function HomeScreen() {
   const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' } | null>(null);
   const [isUploadingStatus, setIsUploadingStatus] = useState(false);
   const statusRailOpacity = useSharedValue(hasRenderedHomeOnce ? 0 : 1);
+  const homeMorphProgress = useSharedValue(0);
   const hasFocusedOnce = useRef(false);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const selectedChatResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const statusRailAnimStyle = useAnimatedStyle(() => ({
     opacity: statusRailOpacity.value,
+  }));
+
+  const homeContentAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: 1 - homeMorphProgress.value * 0.08,
+    transform: [
+      { translateY: homeMorphProgress.value * -100 },
+      { scale: 1 - homeMorphProgress.value * 0.012 },
+    ],
+  }));
+
+  const homeBackdropAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: homeMorphProgress.value * 0.12,
+    transform: [{ scale: 1 + homeMorphProgress.value * 0.012 }],
   }));
 
   // Hide tab bar when fullscreen overlays are open — useLayoutEffect ensures
@@ -286,21 +303,40 @@ export default function HomeScreen() {
 
   useEffect(() => {
     const unsubscribe = (navigation as any).addListener('focus', () => {
+      if (selectedChatResetTimeoutRef.current) {
+        clearTimeout(selectedChatResetTimeoutRef.current);
+        selectedChatResetTimeoutRef.current = null;
+      }
+      setSelectedChatId(null);
+      homeMorphProgress.value = 1;
       if (!hasFocusedOnce.current) {
         hasFocusedOnce.current = true;
         hasRenderedHomeOnce = true;
+        homeMorphProgress.value = 0;
         statusRailOpacity.value = 1;
         return;
       }
+      homeMorphProgress.value = withTiming(0, {
+        duration: HOME_MORPH_DURATION,
+        easing: Easing.bezier(0.22, 1, 0.36, 1),
+      });
       // Fade-in only status rail on return; keep the rest of Home unchanged.
-      statusRailOpacity.value = 0;
+      statusRailOpacity.value = 1;
       statusRailOpacity.value = withTiming(1, {
-        duration: 320,
+        duration: 420,
         easing: Easing.out(Easing.cubic),
       });
     });
     return unsubscribe;
-  }, [navigation, statusRailOpacity]);
+  }, [homeMorphProgress, navigation, statusRailOpacity]);
+
+  useEffect(() => {
+    return () => {
+      if (selectedChatResetTimeoutRef.current) {
+        clearTimeout(selectedChatResetTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const contactStoriesMap = useMemo(() => {
     const map = new Map<string, Story[]>();
@@ -511,14 +547,29 @@ export default function HomeScreen() {
   };
 
   const handleUserSelect = useCallback((contact: Contact, y: number) => {
-    router.push({
-      pathname: '/chat/[id]',
-      params: { 
-        id: contact.id,
-        sourceY: y.toString(),
-      }
+    if (selectedChatResetTimeoutRef.current) {
+      clearTimeout(selectedChatResetTimeoutRef.current);
+      selectedChatResetTimeoutRef.current = null;
+    }
+    setSelectedChatId(contact.id);
+    homeMorphProgress.value = withTiming(1, {
+      duration: HOME_MORPH_DURATION,
+      easing: Easing.bezier(0.22, 1, 0.36, 1),
     });
-  }, [router]);
+    selectedChatResetTimeoutRef.current = setTimeout(() => {
+      setSelectedChatId((current) => (current === contact.id ? null : current));
+      selectedChatResetTimeoutRef.current = null;
+    }, 420);
+    requestAnimationFrame(() => {
+      router.push({
+        pathname: '/chat/[id]',
+        params: {
+          id: contact.id,
+          sourceY: y.toString(),
+        }
+      });
+    });
+  }, [homeMorphProgress, router]);
 
   // Pre-compute last messages map to avoid recalculating in renderItem
   const lastMessagesMap = useMemo(() => {
@@ -549,9 +600,10 @@ export default function HomeScreen() {
           isTyping={isTyping}
           onlineUsers={onlineUsers}
           connectivity={connectivity}
+          isHidden={selectedChatId === item.id}
       />
     );
-  }, [lastMessagesMap, typingUsers, handleUserSelect, contactStoriesMap]);
+  }, [lastMessagesMap, typingUsers, handleUserSelect, contactStoriesMap, onlineUsers, connectivity, selectedChatId]);
 
   // Stable keyExtractor for FlashList
   const keyExtractor = useCallback((item: Contact) => item.id, []);
@@ -594,6 +646,7 @@ export default function HomeScreen() {
                 onPress={handleMyStatusPress}
                 android_ripple={{ color: 'rgba(255,255,255,0.1)' }}
               >
+                <View style={styles.statusCardSurface}>
                 <View style={[styles.myStatusBackground, myStories.length > 0 && { justifyContent: 'flex-start', alignItems: 'flex-start' }]}>
                   {!!myStoryPreviewUrl ? (
                     <>
@@ -632,6 +685,7 @@ export default function HomeScreen() {
                     </>
                   )}
                 </View>
+                </View>
                 {currentUser?.note && isNoteValid(currentUser.noteTimestamp) && (
                   <View style={styles.notePositioner} pointerEvents="none">
                      <NoteBubble text={currentUser.note} isMe />
@@ -649,6 +703,7 @@ export default function HomeScreen() {
                 onPress={() => handleStatusPress(contact)}
                 android_ripple={{ color: 'rgba(255,255,255,0.1)' }}
             >
+              <View style={styles.statusCardSurface}>
               {storyUrl ? (
                   <Image source={{ uri: storyUrl }} style={styles.statusMediaBackground} />
               ) : (
@@ -664,6 +719,7 @@ export default function HomeScreen() {
                 >
                   <Text style={styles.statusNameText}>{contact.name}</Text>
                 </LinearGradient>
+              </View>
               </View>
               {contact.note && isNoteValid(contact.noteTimestamp) && (
                   <View style={styles.notePositioner} pointerEvents="none">
@@ -681,14 +737,17 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
-      <FlatList
-        data={visibleContacts}
-        keyExtractor={keyExtractor}
-        renderItem={renderItem}
-        ListHeaderComponent={renderHeader}
-        contentContainerStyle={styles.listContent}
-        showsVerticalScrollIndicator={false}
-      />
+      <Animated.View pointerEvents="none" style={[styles.homeMorphBackdrop, homeBackdropAnimatedStyle]} />
+      <Animated.View style={[styles.homeContent, homeContentAnimatedStyle]}>
+        <FlatList
+          data={visibleContacts}
+          keyExtractor={keyExtractor}
+          renderItem={renderItem}
+          ListHeaderComponent={renderHeader}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+        />
+      </Animated.View>
 
       <StatusViewerModal
         visible={isViewerVisible}
@@ -762,6 +821,13 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
+  homeMorphBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#080808',
+  },
+  homeContent: {
+    flex: 1,
+  },
   homeHeaderWrapper: { paddingTop: Platform.OS === 'ios' ? 50 : 30 },
   topHeader: { 
     flexDirection: 'row', 
@@ -781,8 +847,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center' 
   },
   statusRail: { marginTop: 10, marginBottom: 0, overflow: 'visible' },
-  statusContent: { paddingHorizontal: 20, paddingVertical: 12, paddingTop: 8, gap: 12, overflow: 'visible' },
-  statusCard: { width: 140, height: 200, borderRadius: 28, backgroundColor: '#1a1a1a', zIndex: 10, overflow: 'hidden' },
+  statusContent: { paddingHorizontal: 20, paddingVertical: 12, paddingTop: 10, gap: 12, overflow: 'visible' },
+  statusCard: { width: 140, height: 200, marginTop: 34, borderRadius: 28, backgroundColor: 'transparent', zIndex: 10, overflow: 'visible' },
+  statusCardSurface: {
+    flex: 1,
+    borderRadius: 28,
+    backgroundColor: '#1a1a1a',
+    overflow: 'hidden',
+  },
   myStatusBackground: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#121212', borderRadius: 28, overflow: 'hidden' },
   myStatusPreviewBg: { ...StyleSheet.absoluteFillObject, opacity: 0.42 },
   myStatusPreviewBgFull: { ...StyleSheet.absoluteFillObject, opacity: 1 },
@@ -820,7 +892,7 @@ const styles = StyleSheet.create({
   chatItem: { marginBottom: 8, marginHorizontal: 16, borderRadius: 36, height: 72 },
   notePositioner: {
       position: 'absolute',
-      top: -20, // Float above the card
+      top: -7,
       left: 0,
       right: 0,
       alignItems: 'center',

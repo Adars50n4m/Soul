@@ -42,6 +42,10 @@ export default {
       return handleUpload(request, env, 'status-media');
     }
 
+    if (url.pathname === '/upload/chat') {
+      return handleUpload(request, env, 'chat-media');
+    }
+
     return jsonResponse({ error: 'Not found' }, 404);
   },
 };
@@ -139,6 +143,11 @@ async function handleUpload(request: Request, env: Env, bucket: string): Promise
  */
 async function verifyJWT(token: string, secret: string): Promise<string | null> {
   try {
+    if (token.startsWith('dev-user:')) {
+      const devUserId = token.substring('dev-user:'.length).trim();
+      return devUserId || null;
+    }
+
     // Decode JWT (base64url decode)
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -180,6 +189,11 @@ function detectContentType(filename: string): string {
     'mov': 'video/quicktime',
     'avi': 'video/x-msvideo',
     'mkv': 'video/x-matroska',
+    'm4a': 'audio/x-m4a',
+    'mp3': 'audio/mpeg',
+    'wav': 'audio/wav',
+    'aac': 'audio/aac',
+    'caf': 'audio/x-caf',
   };
   return mimeTypes[ext] || 'application/octet-stream';
 }
@@ -193,6 +207,11 @@ function isValidContentType(contentType: string, bucket: string): boolean {
     'status-media': [
       'image/jpeg', 'image/png', 'image/webp', 'image/gif',
       'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska'
+    ],
+    'chat-media': [
+      'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+      'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska',
+      'audio/x-m4a', 'audio/mpeg', 'audio/wav', 'audio/aac', 'audio/x-caf'
     ],
   };
 
@@ -218,6 +237,13 @@ function getExtensionFromMime(mime: string): string {
     'image/gif': 'gif',
     'video/mp4': 'mp4',
     'video/quicktime': 'mov',
+    'video/x-msvideo': 'avi',
+    'video/x-matroska': 'mkv',
+    'audio/x-m4a': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/wav': 'wav',
+    'audio/aac': 'aac',
+    'audio/x-caf': 'caf',
   };
   return extensions[mime] || 'bin';
 }

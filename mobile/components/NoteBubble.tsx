@@ -1,70 +1,87 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import Animated, { FadeIn, FadeOut, ZoomIn } from 'react-native-reanimated';
-import GlassView from './ui/GlassView';
 
 interface NoteBubbleProps {
     text: string;
     isMe?: boolean;
 }
 
-export const NoteBubble: React.FC<NoteBubbleProps> = ({ text, isMe }) => {
+export function NoteBubble({ text, isMe }: NoteBubbleProps) {
     if (!text) return null;
 
     return (
-        <Animated.View 
-            entering={FadeIn.duration(400).delay(200)}
-            exiting={FadeOut.duration(200)}
-            style={styles.container}
-        >
-            <Animated.View 
-                entering={ZoomIn.springify().damping(15)}
-                style={styles.bubble}
-            >
-                <Text numberOfLines={2} style={styles.text}>{text}</Text>
-                {/* Tail */}
-                <View style={styles.tail} />
-            </Animated.View>
-        </Animated.View>
+        <View style={styles.container}>
+            <View style={styles.bubble}>
+                <Text numberOfLines={4} style={styles.text}>{text}</Text>
+            </View>
+            <View style={styles.tailAnchor}>
+                <View style={styles.tailMain} />
+                <View style={styles.tailDot} />
+            </View>
+        </View>
     );
-};
+}
 
 const styles = StyleSheet.create({
     container: {
         alignItems: 'center',
         zIndex: 100,
+        overflow: 'visible',
     },
     bubble: {
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        borderRadius: 18,
-        maxWidth: 120, // Increased slightly
-        minWidth: 40,
+        paddingHorizontal: 24,
+        paddingVertical: 18,
+        borderRadius: 28,
+        maxWidth: 176,
+        minWidth: 116,
         alignItems: 'center',
         justifyContent: 'center',
-        borderWidth: 1.5, // Thicker border for better contrast
-        borderColor: 'rgba(255,255,255,0.15)',
+        backgroundColor: '#2f3138',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.08)',
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 0.4,
-        shadowRadius: 8,
-        elevation: 10,
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.28,
+        shadowRadius: 18,
+        elevation: 12,
     },
     text: {
         color: '#fff',
-        fontSize: 11,
+        fontSize: 14,
+        lineHeight: 18,
         fontWeight: '500',
         textAlign: 'center',
     },
-    tail: {
+    tailAnchor: {
         position: 'absolute',
-        bottom: -6,
-        width: 12,
-        height: 12,
-        backgroundColor: '#262626',
-        transform: [{ rotate: '45deg' }],
-        borderRightWidth: 1,
-        borderBottomWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
+        left: 22,
+        bottom: -14,
+        width: 26,
+        height: 26,
+        overflow: 'visible',
+    },
+    tailMain: {
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        width: 18,
+        height: 18,
+        borderBottomLeftRadius: 16,
+        borderBottomRightRadius: 14,
+        borderTopLeftRadius: 2,
+        borderTopRightRadius: 12,
+        backgroundColor: '#2f3138',
+        transform: [{ rotate: '8deg' }],
+    },
+    tailDot: {
+        position: 'absolute',
+        left: 8,
+        top: 20,
+        width: 10,
+        height: 10,
+        borderRadius: 999,
+        backgroundColor: '#2f3138',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.04)',
     },
 });

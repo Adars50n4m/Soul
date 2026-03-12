@@ -25,28 +25,47 @@ export const IS_DEV = __DEV__;
 const DEFAULT_TUNNEL = 'http://localhost:3000';
 let resolvedServerUrl = getEnvVar('EXPO_PUBLIC_SERVER_URL', DEFAULT_TUNNEL);
 
+const extractExpoDevHost = (): string | null => {
+  const candidates = [
+    Constants.expoConfig?.hostUri,
+    (Constants.expoConfig as any)?.debuggerHost,
+    (Constants as any).expoGoConfig?.debuggerHost,
+    (Constants as any).manifest2?.extra?.expoClient?.hostUri,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      return candidate.split(':')[0];
+    }
+  }
+
+  return null;
+};
+
 // In dev mode, intelligently resolve the server URL to the developer's machine.
 if (IS_DEV) {
-  // hostUri is available in Expo Go and dev clients to point back to the dev machine.
-  const debuggerHost = Constants.expoConfig?.hostUri || (Constants.expoConfig as any)?.debuggerHost;
+  const debugHost = extractExpoDevHost();
   
-  if (debuggerHost) {
-    const host = debuggerHost.split(':')[0];
-    const localUrl = `http://${host}:3000`;
+  if (debugHost) {
+    const localUrl = `http://${debugHost}:3000`;
 
     // Overwrite localhost/10.0.2.2 with the real host IP so physical devices can reach it.
     if (resolvedServerUrl.includes('localhost') || resolvedServerUrl.includes('10.0.2.2')) {
-      console.log(`[Env] Resolving SERVER_URL for ${Platform.OS}: ${localUrl} (from debuggerHost)`);
+      console.log(`[Env] Resolving SERVER_URL for ${Platform.OS}: ${localUrl} (from Expo dev host)`);
       resolvedServerUrl = localUrl;
     }
   } else {
     // Fallback for older Expo versions or when the debugger host is not available.
     if (resolvedServerUrl.includes('localhost') || resolvedServerUrl.includes('10.0.2.2')) {
-      // Physical iOS devices will FAIL with localhost. 
-      // We log a warning to nudge the user toward using a tunnel or their IP.
-      resolvedServerUrl = Platform.OS === 'android' ? 'http://10.0.2.2:3000' : 'http://localhost:3000';
-      if (Platform.OS === 'ios' && !Constants.appOwnership) { // appOwnership missing usually means physical/standalone
-         console.warn('[Env] WARNING: Using localhost on iOS physical device will likely fail. Use a tunnel (localtunnel/ngrok).');
+      // EMERGENCY FALLBACK: If we can't find the debug host, but we're in DEV, 
+      // we'll try to use a common pattern or a provided env var.
+      const fallbackIp = getEnvVar('EXPO_PUBLIC_HOST_IP', null);
+      if (fallbackIp) {
+        resolvedServerUrl = `http://${fallbackIp}:3000`;
+        console.log(`[Env] Using EXPO_PUBLIC_HOST_IP: ${resolvedServerUrl}`);
+      } else {
+        resolvedServerUrl = Platform.OS === 'android' ? 'http://10.0.2.2:3000' : 'http://localhost:3000';
+        console.warn('[Env] No Expo dev host found. If you are on a physical device, set EXPO_PUBLIC_SERVER_URL to your LAN IP or tunnel URL.');
       }
     }
   }

@@ -104,7 +104,6 @@ export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalP
                                     maxLength={60}
                                     selectionColor={activeTheme.primary}
                                 />
-                                <View style={styles.bubbleTail} />
                             </Animated.View>
 
                             <Image 
@@ -203,14 +202,15 @@ const styles = StyleSheet.create({
     },
     previewBubble: {
         backgroundColor: '#262626',
-        padding: 20,
-        paddingHorizontal: 24,
-        borderRadius: 30,
+        paddingVertical: 28,
+        paddingHorizontal: 32,
+        borderRadius: 38,
         marginBottom: 20,
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.1)',
         alignItems: 'center',
         position: 'relative',
+        minWidth: 210,
     },
     input: {
         color: '#fff',
@@ -218,18 +218,6 @@ const styles = StyleSheet.create({
         fontWeight: '500',
         textAlign: 'center',
         width: '100%',
-    },
-    bubbleTail: {
-        position: 'absolute',
-        bottom: -10,
-        width: 20,
-        height: 20,
-        backgroundColor: '#262626',
-        transform: [{ rotate: '45deg' }],
-        borderRightWidth: 1,
-        borderBottomWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
-        zIndex: -1,
     },
     hintText: {
         color: 'rgba(255,255,255,0.4)',

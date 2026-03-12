@@ -99,7 +99,9 @@ class WebRTCService {
     private isInitiator: boolean = false;
     private partnerHasAccepted: boolean = false;
     private pendingCandidates: RTCIceCandidate[] = [];
+    private pendingCandidatesMutex: boolean = false; // FIX #2: Prevent race condition in ICE candidate processing
     private mediaStreamAttempted: boolean = false;
+    private readonly MAX_PENDING_CANDIDATES = 50; // FIX #1: Limit pending candidates to prevent memory leak
 
     // Recovery tracking
     private reconnectAttempts: number = 0;
@@ -311,6 +313,11 @@ class WebRTCService {
                             if (this.peerConnection?.remoteDescription) {
                                 await this.peerConnection.addIceCandidate(candidate);
                             } else {
+                                // FIX #1: Limit pending candidates to prevent memory leak
+                                if (this.pendingCandidates.length >= this.MAX_PENDING_CANDIDATES) {
+                                    console.warn('[WebRTCService] ICE candidate queue full, dropping oldest candidate');
+                                    this.pendingCandidates.shift();
+                                }
                                 this.pendingCandidates.push(candidate);
                             }
                         } catch (e) {
@@ -543,6 +550,8 @@ class WebRTCService {
                 this.remoteStream = event.streams[0];
                 this.callbacks?.onRemoteStream(this.remoteStream);
                 this.setState('connected');
+                // FIX #13: Verify DTLS/SRTP encryption is established
+                this.verifyEncryption();
             }
         });
 
@@ -685,18 +694,27 @@ class WebRTCService {
     }
 
     private async processPendingCandidates(): Promise<void> {
-        if (!this.peerConnection) return;
+        // FIX #2: Prevent race condition with mutex
+        if (this.pendingCandidatesMutex || !this.peerConnection) return;
+        this.pendingCandidatesMutex = true;
 
-        console.log(`Processing ${this.pendingCandidates.length} pending ICE candidates`);
+        try {
+            console.log(`Processing ${this.pendingCandidates.length} pending ICE candidates`);
 
-        for (const candidate of this.pendingCandidates) {
-            try {
-                await this.peerConnection.addIceCandidate(candidate);
-            } catch (error) {
-                console.warn('Failed to add pending ICE candidate:', error);
+            // Process all candidates and clear the queue
+            const candidates = [...this.pendingCandidates];
+            this.pendingCandidates = [];
+
+            for (const candidate of candidates) {
+                try {
+                    await this.peerConnection.addIceCandidate(candidate);
+                } catch (error) {
+                    console.warn('Failed to add pending ICE candidate:', error);
+                }
             }
+        } finally {
+            this.pendingCandidatesMutex = false;
         }
-        this.pendingCandidates = [];
     }
 
     private setState(state: CallState): void {
@@ -718,6 +736,26 @@ class WebRTCService {
                     this.callbacks?.onError('Call connection timed out. Please check your network.');
                 }
             }, 20000);
+        }
+    }
+
+    // FIX #13: Verify DTLS/SRTP encryption is established
+    private async verifyEncryption(): Promise<void> {
+        if (!this.peerConnection) return;
+
+        try {
+            const senders = this.peerConnection.getSenders();
+            for (const sender of senders) {
+                if (sender.transport) {
+                    const state = sender.transport.state;
+                    console.log('[WebRTCService] Sender transport state:', state);
+                    if (state !== 'connected' && state !== 'new') {
+                        console.warn('[WebRTCService] ⚠️ Encryption may not be properly established');
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('[WebRTCService] Failed to verify encryption:', error);
         }
     }
 

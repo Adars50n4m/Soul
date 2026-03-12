@@ -44,6 +44,7 @@ module.exports = (() => {
     // Custom resolver to ensure WebSocket modules are resolved correctly
     config.resolver = {
         ...config.resolver,
+        assetExts: [...(config.resolver?.assetExts || []), 'lottie'],
         // Ensure proper module resolution for WebSocket-related packages
         extraNodeModules: {
             ...config.resolver?.extraNodeModules,

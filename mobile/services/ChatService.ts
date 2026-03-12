@@ -24,7 +24,6 @@
 import { supabase } from '../config/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import * as Crypto from 'expo-crypto';
-import NetInfo from '@react-native-community/netinfo';
 import { SUPABASE_ENDPOINT } from '../config/api';
 import { offlineService, type QueuedMessage, type MessageStatus } from './LocalDBService';
 import { storageService } from './StorageService';
@@ -63,6 +62,10 @@ type UploadProgressCallback = (messageId: string, progress: number) => void;
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MAX_RETRY_COUNT      = 5;
+const MAX_TOTAL_RETRIES    = 10;
+const MAX_REALTIME_RETRIES = 5;
+const POLLING_INTERVAL_NORMAL = 30000;
+const POLLING_INTERVAL_FALLBACK = 12000;
 const INITIAL_RETRY_DELAY  = 1_000;   // 1 second
 const MAX_RETRY_DELAY      = 60_000;  // 1 minute cap
 
@@ -70,7 +73,9 @@ const MAX_RETRY_DELAY      = 60_000;  // 1 minute cap
 //   - ACTIVE: used when there ARE pending messages  (check often)
 //   - IDLE:   used when queue is empty              (save battery)
 const ACTIVE_POLL_INTERVAL = 2_000;   // 2 seconds  [FIX for BUG 4]
-const IDLE_POLL_INTERVAL   = 15_000;  // 15 seconds [FIX for BUG 4]
+const IDLE_POLL_INTERVAL   = 3_000;   // 3 seconds - faster fallback when realtime fails
+const REALTIME_POLL_INTERVAL = 30_000; // 30 seconds - slower when realtime works (backup only)
+const MESSAGE_POLL_INTERVAL = 3_000; // Faster open-chat fallback while realtime is disabled
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CHAT SERVICE
@@ -86,18 +91,19 @@ class ChatService {
   private onStatusUpdate:       StatusCallback        | null = null;
   private onNetworkStatusChange:NetworkStatusCallback | null = null;
   private onUploadProgressCb:   UploadProgressCallback| null = null;
+  private onAcknowledgment:      ((messageId: string, status: 'delivered' | 'read', timestamp: string) => void) | null = null;
 
   private isInitialized      = false;
   private isDeviceOnline     = true;   // Physical network connection
   private isServerReachable  = true;   // Can we actually ping our server?
   private isRealtimeConnected = false;  // WebSocket channel status
-  private isQueuePaused      = false;
 
   private get isActuallyOnline(): boolean {
     return this.isDeviceOnline && this.isServerReachable;
   }
   private realtimeRetryCount:   number = 0;
   private realtimeRetryTimer:   ReturnType<typeof setTimeout> | null = null;
+  private isReconnecting:       boolean = false; // Guard against race conditions
 
   // Queue management
   private processQueueTimer:    ReturnType<typeof setInterval> | null = null;
@@ -129,7 +135,8 @@ class ChatService {
     onMessage: MessageCallback,
     onStatus: StatusCallback,
     onNetworkStatus?: NetworkStatusCallback,
-    onUploadProgress?: UploadProgressCallback
+    onUploadProgress?: UploadProgressCallback,
+    onAcknowledgment?: (messageId: string, status: 'delivered' | 'read', timestamp: string) => void
   ): Promise<void> {
     // Idempotent — don't re-subscribe if already on this exact chat
     if (this.isInitialized && this.userId === userId && this.partnerId === partnerId) {
@@ -146,21 +153,45 @@ class ChatService {
     this.onNewMessage          = onMessage;
     this.onStatusUpdate        = onStatus;
     this.onNetworkStatusChange = onNetworkStatus ?? null;
+    this.onUploadProgressCb    = onUploadProgress ?? null;
+    this.onAcknowledgment      = onAcknowledgment ?? null;
+
+    this.isInitialized         = true; // MUST be true before polling/sync starts
 
     await this.setupNetworkListener();
     await this.fetchMissedMessages();
-    this.subscribeToRealtime();
+    
+    // Attempt Realtime subscription
+    await this.subscribeToRealtime();
     this.startMessagePolling();
   }
 
+  private isRealtimeConnecting: boolean = false;
+
   // ── PRIVATE: subscribeToRealtime() ──────────────────────────────────────
-  private subscribeToRealtime(): void {
+  private async subscribeToRealtime(): Promise<void> {
     if (!this.userId) return;
+    if (this.isRealtimeConnecting) {
+        console.log('[ChatService] subscribeToRealtime skipped: already connecting');
+        return;
+    }
+
+    this.isRealtimeConnecting = true;
 
     // Each user gets their own channel so filters work correctly
     const channelName = `chat_${this.userId}`;
+
+    // Clean up existing channel first
+    if (this.channel) {
+      try {
+        await supabase.removeChannel(this.channel);
+      } catch (e) {}
+      this.channel = null;
+    }
+
     this.channel = supabase.channel(channelName);
 
+    // FIX: Remove filters to avoid binding mismatch - filter in callback instead
     this.channel
       // ── New message arriving FOR ME ──────────────────────────────────────
       .on(
@@ -169,13 +200,12 @@ class ChatService {
           event:  'INSERT',
           schema: 'public',
           table:  'messages',
-          // [HARDENING] Removing filter=receiver=eq.X to avoid binding mismatch.
-          // We filter locally in the callback instead.
+          // No filter - we check in callback
         },
         async (payload) => {
           const incoming = this.mapDbRowToChatMessage(payload.new);
-          
-          // Verify it's actually for ME
+
+          // Filter: only process messages sent TO me
           if (incoming.receiver_id !== this.userId) return;
 
           // WhatsApp rule: ALWAYS write to SQLite before touching the UI
@@ -205,11 +235,11 @@ class ChatService {
           event:  'UPDATE',
           schema: 'public',
           table:  'messages',
-          // Removing filter to avoid binding mismatch. Local filter below.
+          // No filter - we check in callback
         },
         async (payload) => {
           const updated = payload.new as any;
-          
+
           // Verify I am the sender of this message
           if (updated.sender !== this.userId) return;
           if (updated.status) {
@@ -219,13 +249,22 @@ class ChatService {
               updated.status as MessageStatus
             );
             this.onStatusUpdate?.(updated.id.toString(), updated.status);
+
+            // FIX #16: Notify acknowledgment callback for delivered/read
+            if (updated.status === 'delivered' || updated.status === 'read') {
+              const timestamp = updated.status === 'delivered'
+                ? (updated.delivered_at || new Date().toISOString())
+                : (updated.read_at || new Date().toISOString());
+              this.onAcknowledgment?.(updated.id.toString(), updated.status, timestamp);
+            }
           }
         }
       )
 
       .subscribe((status, err) => {
+        this.isRealtimeConnecting = false;
+
         if (status === 'SUBSCRIBED') {
-          this.isInitialized = true;
           this.isRealtimeConnected = true;
           this.realtimeRetryCount = 0;
           this.syncConnectivityState();
@@ -238,7 +277,10 @@ class ChatService {
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
           this.isRealtimeConnected = false;
           console.warn(`[ChatService] Realtime status: ${status} for channel: ${channelName}. Attempting reconnect...`);
+          
           this.syncConnectivityState();
+          
+          // Fix: Avoid calling async function without floating promise handling
           this.handleRealtimeReconnect();
         }
         if (err) {
@@ -252,22 +294,48 @@ class ChatService {
   }
 
   private handleRealtimeReconnect() {
-    if (this.realtimeRetryTimer) clearTimeout(this.realtimeRetryTimer);
-    
+    // Guard: prevent multiple concurrent reconnect attempts
+    if (this.isReconnecting) {
+      console.log('[ChatService] Realtime reconnect skipped: already reconnecting');
+      return;
+    }
+
+    // Max retry cap — polling fallback already handles missed messages
+    if (this.realtimeRetryCount >= MAX_REALTIME_RETRIES) {
+      console.warn(`[ChatService] Realtime max retries reached (${MAX_REALTIME_RETRIES}). Relying on polling fallback.`);
+      this.isRealtimeConnected = false;
+      this.isReconnecting = false;
+      
+      // If we hit the cap, ensure polling is definitely running at fallback speed
+      this.startMessagePolling();
+      return;
+    }
+
+    this.isReconnecting = true;
+
+    if (this.realtimeRetryTimer) {
+      clearTimeout(this.realtimeRetryTimer);
+      this.realtimeRetryTimer = null;
+    }
+
     // [FIX] Clean up existing channel completely before retrying to avoid multiple active watchers
     if (this.channel) {
         console.log('[ChatService] Removing old channel before reconnect');
-        supabase.removeChannel(this.channel);
+        const oldChannel = this.channel;
         this.channel = null;
+        try {
+          supabase.removeChannel(oldChannel).catch(() => {});
+        } catch (e) {}
     }
 
-    // Exponential backoff: 2s, 4s, 8s, 16s, max 30s
-    const delay = Math.min(Math.pow(2, this.realtimeRetryCount) * 1000, 30_000);
+    // Exponential backoff: 2s, 4s, 8s... max 30s
+    const delay = Math.min(Math.pow(2, this.realtimeRetryCount) * 1000, 30000);
     this.realtimeRetryCount++;
 
-    console.log(`[ChatService] Reconnecting Realtime in ${delay}ms (attempt ${this.realtimeRetryCount})...`);
-    this.realtimeRetryTimer = setTimeout(() => {
-      this.subscribeToRealtime();
+    console.log(`[ChatService] Reconnecting Realtime in ${delay}ms (attempt ${this.realtimeRetryCount}/${MAX_REALTIME_RETRIES})...`);
+    this.realtimeRetryTimer = setTimeout(async () => {
+      this.isReconnecting = false; // Reset BEFORE subscribing
+      await this.subscribeToRealtime();
     }, delay);
   }
 
@@ -288,8 +356,19 @@ class ChatService {
 
     const handleAppState = (nextState: AppStateStatus) => {
       if (nextState === 'active') {
-        console.log('[ChatService] App foregrounded — checking connectivity');
+        console.log('[ChatService] App foregrounded — checking connectivity and ensuring realtime is alive');
         this.checkConnectivity();
+        
+        // Ensure realtime subscription is restarted if it dropped
+        if (!this.isRealtimeConnected && this.isInitialized) {
+          console.log('[ChatService] Foregrounded - using polling fallback instead of realtime');
+          // Realtime disabled - using polling
+          // this.realtimeRetryCount = 0;
+          // this.subscribeToRealtime();
+        } else if (this.isInitialized) {
+          // Even if we believe it's connected, run fetchMissedMessages to sync any delta
+          this.fetchMissedMessages();
+        }
       }
     };
 
@@ -324,6 +403,15 @@ class ChatService {
       // If we got ANY response (even opaque), the server is reachable
       this.isDeviceOnline = true;
       this.isServerReachable = true;
+      
+      // Reconnect realtime if it dropped while foregrounded
+      if (!this.isRealtimeConnected && this.isInitialized) {
+        console.log('[ChatService] checkConnectivity: using polling fallback instead of realtime');
+        // Realtime disabled - using polling
+        // this.realtimeRetryCount = 0;
+        // this.subscribeToRealtime();
+      }
+      
       this.syncConnectivityState();
       this.startQueueProcessing();
       return true;
@@ -369,20 +457,6 @@ class ChatService {
 
     // Run once immediately when we (re-)connect
     this.processQueue();
-
-    // Then schedule repeating — interval adapts to queue size [FIX BUG 4]
-    this.scheduleNextPoll();
-  }
-
-  private scheduleNextPoll(): void {
-    if (this.processQueueTimer) {
-      clearTimeout(this.processQueueTimer);
-      this.processQueueTimer = null;
-    }
-    if (!this.isActuallyOnline) return;
-
-    // Will be called after processQueue() finishes each cycle
-    // (see processQueue's finally block)
   }
 
   private stopQueueProcessing(): void {
@@ -395,21 +469,34 @@ class ChatService {
   }
 
   private isProcessingQueue:          boolean = false;
+  private hasPendingProcessQueueTrigger: boolean = false;
 
   private async processQueue(): Promise<void> {
-    if (!this.isActuallyOnline) return;
-    if (this.isProcessingQueue) return;
+    if (!this.isActuallyOnline) {
+      console.log('[ChatService] processQueue skipped: not online');
+      return;
+    }
+    
+    if (this.isProcessingQueue) {
+      // Another message arrived while we were processing. Queue it to run immediately after.
+      this.hasPendingProcessQueueTrigger = true;
+      return;
+    }
 
     this.isProcessingQueue = true;
+    this.hasPendingProcessQueueTrigger = false;
 
     try {
       const pendingMessages = await offlineService.getPendingMessages();
+      console.log('[ChatService] processQueue: found', pendingMessages.length, 'pending messages');
 
-      // [FIX BUG 4] If queue is empty, poll slowly to save battery.
-      //             If there are pending messages, poll aggressively.
+      // If realtime is working, poll less frequently. If not, poll more aggressively.
+      const pollInterval = this.isRealtimeConnected ? REALTIME_POLL_INTERVAL : IDLE_POLL_INTERVAL;
+
+      // If queue has pending messages, poll aggressively regardless of realtime status.
       const nextInterval = pendingMessages.length > 0
         ? ACTIVE_POLL_INTERVAL
-        : IDLE_POLL_INTERVAL;
+        : pollInterval;
 
       const now = Date.now();
 
@@ -421,6 +508,14 @@ class ChatService {
         // it means we caught it on a reconnect. We should reset its retry state and treat it as 'pending'
         // so it has a fresh chance to send.
         if (message.status === 'failed') {
+          if (message.retryCount >= MAX_TOTAL_RETRIES) {
+            console.warn(
+              `[ChatService] Giving up on message ${message.id} after ${message.retryCount} total attempts`
+            );
+            this.onStatusUpdate?.(message.id, 'failed');
+            continue;
+          }
+
           console.log(`[ChatService] Auto-retrying previously failed message: ${message.id}`);
           message.status = 'pending';
           message.retryCount = 0;
@@ -466,15 +561,21 @@ class ChatService {
 
     } catch (error) {
       console.error('[ChatService] processQueue error:', error);
-      // Still schedule next poll even after an unexpected error
+      // Still schedule next poll even after an unexpected error - use slower interval
       if (this.isActuallyOnline) {
         this.processQueueTimer = setTimeout(
           () => this.processQueue(),
-          IDLE_POLL_INTERVAL
+          REALTIME_POLL_INTERVAL
         ) as any;
       }
     } finally {
       this.isProcessingQueue = false;
+      
+      // If someone hit send while we were uploading/inserting, trigger instantly
+      if (this.hasPendingProcessQueueTrigger && this.isActuallyOnline) {
+         console.log('[ChatService] Triggering queued processQueue immediately');
+         this.processQueue();
+      }
     }
   }
 
@@ -521,7 +622,7 @@ class ChatService {
       const { data, error } = await supabase
         .from('messages')
         .insert({
-          id:            message.id,       // Provide our client-side UUID for idempotency
+          id:            message.id,       // Use our client-side UUID
           sender:        this.userId,
           receiver:      message.chatId,
           text:          message.text,
@@ -535,7 +636,10 @@ class ChatService {
         .select()
         .single();
 
-      if (error) throw error;
+      if (error) {
+        console.error('[ChatService] INSERT error:', error);
+        throw error;
+      }
       this.syncConnected();
 
       const serverId = data.id.toString();
@@ -605,14 +709,33 @@ class ChatService {
           `and(sender.eq.${this.partnerId},receiver.eq.${this.userId}),` +
           `and(sender.eq.${this.userId},receiver.eq.${this.partnerId})`
         )
-        .order('created_at', { ascending: true })
+        .order('created_at', { ascending: false })
         .limit(50);
 
-      if (error || !data) return;
+      if (error || !data) {
+        // Even if empty, set the poll time so polling can start
+        this.lastPollAt = new Date().toISOString();
+        return;
+      }
       this.syncConnected();
 
-      for (const row of data) {
+      // Initialize poll time based on the most recent fetch
+      this.lastPollAt = new Date().toISOString();
+
+      // Reverse so we process oldest-to-newest locally
+      const recentMessages = data.reverse();
+
+      for (const row of recentMessages) {
         const msg = this.mapDbRowToChatMessage(row);
+        
+        // CHECK 1: Avoid re-notifying UI for a message we just sent ourselves
+        if (msg.sender_id === this.userId && this.sendingIds.has(msg.id)) {
+            continue;
+        }
+
+        const existing = await offlineService.getMessageById(msg.id);
+        
+        // Save to DB (handles both new insert and ON CONFLICT update status)
         await offlineService.saveMessage(
           msg.sender_id === this.userId ? msg.receiver_id : msg.sender_id,
           {
@@ -625,7 +748,11 @@ class ChatService {
             replyTo:   msg.reply_to,
           }
         );
-        this.onNewMessage?.(msg);
+
+        if (!existing) {
+          // Only notify UI for brand new messages
+          this.onNewMessage?.(msg);
+        }
       }
     } catch (e) {
       console.warn('[ChatService] fetchMissedMessages error:', e);
@@ -646,7 +773,12 @@ class ChatService {
     localUri?: string
   ): Promise<ChatMessage | null> {
     const targetChatId = chatId || this.partnerId;
-    if (!this.userId || !targetChatId) return null;
+    if (!this.userId || !targetChatId) {
+      console.warn('[ChatService] sendMessage failed: userId or targetChatId is null', { userId: this.userId, targetChatId });
+      return null;
+    }
+
+    console.log('[ChatService] sendMessage:', { targetChatId, textLength: text?.length, isOnline: this.isActuallyOnline });
 
     const messageId = Crypto.randomUUID();
     const timestamp = new Date().toISOString();
@@ -667,6 +799,14 @@ class ChatService {
     // Step 1: SQLite first
     await offlineService.savePendingMessage(targetChatId, queuedMsg);
 
+    // FIX #17: Store idempotency key for offline deduplication
+    const idempotencyKey = `${this.userId}:${targetChatId}:${Date.now()}:${Crypto.randomUUID()}`;
+    try {
+      await offlineService.updateMessageIdempotencyKey(messageId, idempotencyKey);
+    } catch (e: any) {
+      console.warn('[ChatService] Could not store idempotency key:', e.message);
+    }
+
     const uiMessage: ChatMessage = {
       id:          messageId,
       sender_id:   this.userId,
@@ -680,6 +820,7 @@ class ChatService {
     };
 
     // Step 2: Render
+    console.log('[ChatService] Calling onNewMessage callback with:', uiMessage.id, uiMessage.text?.substring(0, 20));
     this.onNewMessage?.(uiMessage);
 
     // Step 3: Sync (non-blocking — don't await, let the queue handle it)
@@ -788,22 +929,37 @@ class ChatService {
   // When Supabase Realtime WebSocket is blocked by ISP (Jio/Airtel),
   // poll for new messages every 10 seconds via REST (goes through Cloudflare proxy).
   private startMessagePolling(): void {
-    if (this.pollTimer) return;
-    this.lastPollAt = new Date().toISOString();
-    // 30s interval — less aggressive, avoids hammering RCTNetworking
+    // If polling already exists, check if we need to adjust the frequency
+    const currentFrequency = this.isRealtimeConnected ? POLLING_INTERVAL_NORMAL : POLLING_INTERVAL_FALLBACK;
+    
+    if (this.pollTimer) {
+        // If the frequency hasn't changed, we're good
+        return;
+    }
+
+    if (!this.lastPollAt) {
+        this.lastPollAt = new Date().toISOString();
+    }
+
+    console.log(`[ChatService] Starting polling fallback (Interval: ${currentFrequency}ms)`);
     this.pollTimer = setInterval(() => {
       // Only poll when app is in foreground to avoid RCTNetworking crashes
       if (AppState.currentState === 'active') {
         this.pollForNewMessages();
       }
-    }, 30_000) as any;
+    }, currentFrequency) as any;
 
-    // Resume poll immediately when app comes back to foreground
-    this.appStateListener = AppState.addEventListener('change', (state) => {
-      if (state === 'active') {
-        this.pollForNewMessages();
-      }
-    });
+    if (!this.appStateListener) {
+      this.appStateListener = AppState.addEventListener('change', (state) => {
+        if (state === 'active') {
+          // Run an immediate poll when waking up to catch up
+          this.pollForNewMessages();
+          
+          // Also check connectivity immediately
+          this.checkConnectivity();
+        }
+      });
+    }
   }
 
   private stopMessagePolling(): void {
@@ -825,7 +981,6 @@ class ChatService {
     this.isPolling = true;
 
     const since = this.lastPollAt;
-    this.lastPollAt = new Date().toISOString();
     try {
       const { data, error } = await supabase
         .from('messages')
@@ -837,10 +992,19 @@ class ChatService {
         .gt('created_at', since)
         .order('created_at', { ascending: true });
 
-      if (error || !data || data.length === 0) return;
+      if (error) return;
+
+      const nextPollAt = data && data.length > 0
+        ? (data[data.length - 1].created_at || new Date().toISOString())
+        : new Date().toISOString();
+
+      this.lastPollAt = nextPollAt;
+
+      if (!data || data.length === 0) return;
 
       for (const row of data) {
         const msg = this.mapDbRowToChatMessage(row);
+        const existing = await offlineService.getMessageById(msg.id);
         await offlineService.saveMessage(
           msg.sender_id === this.userId ? msg.receiver_id : msg.sender_id,
           {
@@ -853,7 +1017,9 @@ class ChatService {
             replyTo:   msg.reply_to,
           }
         );
-        this.onNewMessage?.(msg);
+        if (!existing) {
+          this.onNewMessage?.(msg);
+        }
         if (msg.sender_id === this.partnerId) {
           this.updateMessageStatusOnServer(msg.id, 'delivered');
         }
@@ -877,8 +1043,11 @@ class ChatService {
     }
 
     if (this.channel) {
-      this.channel.unsubscribe();
+      const oldChannel = this.channel;
       this.channel = null;
+      try {
+        supabase.removeChannel(oldChannel).catch(() => {});
+      } catch (e) {}
     }
 
     this.isInitialized = false;
@@ -887,6 +1056,18 @@ class ChatService {
     this.isDeviceOnline = true;
     this.isServerReachable = true;
     this.lastPollAt    = null;
+
+    this.realtimeRetryCount = 0;
+    this.isReconnecting = false;
+    this.isRealtimeConnecting = false;
+    
+    if (this.realtimeRetryTimer) {
+      clearTimeout(this.realtimeRetryTimer);
+      this.realtimeRetryTimer = null;
+    }
+    
+    // FIX #6: Clear sent message IDs to prevent memory leak
+    this.sendingIds.clear();
 
     console.log('[ChatService] Cleaned up.');
   }

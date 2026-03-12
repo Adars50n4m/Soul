@@ -156,9 +156,24 @@ export default function CallScreen() {
         }
     }, [toggleVideo]);
 
-    const handleToggleSpeaker = useCallback(() => {
-        setIsSpeaker(prev => !prev);
-    }, []);
+    const handleToggleSpeaker = useCallback(async () => {
+        const next = !isSpeaker;
+        setIsSpeaker(next);
+        try {
+            await ExpoAudio.setAudioModeAsync({
+                allowsRecordingIOS: true,
+                playsInSilentModeIOS: true,
+                staysActiveInBackground: true,
+                interruptionModeIOS: 1,
+                shouldDuckAndroid: true,
+                interruptionModeAndroid: 1,
+                // Android: false = speaker out, true = earpiece
+                playThroughEarpieceAndroid: !next,
+            });
+        } catch (e) {
+            console.warn('[CallScreen] Failed to toggle speaker:', e);
+        }
+    }, [isSpeaker]);
 
     const handleSwitchCamera = useCallback(() => {
         if (webRTCService) {
@@ -370,7 +385,13 @@ export default function CallScreen() {
     useEffect(() => {
         if (!activeCall) {
             console.log('[CallScreen] ⚠️ activeCall became null — navigating back');
-            if (navigation.canGoBack()) navigation.goBack();
+            // FIX: Navigate back or to tabs when call ends to prevent white screen
+            if (navigation.canGoBack()) {
+                navigation.goBack();
+            } else {
+                // Fallback: navigate to home/tabs if no back stack
+                router.replace('/(tabs)');
+            }
             return;
         }
 
@@ -388,7 +409,7 @@ export default function CallScreen() {
                 console.log('Failed to set PIP params:', e);
             }
         }
-    }, [activeCall?.isAccepted, activeCall?.type, width]);
+    }, [activeCall, navigation, router, width]);
 
     // Timer - only start if call is connected AND accepted
     useEffect(() => {
@@ -460,12 +481,13 @@ export default function CallScreen() {
 
 
 
+    // FIX: Prevent white screen by navigating away when call ends before rendering
     if (!activeCall || !contact) {
         return (
-            <View style={[styles.container, { backgroundColor: activeTheme?.bg || '#000', justifyContent: 'center', alignItems: 'center' }]}>
+            <View style={[styles.container, { backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }]}>
                 <StatusBar hidden />
                 <ActivityIndicator size="large" color="#BC002A" />
-                <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 16, marginTop: 10 }}>Initializing Call...</Text>
+                <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 16, marginTop: 10 }}>Ending Call...</Text>
             </View>
         );
     }

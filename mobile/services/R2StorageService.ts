@@ -3,6 +3,7 @@
  * Handles file uploads to Cloudflare R2 via Worker proxy
  */
 
+import * as FileSystem from 'expo-file-system';
 import { R2_CONFIG } from '../config/r2';
 import { supabase } from '../config/supabase';
 
@@ -37,8 +38,8 @@ class R2StorageService {
         console.warn(`Upload attempt ${retries} failed:`, error);
 
         if (retries >= R2_CONFIG.MAX_RETRIES) {
-          console.error('Max retries reached, falling back to data URI');
-          return this.getFallbackDataUri(uri);
+          console.warn('Max retries reached for direct R2 worker upload');
+          return null;
         }
 
         // Wait before retrying
@@ -58,7 +59,7 @@ class R2StorageService {
     folder: string
   ): Promise<string> {
     // 1. Get authentication token
-    const token = await this.getAuthToken();
+    const token = await this.getAuthToken(folder);
     if (!token) {
       throw new Error('Failed to get authentication token');
     }
@@ -68,17 +69,23 @@ class R2StorageService {
 
     // 3. Create form data
     const formData = new FormData();
+    const fileUri = this.normalizeFileUri(uri);
+    const fileInfo = await FileSystem.getInfoAsync(fileUri);
+    if (!fileInfo.exists) {
+      throw new Error(`Local file not found: ${fileUri}`);
+    }
 
-    // Read file as blob for upload
-    const response = await fetch(uri);
-    const blob = await response.blob();
-
-    formData.append('file', blob, this.getFilename(uri));
+    formData.append('file', {
+      uri: fileUri,
+      name: this.getFilename(fileUri),
+      type: contentType,
+    } as any);
     formData.append('folder', folder);
 
     // 5. Upload to Worker
+    const uploadPath = this.getUploadPath(bucket);
     const uploadResponse = await fetch(
-      `${R2_CONFIG.WORKER_URL}/upload/${bucket}`,
+      `${R2_CONFIG.WORKER_URL}${uploadPath}`,
       {
         method: 'POST',
         headers: {
@@ -108,20 +115,21 @@ class R2StorageService {
   /**
    * Get Supabase authentication token
    */
-  private async getAuthToken(): Promise<string | null> {
+  private async getAuthToken(folder?: string): Promise<string | null> {
     try {
       const { data, error } = await supabase.auth.getSession();
 
       if (error || !data.session) {
-        console.warn('No active session, using mock token for development');
-        // For development without auth, return a mock token
-        // In production, this should fail if no session exists
-        return 'mock-token-for-dev';
+        if (folder) {
+          console.warn('No active session, using dev-user token fallback');
+          return `dev-user:${folder}`;
+        }
+        return null;
       }
 
       return data.session.access_token;
     } catch (error) {
-      console.error('Error getting auth token:', error);
+      console.warn('Error getting auth token:', error);
       return null;
     }
   }
@@ -141,8 +149,20 @@ class R2StorageService {
       'mov': 'video/quicktime',
       'avi': 'video/x-msvideo',
       'mkv': 'video/x-matroska',
+      'm4a': 'audio/x-m4a',
+      'mp3': 'audio/mpeg',
+      'wav': 'audio/wav',
+      'aac': 'audio/aac',
+      'caf': 'audio/x-caf',
     };
     return types[ext] || 'application/octet-stream';
+  }
+
+  private getUploadPath(bucket: string): string {
+    if (bucket === 'avatars') return '/upload/avatar';
+    if (bucket === 'status-media') return '/upload/status';
+    if (bucket === 'chat-media') return '/upload/chat';
+    return `/upload/${bucket}`;
   }
 
   /**
@@ -160,33 +180,11 @@ class R2StorageService {
     return parts[parts.length - 1] || 'upload';
   }
 
-  /**
-   * Fallback to base64 data URI if upload fails
-   */
-  private async getFallbackDataUri(uri: string): Promise<string | null> {
-    try {
-      console.log('Using fallback data URI...');
-      const response = await fetch(uri);
-      const blob = await response.blob();
-
-      // Convert blob to base64 using FileReader
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = reader.result as string;
-          const base64Part = result.split(',')[1];
-          resolve(base64Part);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
-      const contentType = this.getContentType(uri);
-      return `data:${contentType};base64,${base64}`;
-    } catch (error) {
-      console.error('Failed to create fallback data URI:', error);
-      return null;
+  private normalizeFileUri(uri: string): string {
+    if (uri.startsWith('file://') || uri.startsWith('content://')) {
+      return uri;
     }
+    return `file://${uri}`;
   }
 
   /**

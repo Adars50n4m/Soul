@@ -836,12 +836,15 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     // Initialize Chat Service
     useEffect(() => {
+        console.log('[AppContext] chatService.initialize check:', { currentUser: !!currentUser, otherUser: !!otherUser });
         if (currentUser && otherUser) {
+            console.log('[AppContext] Calling chatService.initialize with:', currentUser.id, otherUser.id);
             chatService.initialize(
                 currentUser.id,
                 otherUser.id,
                 currentUser.name || 'Someone',
                 (incomingMessage: ChatMessage) => {
+                    console.log('[AppContext] onNewMessage callback:', incomingMessage.id, incomingMessage.text?.substring(0, 20));
                     const isFromMe = incomingMessage.sender_id === currentUser.id;
                     const partnerId = isFromMe ? incomingMessage.receiver_id : incomingMessage.sender_id;
                     const newMsg: Message = {
@@ -849,7 +852,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                         sender: isFromMe ? 'me' : 'them',
                         text: incomingMessage.text,
                         timestamp: incomingMessage.timestamp,
-                        status: isFromMe ? 'sent' : 'delivered',
+                        status: incomingMessage.status,
                         media: incomingMessage.media,
                         replyTo: incomingMessage.reply_to || undefined,
                         reactions: incomingMessage.reactions || [],
@@ -905,6 +908,21 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                        ...prev,
                        [messageId]: progress
                     }));
+                },
+                (messageId: string, status: 'delivered' | 'read', timestamp: string) => {
+                    // FIX #16: Handle message acknowledgment - update UI to show delivery/read receipts
+                    console.log(`[AppContext] Message ${messageId} ${status} at ${timestamp}`);
+                    if (otherUser) {
+                        syncSetMessages(prev => {
+                            const chatMessages = prev[otherUser.id] || [];
+                            return {
+                                ...prev,
+                                [otherUser.id]: chatMessages.map(msg =>
+                                    msg.id === messageId ? { ...msg, status } : msg
+                                )
+                            };
+                        });
+                    }
                 }
             );
 
@@ -915,7 +933,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             chatService.cleanup();
             callService.cleanup();
         };
-    }, [currentUser, otherUser]);
+    }, [currentUser?.id, currentUser?.name, otherUser?.id]);
 
     // --- REFINED DATA FETCHING ---
 

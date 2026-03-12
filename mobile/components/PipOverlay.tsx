@@ -83,11 +83,18 @@ export default function PipOverlay() {
 
     // --- LOGIC: When to show this overlay ---
     // Show if:
-    // 1. There is an active call
+    // 1. There is an active call with a valid call ID
     // 2. We are NOT on the /call screen
-    // 3. We are NOT seeing an incoming call modal elsewhere
+    // 3. The call is either accepted or it's outgoing (not incoming waiting)
     const inCallScreen = segments[0] === 'call';
-    const isVisible = activeCall && !inCallScreen && contact && (activeCall.isAccepted || !activeCall.isIncoming);
+
+    // FIX: More robust check for active call - must have callId and not be ended
+    const hasValidCall = activeCall && activeCall.callId && !activeCall.callId.includes('ended');
+
+    const isVisible = hasValidCall && !inCallScreen && contact && (activeCall.isAccepted || !activeCall.isIncoming);
+
+    // Debug log to help diagnose PiP issues
+    console.log(`[PipOverlay] visible:${isVisible} callId:${activeCall?.callId} inCallScreen:${inCallScreen} isAccepted:${activeCall?.isAccepted} isIncoming:${activeCall?.isIncoming}`);
 
     if (!isVisible) return null;
 

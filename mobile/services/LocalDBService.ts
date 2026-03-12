@@ -70,6 +70,12 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
 
       await MIGRATE_DB(db);
 
+      // FIX #6: Run integrity check after migrations to detect corruption
+      await checkDatabaseIntegrity(db);
+
+      // FIX #19: Setup periodic WAL checkpoint to prevent data loss on crash
+      setupWalCheckpoint(db);
+
       // Idempotent table creation
       await db.execAsync(`
         CREATE TABLE IF NOT EXISTS messages (
@@ -142,6 +148,42 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
   })();
 
   return _dbPromise;
+}
+
+// FIX #6: Database integrity check to detect corruption
+async function checkDatabaseIntegrity(db: SQLite.SQLiteDatabase): Promise<boolean> {
+  try {
+    const result = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check;');
+    if (result && result.integrity_check === 'ok') {
+      console.log('[SQLite] Database integrity check passed');
+      return true;
+    } else {
+      console.error('[SQLite] Database integrity check failed:', result?.integrity_check);
+      return false;
+    }
+  } catch (error) {
+    console.error('[SQLite] Failed to run integrity check:', error);
+    return false;
+  }
+}
+
+// FIX #19: Periodic WAL checkpoint to prevent data loss on crash
+let checkpointInterval: NodeJS.Timeout | null = null;
+
+function setupWalCheckpoint(db: SQLite.SQLiteDatabase): void {
+  // Run checkpoint every 30 seconds to consolidate WAL data
+  if (checkpointInterval) {
+    clearInterval(checkpointInterval);
+  }
+
+  checkpointInterval = setInterval(async () => {
+    try {
+      await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE);');
+      console.log('[SQLite] WAL checkpoint completed');
+    } catch (error) {
+      console.warn('[SQLite] WAL checkpoint failed:', error);
+    }
+  }, 30000);
 }
 
 function rowToQueuedMessage(row: any): QueuedMessage {
@@ -227,7 +269,53 @@ class OfflineService {
 
   async updateMessageStatus(messageId: string, status: MessageStatus): Promise<void> {
     const db = await getDb();
-    await db.runAsync(`UPDATE messages SET status = ? WHERE id = ?;`, [status, messageId]);
+    // FIX #16: Update delivered_at/read_at timestamps for acknowledgment tracking
+    let sql = `UPDATE messages SET status = ? WHERE id = ?;`;
+    const params: any[] = [status, messageId];
+
+    if (status === 'delivered') {
+      sql = `UPDATE messages SET status = ?, delivered_at = ? WHERE id = ?;`;
+      params[0] = status;
+      params[1] = new Date().toISOString();
+      params[2] = messageId;
+    } else if (status === 'read') {
+      sql = `UPDATE messages SET status = ?, read_at = ? WHERE id = ?;`;
+      params[0] = status;
+      params[1] = new Date().toISOString();
+      params[2] = messageId;
+    }
+
+    await db.runAsync(sql, params);
+  }
+
+  // FIX #16: Get message acknowledgment timestamps
+  async getMessageAcknowledgments(messageId: string): Promise<{ deliveredAt?: string; readAt?: string } | null> {
+    const db = await getDb();
+    const row = await db.getFirstAsync<{ delivered_at: string; read_at: string }>(
+      `SELECT delivered_at, read_at FROM messages WHERE id = ? LIMIT 1;`,
+      [messageId]
+    );
+    if (!row) return null;
+    return {
+      deliveredAt: row.delivered_at,
+      readAt: row.read_at,
+    };
+  }
+
+  // FIX #17: Check for duplicate message using idempotency key
+  async findMessageByIdempotencyKey(key: string): Promise<string | null> {
+    const db = await getDb();
+    const row = await db.getFirstAsync<{ id: string }>(
+      `SELECT id FROM messages WHERE idempotency_key = ? LIMIT 1;`,
+      [key]
+    );
+    return row?.id ?? null;
+  }
+
+  // FIX #17: Update message with idempotency key
+  async updateMessageIdempotencyKey(messageId: string, key: string): Promise<void> {
+    const db = await getDb();
+    await db.runAsync(`UPDATE messages SET idempotency_key = ? WHERE id = ?;`, [key, messageId]);
   }
 
   async updateMessageMediaUrl(messageId: string, url: string): Promise<void> {
@@ -244,20 +332,32 @@ class OfflineService {
     const db = await getDb();
     if (oldId === newId) return;
 
-    // Check if newId already exists (race condition with Realtime broadcast)
-    const existing = await db.getFirstAsync(`SELECT id, local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [newId]) as any;
-    
-    if (existing) {
-        // Realtime won the race. We need to merge our local metadata (local_file_uri) into the newId row.
-        const oldRow = await db.getFirstAsync(`SELECT local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [oldId]) as any;
-        if (oldRow?.local_file_uri) {
-            await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [oldRow.local_file_uri, newId]);
+    try {
+        // Check if newId already exists (race condition with Realtime broadcast)
+        const existing = await db.getFirstAsync(`SELECT id, local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [newId]) as any;
+        
+        if (existing) {
+            console.log(`[LocalDBService] 🔄 Race: serverId ${newId} already exists. Merging metadata...`);
+            // Realtime won the race. We need to merge our local metadata (local_file_uri) into the newId row.
+            const oldRow = await db.getFirstAsync(`SELECT local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [oldId]) as any;
+            if (oldRow?.local_file_uri) {
+                await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [oldRow.local_file_uri, newId]);
+            }
+            // Delete the temp entry since the real one exists
+            await db.runAsync(`DELETE FROM messages WHERE id = ?;`, [oldId]);
+            console.log(`[LocalDBService] ✅ Merge complete for ${newId}`);
+        } else {
+            // Normal case: swap the ID
+            await db.runAsync(`UPDATE messages SET id = ? WHERE id = ?;`, [newId, oldId]);
+            console.log(`[LocalDBService] ✅ Swapped temp ID ${oldId} for server ID ${newId}`);
         }
-        // Delete the temp entry since the real one exists
-        await db.runAsync(`DELETE FROM messages WHERE id = ?;`, [oldId]);
-    } else {
-        // Safe update
-        await db.runAsync(`UPDATE messages SET id = ? WHERE id = ?;`, [newId, oldId]);
+    } catch (err: any) {
+        console.error(`[LocalDBService] ❌ updateMessageId error:`, err);
+        // Best effort cleanup if we hit a unexpected constraint
+        if (err?.message?.includes('UNIQUE constraint failed')) {
+            console.warn(`[LocalDBService] UNIQUE constraint hit for ${newId}, attempting cleanup of old row ${oldId}`);
+            try { await db.runAsync(`DELETE FROM messages WHERE id = ?;`, [oldId]); } catch (_) {}
+        }
     }
   }
 

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Main gradient for background -->
+    <linearGradient id="soulGradient" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4338CA;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#7C3AED;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#C026D3;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Subtle inner glow gradient -->
+    <linearGradient id="innerGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:0" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background Squircle -->
+  <rect x="0" y="0" width="512" height="512" rx="115" ry="115" fill="url(#soulGradient)"/>
+  
+  <!-- Subtle top highlight -->
+  <ellipse cx="256" cy="100" rx="200" ry="80" fill="url(#innerGlow)" opacity="0.3"/>
+  
+  <!-- Main Symbol: Two interlocking chat bubbles forming an "S" shape -->
+  <g transform="translate(256, 256)">
+    <!-- First bubble (curving up-right) - represents connection -->
+    <path d="M-80 -60 
+             C-80 -120, 0 -140, 60 -100
+             C100 -80, 100 -40, 80 0
+             C60 40, 0 60, -40 40
+             L-40 40
+             C-20 80, -100 80, -120 20
+             C-140 -40, -100 -100, -80 -60 Z"
+          fill="#FFFFFF"
+          opacity="1"/>
+    
+    <!-- Second bubble (curving down-left) - represents soul -->
+    <path d="M80 60 
+             C80 120, 0 140, -60 100
+             C-100 80, -100 40, -80 0
+             C-60 -40, 0 -60, 40 -40
+             L40 -40
+             C20 -80, 100 -80, 120 -20
+             C140 40, 100 100, 80 60 Z"
+          fill="#FFFFFF"
+          opacity="0.85"/>
+    
+    <!-- Center connection point - the "sync" element -->
+    <circle cx="0" cy="0" r="25" fill="#FFFFFF"/>
+    
+    <!-- Inner dot representing unity/soul connection -->
+    <circle cx="0" cy="0" r="12" fill="url(#soulGradient)"/>
+  </g>
+  
+  <!-- Subtle bottom reflection -->
+  <ellipse cx="256" cy="480" rx="180" ry="40" fill="#000000" opacity="0.1"/>
+</svg>

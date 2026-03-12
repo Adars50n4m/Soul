@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system';
 import { SERVER_URL, proxySupabaseUrl, safeFetchJson } from '../config/api';
 import { R2_CONFIG } from '../config/r2';
+import { r2StorageService } from './R2StorageService';
 // Temporarily keeping supabase instance around as a fallback if needed
 import { supabase } from '../config/supabase';
 import { offlineService } from './LocalDBService';
@@ -43,6 +44,13 @@ export const storageService = {
             
             if (!success || !data) {
                 console.warn('[StorageService] Presign upload failed:', error);
+                if (bucket === 'chat-media' || bucket === 'status-media' || bucket === 'avatars') {
+                    console.log('[StorageService] Falling back to direct R2 worker upload');
+                    const workerUrl = await r2StorageService.uploadImage(uri, bucket, folder);
+                    if (workerUrl) {
+                        return workerUrl;
+                    }
+                }
                 throw new Error(error || 'Failed to get presigned URL from server');
             }
             
@@ -119,6 +127,17 @@ export const storageService = {
             return key; 
         } catch (e: any) {
             console.warn(`[StorageService] uploadImage CRITICAL error:`, e.message);
+            if (bucket === 'chat-media' || bucket === 'status-media' || bucket === 'avatars') {
+                try {
+                    console.log('[StorageService] Retrying via direct R2 worker fallback');
+                    const workerUrl = await r2StorageService.uploadImage(uri, bucket, folder);
+                    if (workerUrl) {
+                        return workerUrl;
+                    }
+                } catch (workerError: any) {
+                    console.warn('[StorageService] Direct R2 worker upload also failed:', workerError?.message);
+                }
+            }
             throw e; 
         }
     },

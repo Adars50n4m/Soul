@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 7;
+const DB_TARGET_VERSION = 8;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -86,6 +86,7 @@ async function migration_v1(db: any): Promise<void> {
     // ── messages ───────────────────────────────────────────────────────────
     // NOTE: Both `sender` AND `receiver` columns exist so ChatService queries
     //       like  .or(`sender.eq.X,receiver.eq.Y`)  work without crashing.
+    // FIX #16: Added delivered_at, read_at for message acknowledgment system
     `CREATE TABLE IF NOT EXISTS messages (
       id             TEXT    PRIMARY KEY NOT NULL,
       chat_id        TEXT    NOT NULL,
@@ -108,7 +109,10 @@ async function migration_v1(db: any): Promise<void> {
       media_status   TEXT    DEFAULT 'not_downloaded',
       thumbnail_uri  TEXT,
       file_size      INTEGER,
-      mime_type      TEXT
+      mime_type      TEXT,
+      delivered_at   TEXT,
+      read_at        TEXT,
+      idempotency_key TEXT
     );`,
 
     // ── sync_queue ─────────────────────────────────────────────────────────
@@ -277,6 +281,23 @@ async function migration_v7(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v8 — Add `delivered_at`, `read_at`, `idempotency_key` columns
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v8(db: any): Promise<void> {
+  const safeAlter = async (sql: string) => {
+    try { await db.execAsync(sql); } catch (e: any) {
+        const msg = e?.message || String(e);
+        if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+            console.warn(`[SQLite] Migration helper WARN v8:`, msg);
+        }
+    }
+  };
+  await safeAlter(`ALTER TABLE messages ADD COLUMN delivered_at TEXT;`);
+  await safeAlter(`ALTER TABLE messages ADD COLUMN read_at TEXT;`);
+  await safeAlter(`ALTER TABLE messages ADD COLUMN idempotency_key TEXT;`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
@@ -318,6 +339,9 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
         case 7:
           await migration_v7(db);
           break;
+        case 8:
+          await migration_v8(db);
+          break;
         // ── Add future cases here ──────────────────────────────────────────
         // case 3:
         //   await migration_v3(db);
@@ -345,7 +369,10 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
       `ALTER TABLE contacts ADD COLUMN about TEXT DEFAULT '';`,
       `ALTER TABLE contacts ADD COLUMN last_seen TEXT;`,
       `ALTER TABLE messages ADD COLUMN reaction TEXT;`,
-      `ALTER TABLE messages ADD COLUMN media_thumbnail TEXT;`
+      `ALTER TABLE messages ADD COLUMN media_thumbnail TEXT;`,
+      `ALTER TABLE messages ADD COLUMN delivered_at TEXT;`,
+      `ALTER TABLE messages ADD COLUMN read_at TEXT;`,
+      `ALTER TABLE messages ADD COLUMN idempotency_key TEXT;`
   ];
   for (const sql of repairSteps) {
       try {

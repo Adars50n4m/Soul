@@ -7,9 +7,9 @@
     "icon": "./assets/images/icon.png",
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
-      "appleTeamId": "NSQLLV82SH",
+      "appleTeamId": "7842J35MTZ",
       "supportsTablet": true,
       "bundleIdentifier": "com.soulsync4.mobile",
       "infoPlist": {
@@ -19,9 +19,7 @@
         "UIBackgroundModes": [
           "audio",
           "fetch",
-          "processing",
-          "remote-notification",
-          "voip"
+          "processing"
         ],
         "LSApplicationQueriesSchemes": [
           "mailto"
@@ -74,7 +72,7 @@
           },
           "android": {
             "compileSdkVersion": 35,
-            "targetSdkVersion": 35,
+            "targetSdkVersion": 34,
             "buildToolsVersion": "35.0.0"
           }
         }

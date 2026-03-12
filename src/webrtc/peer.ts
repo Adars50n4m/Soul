@@ -1,7 +1,31 @@
 const ICE_SERVERS: RTCIceServer[] = [
+    // STUN (fast, direct connection attempt first)
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+
+    // TURN (required for 4G/5G and strict NAT — relays media when direct connection fails)
+    {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+    },
+    {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+    },
+    {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+    },
+    {
+        urls: 'turns:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+    },
 ];
 
 export const createPeer = (

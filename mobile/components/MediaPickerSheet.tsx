@@ -351,19 +351,6 @@ export const MediaPickerSheet: React.FC<MediaPickerSheetProps> = ({
                   <Text style={styles.optionLabel}>Music</Text>
               </Pressable>
 
-              <Pressable style={styles.optionButton} onPress={onSelectLocation}>
-                  <View style={[styles.optionIcon, { backgroundColor: '#1e1e24' }]}>
-                      <Ionicons name="location" size={20} color="#fff" />
-                  </View>
-                  <Text style={styles.optionLabel}>Location</Text>
-              </Pressable>
-
-              <Pressable style={styles.optionButton} onPress={onSelectContact}>
-                  <View style={[styles.optionIcon, { backgroundColor: '#1e1e24' }]}>
-                      <Ionicons name="person" size={20} color="#fff" />
-                  </View>
-                  <Text style={styles.optionLabel}>Contact</Text>
-              </Pressable>
           </ScrollView>
 
           {/* Handler Bar */}
@@ -646,4 +633,3 @@ const styles = StyleSheet.create({
       justifyContent: 'center',
   },
 });
-

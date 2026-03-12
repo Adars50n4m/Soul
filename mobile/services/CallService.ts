@@ -46,6 +46,9 @@ class CallService {
     private currentCallType: 'audio' | 'video' = 'audio';
     private roomSubscribed: boolean = false;
     private roomSubscribeCallbacks: (() => void)[] = [];
+    // FIX #5: Add call timeout tracking
+    private callTimeoutTimer: NodeJS.Timeout | null = null;
+    private readonly CALL_TIMEOUT_MS = 45000; // 45 seconds timeout
 
     addStatusListener(handler: (connected: boolean) => void): void {
         this.statusListeners.add(handler);
@@ -118,7 +121,7 @@ class CallService {
 
     // ── Room channel (for WebRTC signals after call-accept) ────────────────
 
-    private setupRoomListeners(channel: RealtimeChannel, roomId: string): void {
+    private setupRoomListeners(channel: RealtimeChannel, _roomId: string): void {
         channel.on('broadcast', { event: 'signal' }, ({ payload }) => {
             const signal = payload as CallSignal;
             console.log(`[CallService] Received room signal [${signal.type}]`);
@@ -131,19 +134,22 @@ class CallService {
     }
 
     private joinRoom(roomId: string, onSubscribed?: () => void) {
-        if (this.roomChannel && this.currentRoomId === roomId) {
-            console.log(`[CallService] Already joined or joining room ${roomId}. Reusing connection.`);
+        // FIX #11: Check if room channel is still valid and connected
+        const isChannelValid = this.roomChannel && this.currentRoomId === roomId;
+
+        if (isChannelValid && this.roomSubscribed) {
+            console.log(`[CallService] Already joined room ${roomId}. Reusing connection.`);
             if (onSubscribed) {
-                if (this.roomSubscribed) {
-                    onSubscribed();
-                } else {
-                    this.roomSubscribeCallbacks.push(onSubscribed);
-                }
+                onSubscribed();
             }
             return;
         }
 
-        if (this.roomChannel) {
+        // FIX #11: Force reconnect if channel exists but not subscribed (network loss)
+        if (this.roomChannel && this.currentRoomId === roomId && !this.roomSubscribed) {
+            console.log(`[CallService] Room ${roomId} exists but not subscribed. Reconnecting...`);
+            this.roomChannel.unsubscribe();
+        } else if (this.roomChannel) {
             this.roomChannel.unsubscribe();
         }
 
@@ -168,8 +174,32 @@ class CallService {
                 const callbacks = [...this.roomSubscribeCallbacks];
                 this.roomSubscribeCallbacks = [];
                 callbacks.forEach(cb => cb());
+            } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+                // FIX #11: Attempt reconnection on error
+                console.warn(`[CallService] Room ${roomId} error: ${status}. Will retry...`);
+                setTimeout(() => {
+                    if (!this.roomSubscribed && this.currentRoomId === roomId) {
+                        this.joinRoom(roomId);
+                    }
+                }, 2000);
             }
         });
+    }
+
+    // FIX #5: Add call timeout methods
+    private startCallTimeout(onTimeout: () => void): void {
+        this.clearCallTimeout();
+        this.callTimeoutTimer = setTimeout(() => {
+            console.warn('[CallService] ⚠️ Call timeout reached - no response from callee');
+            onTimeout();
+        }, this.CALL_TIMEOUT_MS);
+    }
+
+    private clearCallTimeout(): void {
+        if (this.callTimeoutTimer) {
+            clearTimeout(this.callTimeoutTimer);
+            this.callTimeoutTimer = null;
+        }
     }
 
     // ── PUBLIC: initiateCall() ────────────────────────────────────────────
@@ -181,6 +211,9 @@ class CallService {
         this.currentRoomId = roomId;
         this.currentPartnerId = partnerId;
         this.currentCallType = callType;
+
+        // FIX #12: Persist call state for crash recovery
+        this.persistCallState();
 
         console.log(`[CallService] Initiating Supabase call to ${partnerId} in room ${roomId}`);
 
@@ -201,6 +234,11 @@ class CallService {
         await this.sendSignal(signal);
         console.log('[CallService] 📤 Call request sent via Supabase Broadcast');
 
+        // FIX #5: Start timeout - if no response in 45 seconds, end the call
+        this.startCallTimeout(() => {
+            this.cleanup('timeout');
+        });
+
         return roomId;
     }
 
@@ -214,14 +252,22 @@ class CallService {
         this.currentPartnerId = signal.callerId;
         this.currentCallType = signal.callType;
 
-        // Join the room for WebRTC signaling
-        this.joinRoom(signal.roomId);
+        // FIX #5: Clear timeout since call was accepted
+        this.clearCallTimeout();
 
-        // Send accept to the caller's personal channel
+        // Join room and wait until subscribed BEFORE sending accept.
+        // This ensures we are already listening on the room channel by the time
+        // the caller receives call-accept and fires the WebRTC offer — so we
+        // never miss the offer signal.
+        await new Promise<void>((resolve) => {
+            this.joinRoom(signal.roomId!, resolve);
+        });
+
+        // Room is ready. Now send accept to caller's personal channel.
         await this.sendSignal({
             ...signal,
             type: 'call-accept',
-            calleeId: this.userId,
+            calleeId: this.userId!,
             timestamp: new Date().toISOString()
         });
     }
@@ -232,6 +278,10 @@ class CallService {
         if (!this.userId || !signal.roomId) return;
 
         console.log(`[CallService] Rejecting call from ${signal.callerId}`);
+
+        // FIX #5: Clear timeout since call was rejected
+        this.clearCallTimeout();
+
         await this.sendSignal({
             ...signal,
             type: 'call-reject',
@@ -286,6 +336,48 @@ class CallService {
         }
     }
 
+    // ── PRIVATE: sendToPersonalChannel() ─────────────────────────────────
+    //
+    // Creates a temporary channel to broadcast a signal to a specific user's
+    // personal channel. Properly awaits until the signal is actually sent.
+    private sendToPersonalChannel(recipientId: string, event: string, signal: CallSignal, signalType: string): Promise<void> {
+        return new Promise<void>((resolve) => {
+            const targetChannel = supabase.channel(`call_user_${recipientId}`, {
+                config: { broadcast: { self: false } },
+            });
+
+            const timer = setTimeout(() => {
+                console.warn(`[CallService] ⚠️ Send timeout for ${signalType} to ${recipientId}`);
+                try { targetChannel.unsubscribe(); } catch (_) {}
+                resolve(); // best-effort — don't reject, caller should handle gracefully
+            }, 8000);
+
+            targetChannel.subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    targetChannel.send({
+                        type: 'broadcast',
+                        event,
+                        payload: signal,
+                    }).then(() => {
+                        clearTimeout(timer);
+                        console.log(`[CallService] ✅ Sent ${signalType} to call_user_${recipientId}`);
+                        setTimeout(() => { try { targetChannel.unsubscribe(); } catch (_) {} }, 500);
+                        resolve();
+                    }).catch((err) => {
+                        clearTimeout(timer);
+                        console.warn(`[CallService] ❌ Failed to send ${signalType}:`, err);
+                        setTimeout(() => { try { targetChannel.unsubscribe(); } catch (_) {} }, 500);
+                        resolve(); // best-effort
+                    });
+                } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+                    clearTimeout(timer);
+                    console.warn(`[CallService] ❌ Channel error for ${signalType}: ${status}`);
+                    resolve(); // best-effort
+                }
+            });
+        });
+    }
+
     // ── PRIVATE: sendSignal() ────────────────────────────────────────────
     //
     // Routes signals to the correct channel:
@@ -298,37 +390,12 @@ class CallService {
 
         // Determine which channel to broadcast on
         if (signalType === 'call-request') {
-            // Send to callee's personal channel
-            const targetChannel = supabase.channel(`call_user_${signal.calleeId}`);
-            await targetChannel.subscribe((status) => {
-                if (status === 'SUBSCRIBED') {
-                    targetChannel.send({
-                        type: 'broadcast',
-                        event: 'call_signal',
-                        payload: signal,
-                    }).then(() => {
-                        console.log(`[CallService] ✅ Sent ${signalType} to call_user_${signal.calleeId}`);
-                        // Unsubscribe from target after sending — we only needed it to broadcast
-                        setTimeout(() => targetChannel.unsubscribe(), 1000);
-                    });
-                }
-            });
+            // Send to callee's personal channel — properly awaited
+            await this.sendToPersonalChannel(signal.calleeId, 'call_signal', signal, signalType);
         } else if (signalType === 'call-accept' || signalType === 'call-reject' || signalType === 'call-ringing') {
-            // Send to the caller's personal channel
+            // Send to the caller's personal channel — properly awaited
             const recipientId = (this.userId === signal.callerId) ? signal.calleeId : signal.callerId;
-            const targetChannel = supabase.channel(`call_user_${recipientId}`);
-            await targetChannel.subscribe((status) => {
-                if (status === 'SUBSCRIBED') {
-                    targetChannel.send({
-                        type: 'broadcast',
-                        event: 'call_signal',
-                        payload: signal,
-                    }).then(() => {
-                        console.log(`[CallService] ✅ Sent ${signalType} to call_user_${recipientId}`);
-                        setTimeout(() => targetChannel.unsubscribe(), 1000);
-                    });
-                }
-            });
+            await this.sendToPersonalChannel(recipientId, 'call_signal', signal, signalType);
         } else {
             // offer, answer, ice-candidate, call-end, video-toggle, audio-toggle
             // → send via room channel (both users are subscribed to it)
@@ -394,7 +461,7 @@ class CallService {
                 callId: this.currentRoomId,
                 callerId: this.userId || '',
                 calleeId: this.currentPartnerId || '',
-                callType: 'audio',
+                callType: this.currentCallType,
                 payload: candidate.toJSON ? candidate.toJSON() : candidate,
                 timestamp: new Date().toISOString(),
                 roomId: this.currentRoomId
@@ -420,6 +487,9 @@ class CallService {
 
     cleanup(reason: string = 'unknown'): void {
         console.log(`[CallService] 🧹 Cleaning up call state. Reason: ${reason}`);
+        // FIX #5: Clear call timeout
+        this.clearCallTimeout();
+
         if (this.roomChannel) {
             console.log(`[CallService] Unsubscribing from room ${this.currentRoomId}`);
             this.roomChannel.unsubscribe();
@@ -432,6 +502,60 @@ class CallService {
         this.roomSubscribed = false;
         this.roomSubscribeCallbacks = [];
         this.currentCallType = 'audio';
+
+        // FIX #12: Clear persisted call state on cleanup
+        this.clearPersistedCallState();
+    }
+
+    // FIX #12: Persist call state for crash recovery
+    private async persistCallState(): Promise<void> {
+        try {
+            const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+            const state = {
+                roomId: this.currentRoomId,
+                partnerId: this.currentPartnerId,
+                callType: this.currentCallType,
+                persistedAt: new Date().toISOString(),
+            };
+            await AsyncStorage.setItem('soulsync_active_call', JSON.stringify(state));
+        } catch (error) {
+            console.warn('[CallService] Failed to persist call state:', error);
+        }
+    }
+
+    private async clearPersistedCallState(): Promise<void> {
+        try {
+            const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+            await AsyncStorage.removeItem('soulsync_active_call');
+        } catch (error) {
+            console.warn('[CallService] Failed to clear persisted call state:', error);
+        }
+    }
+
+    // FIX #12: Check for and recover from crashed call state
+    async checkAndRecoverCall(): Promise<{ roomId: string; partnerId: string; callType: 'audio' | 'video' } | null> {
+        try {
+            const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+            const stateStr = await AsyncStorage.getItem('soulsync_active_call');
+            if (!stateStr) return null;
+
+            const state = JSON.parse(stateStr);
+            // Check if persisted within last 5 minutes (crash recovery window)
+            const persistedAt = new Date(state.persistedAt).getTime();
+            const now = Date.now();
+
+            if (now - persistedAt < 5 * 60 * 1000) {
+                console.log('[CallService] Found persisted call state, attempting recovery:', state);
+                return state;
+            } else {
+                // State too old, clear it
+                await this.clearPersistedCallState();
+                return null;
+            }
+        } catch (error) {
+            console.warn('[CallService] Failed to check call recovery:', error);
+            return null;
+        }
     }
 }
 

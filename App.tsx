@@ -1,8 +1,112 @@
-import React, { memo, useMemo, useState, useEffect, useRef } from 'react';
+import React, { memo, useMemo, useState, useEffect, useRef, Component, ErrorInfo, ReactNode } from 'react';
 import { useLocation, Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { AppProvider, useApp } from './AppContext.tsx';
 import { getActiveStreams, onStreamsChange } from './src/webrtc/useWebRTC';
+
+// ============================================================================
+// ERROR BOUNDARY - Catches React errors and shows graceful error UI
+// ============================================================================
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+  errorInfo: ErrorInfo | null;
+}
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: null };
+  }
+
+  static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
+    console.error('[ErrorBoundary] Uncaught error:', error, errorInfo);
+    this.setState({ errorInfo });
+  }
+
+  handleRetry = (): void => {
+    this.setState({ hasError: false, error: null, errorInfo: null });
+  };
+
+  render(): ReactNode {
+    if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+
+      return (
+        <div style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#0a0a0a',
+          color: '#fff',
+          fontFamily: 'system-ui, sans-serif',
+          padding: '20px'
+        }}>
+          <div style={{
+            maxWidth: '400px',
+            textAlign: 'center',
+            padding: '40px',
+            background: 'rgba(255,255,255,0.05)',
+            borderRadius: '20px',
+            border: '1px solid rgba(255,255,255,0.1)'
+          }}>
+            <div style={{ fontSize: '48px', marginBottom: '20px' }}>⚠️</div>
+            <h1 style={{ fontSize: '24px', marginBottom: '12px', color: '#ff6b6b' }}>
+              Something went wrong
+            </h1>
+            <p style={{ color: '#888', marginBottom: '24px', fontSize: '14px' }}>
+              {this.state.error?.message || 'An unexpected error occurred'}
+            </p>
+            <button
+              onClick={this.handleRetry}
+              style={{
+                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                border: 'none',
+                color: 'white',
+                padding: '12px 32px',
+                borderRadius: '12px',
+                fontSize: '16px',
+                cursor: 'pointer',
+                fontWeight: '600'
+              }}
+            >
+              Try Again
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(255,255,255,0.2)',
+                color: '#888',
+                padding: '12px 24px',
+                borderRadius: '12px',
+                fontSize: '14px',
+                cursor: 'pointer',
+                marginLeft: '12px'
+              }}
+            >
+              Reload App
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 // Screens
 import HomeScreen from './screens/HomeScreen.tsx';
@@ -299,11 +403,13 @@ const AppContent: React.FC = () => {
 // ============================================================================
 const App: React.FC = () => {
   return (
-    <AppProvider>
-      <Router>
-        <AppContent />
-      </Router>
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <Router>
+          <AppContent />
+        </Router>
+      </AppProvider>
+    </ErrorBoundary>
   );
 };
 
