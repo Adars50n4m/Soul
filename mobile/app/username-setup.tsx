@@ -355,7 +355,7 @@ export default function UsernameSetupScreen() {
 }
 
 const AMBER  = '#BC002A';
-const BG     = '#0A0A0F';
+const BG     = '#000000';
 const BORDER = '#252535';
 
 const styles = StyleSheet.create({

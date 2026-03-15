@@ -70,7 +70,7 @@ async function handleUpload(request: Request, env: Env, bucket: string): Promise
 
     // 2. Parse multipart form data
     const formData = await request.formData();
-    const file = formData.get('file') as File;
+    const file = formData.get('file') as unknown as File;
     const folder = (formData.get('folder') as string) || userId;
 
     if (!file) {
@@ -138,21 +138,18 @@ async function handleUpload(request: Request, env: Env, bucket: string): Promise
 }
 
 /**
- * Verify Supabase JWT token and extract user ID
- * Note: This is a simplified version. For production, use a proper JWT library
+ * Verify Supabase JWT token and extract user ID using HS256
  */
 async function verifyJWT(token: string, secret: string): Promise<string | null> {
   try {
-    if (token.startsWith('dev-user:')) {
-      const devUserId = token.substring('dev-user:'.length).trim();
-      return devUserId || null;
-    }
-
-    // Decode JWT (base64url decode)
+    // 1. Basic structure check
     const parts = token.split('.');
     if (parts.length !== 3) return null;
 
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    const [headerB64, payloadB64, signatureB64] = parts;
+
+    // 2. Decode payload to check expiration and sub
+    const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')));
 
     // Check expiration
     if (payload.exp && payload.exp < Date.now() / 1000) {
@@ -164,8 +161,34 @@ async function verifyJWT(token: string, secret: string): Promise<string | null> 
     const userId = payload.sub || payload.user_id;
     if (!userId) return null;
 
-    // TODO: For production, verify signature using SUPABASE_JWT_SECRET
-    // For now, we trust the token if it decodes and has a valid structure
+    // 3. SECURE VERIFICATION: Verify HS256 signature
+    // HS256 uses HMAC with SHA-256
+    const encoder = new TextEncoder();
+    const keyData = encoder.encode(secret);
+    const dataToVerify = encoder.encode(`${headerB64}.${payloadB64}`);
+
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      keyData,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+
+    // Decode signature from base64url
+    const signature = Uint8Array.from(atob(signatureB64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+
+    const isValid = await crypto.subtle.verify(
+      'HMAC',
+      cryptoKey,
+      signature,
+      dataToVerify
+    );
+
+    if (!isValid) {
+      console.error('Invalid JWT signature');
+      return null;
+    }
 
     return userId;
   } catch (error) {

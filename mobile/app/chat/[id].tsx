@@ -49,6 +49,7 @@ import Animated, {
 import 'react-native-gesture-handler';
 
 import { useApp, USERS } from '../../context/AppContext';
+import { LEGACY_TO_UUID } from '../../config/supabase';
 import { SoulAvatar } from '../../components/SoulAvatar';
 import { chatService } from '../../services/ChatService';
 import { chatTransitionState } from '../../services/chatTransitionState';
@@ -244,7 +245,10 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const { id: paramsId, sourceY: paramsSourceY } = useLocalSearchParams();
 
     // Support both direct routing (params) and inline rendering (props)
-    const id = propsUser?.id || (Array.isArray(paramsId) ? paramsId[0] : paramsId);
+    const rawId = propsUser?.id || (Array.isArray(paramsId) ? paramsId[0] : paramsId);
+    // Standardize to UUID if legacy ID is used
+    const id = (rawId && LEGACY_TO_UUID[rawId as string]) || rawId;
+    
     const sourceY = propsSourceY ?? (paramsSourceY ? Number(Array.isArray(paramsSourceY) ? paramsSourceY[0] : paramsSourceY) : undefined);
     const isMorphEntry = sourceY !== undefined;
     

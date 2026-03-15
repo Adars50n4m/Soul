@@ -1,0 +1,9 @@
+name = "supabase-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# No KV or D1 bindings needed — config is hardcoded for single-project use.
+# If you need analytics, uncomment below and create the dataset in the dashboard:
+# [[analytics_engine_datasets]]
+# binding = "ANALYTICS"
+# dataset = "supabase-proxy-analytics"

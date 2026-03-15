@@ -271,6 +271,9 @@ class OfflineService {
 
   async saveMessage(chatId: string, msg: LocalMessage): Promise<void> {
     const db = await getDb();
+    // Ensure receiver is set correctly based on sender
+    const receiver = msg.sender === 'me' ? chatId : 'me';
+    
     await db.runAsync(
       `INSERT INTO messages
          (id, chat_id, sender, receiver, text,
@@ -282,7 +285,7 @@ class OfflineService {
          media_url = COALESCE(excluded.media_url, messages.media_url),
          media_thumbnail = COALESCE(excluded.media_thumbnail, messages.media_thumbnail),
          local_file_uri = COALESCE(messages.local_file_uri, excluded.local_file_uri);`,
-      [msg.id, chatId, msg.sender, msg.sender === 'me' ? chatId : 'me', msg.text ?? '', msg.media?.type ?? null, msg.media?.url ?? null, msg.media?.caption ?? null, msg.media?.thumbnail ?? null, msg.replyTo ?? null, msg.timestamp, msg.status ?? 'delivered', msg.localFileUri ?? null]
+      [msg.id, chatId, msg.sender, receiver, msg.text ?? '', msg.media?.type ?? null, msg.media?.url ?? null, msg.media?.caption ?? null, msg.media?.thumbnail ?? null, msg.replyTo ?? null, msg.timestamp, msg.status ?? 'delivered', msg.localFileUri ?? null]
     );
 
     const preview = msg.text?.trim() || (msg.media ? 'Media' : '');
@@ -584,6 +587,50 @@ class OfflineService {
       createdAt: row.created_at,
       retryCount: row.retry_count ?? 0,
     }));
+  }
+
+  /**
+   * Migrate legacy usernames to UUIDs in the local database.
+   * This handles the "disappearing history" issue when transitioning to Supabase UUIDs.
+   */
+  async migrateLegacyIds(mapping: Record<string, string>): Promise<void> {
+    const db = await getDb();
+    console.log('[SQLite] Starting legacy ID migration...');
+    
+    await db.execAsync('BEGIN TRANSACTION;');
+    try {
+      for (const [legacyId, uuid] of Object.entries(mapping)) {
+        // 1. Update messages table
+        await db.runAsync(
+          'UPDATE messages SET chat_id = ? WHERE chat_id = ?',
+          [uuid, legacyId]
+        );
+        await db.runAsync(
+          'UPDATE messages SET receiver = ? WHERE receiver = ?',
+          [uuid, legacyId]
+        );
+        
+        // 2. Update contacts table
+        await db.runAsync(
+          'UPDATE contacts SET id = ? WHERE id = ?',
+          [uuid, legacyId]
+        );
+        
+        // 3. Update statuses table
+        await db.runAsync(
+          'UPDATE statuses SET user_id = ? WHERE user_id = ?',
+          [uuid, legacyId]
+        );
+        
+        console.log(`[SQLite] Migrated ${legacyId} -> ${uuid}`);
+      }
+      await db.execAsync('COMMIT;');
+      console.log('[SQLite] Migration completed successfully');
+    } catch (e) {
+      await db.execAsync('ROLLBACK;');
+      console.error('[SQLite] Migration failed:', e);
+      throw e;
+    }
   }
 }
 

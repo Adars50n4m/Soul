@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "/opt/homebrew/lib/node_modules/@modelcontextprotocol/server-filesystem/build/index.js"
+    },
+    "whatsapp": {
+      "command": "whazaa"
+    },
+    "openclaw": {
+      "command": "node",
+      "args": ["/Volumes/Work/soulsync-4/mcp-servers/openclaw-mcp.js"]
+    }
+  },
+  "imports": []
+}

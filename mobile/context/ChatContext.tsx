@@ -104,6 +104,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           resolve();
         }, hydrationTimeout))
       ]);
+
+      // FIX: Migrate legacy IDs (shri, hari) to UUIDs so history is preserved
+      await offlineService.migrateLegacyIds(LEGACY_TO_UUID);
     } catch (e) {
       console.warn('[ChatContext] Offline DB init failed:', e);
     }
@@ -149,7 +152,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('id, name, avatar_url, bio')
+        .select('id, name, avatar_url, bio, note, note_timestamp')
         .neq('id', currentUser.id);
 
       if (error) {

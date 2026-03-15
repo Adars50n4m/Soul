@@ -25,7 +25,7 @@ import { proxySupabaseUrl } from '../../config/api';
 import { chatTransitionState } from '../../services/chatTransitionState';
 
 import { useApp } from '../../context/AppContext';
-import { LEGACY_TO_UUID } from '../../context/ChatContext';
+import { LEGACY_TO_UUID } from '../../config/supabase';
 import { SoulAvatar } from '../../components/SoulAvatar';
 import { StatusViewerModal } from '../../components/StatusViewerModal';
 import { MediaPreviewModal } from '../../components/MediaPreviewModal';
@@ -428,10 +428,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
   const visibleContacts = useMemo(() => {
     if (!contacts) return [];
-    const legacyToUuid: Record<string, string> = {
-      'shri': '4d28b137-66ff-4417-b451-b1a421e34b25',
-      'hari': '02e52f08-6c1e-497f-93f6-b29c275b8ca4'
-    };
+    const legacyToUuid = LEGACY_TO_UUID;
     const uuidToLegacy: Record<string, string> = {
       '4d28b137-66ff-4417-b451-b1a421e34b25': 'shri',
       '02e52f08-6c1e-497f-93f6-b29c275b8ca4': 'hari'

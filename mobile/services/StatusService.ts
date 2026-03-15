@@ -89,8 +89,9 @@ class StatusService {
 
       const { data, error } = await supabase
         .from('profiles')
-        .select('id, name, avatar_url')
-        .in('id', friendIds);
+        .select('id, name, avatar_url, note, note_timestamp')
+        .in('id', friendIds)
+        .gt('note_timestamp', twentyFourHoursAgo);
 
       if (error) throw error;
 
@@ -138,8 +139,8 @@ class StatusService {
       const { error } = await supabase
         .from('profiles')
         .update({
-          // note: text, // Temporarily disabled until schema is updated
-          // note_timestamp: text ? new Date().toISOString() : null
+          note: text,
+          note_timestamp: text ? new Date().toISOString() : null
         })
         .eq('id', userId);
 

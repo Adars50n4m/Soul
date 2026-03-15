@@ -183,7 +183,7 @@ export default function OTPScreen() {
       style={styles.root}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <StatusBar barStyle="light-content" backgroundColor="#0A0A0F" />
+      <StatusBar barStyle="light-content" backgroundColor="#000000" />
 
       <View style={styles.container}>
         <TouchableOpacity
@@ -279,7 +279,7 @@ export default function OTPScreen() {
 }
 
 const AMBER  = '#BC002A';
-const BG     = '#0A0A0F';
+const BG     = '#000000';
 const BORDER = '#252535';
 
 const styles = StyleSheet.create({

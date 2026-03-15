@@ -1,6 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
 import * as Env from './env';
 
+// Legacy ID mapping for transitioning to Supabase UUIDs
+export const SHRI_ID = '4d28b137-66ff-4417-b451-b1a421e34b25';
+export const HARI_ID = '02e52f08-6c1e-497f-93f6-b29c275b8ca4';
+
+export const LEGACY_TO_UUID: Record<string, string> = {
+    'shri': SHRI_ID,
+    'hari': HARI_ID,
+    'shri_id': SHRI_ID,
+    'hari_id': HARI_ID,
+};
+
 // Use direct SUPABASE_URL so Realtime WebSocket connects directly (proxy can't handle WS upgrades).
 // HTTP REST calls are routed through the Cloudflare proxy via custom fetch to bypass ISP blocks.
 export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {

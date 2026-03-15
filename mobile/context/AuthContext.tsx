@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
-import { supabase } from '../config/supabase';
+import { supabase, LEGACY_TO_UUID } from '../config/supabase';
 import { authService } from '../services/AuthService';
 import { offlineService } from '../services/LocalDBService';
 import { proxySupabaseUrl } from '../config/api';
@@ -217,8 +217,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     name: updates.name,
                     bio: updates.bio,
                     avatar_url: updates.avatar,
-                    // note: updates.note,
-                    // note_timestamp: updates.noteTimestamp
+                    note: updates.note,
+                    note_timestamp: updates.noteTimestamp
                 })
                 .eq('id', currentUser.id);
 
