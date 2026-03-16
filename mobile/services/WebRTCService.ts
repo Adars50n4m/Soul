@@ -599,10 +599,28 @@ class WebRTCService {
 
         this.peerConnection = new RTCPeerConnection(config);
 
-        // Add local tracks to connection
+        // MODERN APPROACH: Add transceivers immediately for Video calls
+        // This ensures the SDP always includes video sections even if tracks arrive late.
+        try {
+            if (this.peerConnection.addTransceiver) {
+                this.peerConnection.addTransceiver('audio', { direction: 'sendrecv' });
+                if (this.callType === 'video') {
+                    this.peerConnection.addTransceiver('video', { direction: 'sendrecv' });
+                }
+                console.log('[WebRTCService] Transceivers added successfully');
+            }
+        } catch (e) {
+            console.log('[WebRTCService] Transceivers not supported, falling back to addTrack');
+        }
+
+        // Add existing local tracks to connection
         if (this.localStream) {
             this.localStream.getTracks().forEach((track: any) => {
-                this.peerConnection!.addTrack(track, this.localStream!);
+                try {
+                    this.peerConnection!.addTrack(track, this.localStream!);
+                } catch (e) {
+                    console.warn('[WebRTCService] Error adding track during PC creation:', e);
+                }
             });
         }
 
@@ -741,9 +759,16 @@ class WebRTCService {
     private async createOffer(): Promise<void> {
         if (!this.peerConnection) return;
 
+        // GUARD: If we are already in the middle of signaling, wait or ignore
+        if (this.peerConnection.signalingState !== 'stable') {
+            console.log(`[WebRTCService] createOffer ignored: signalingState is ${this.peerConnection.signalingState}`);
+            return;
+        }
+
         const offerOptions = {
             offerToReceiveAudio: true,
             offerToReceiveVideo: this.callType === 'video',
+            iceRestart: false
         };
 
         const offer = await this.peerConnection.createOffer(offerOptions);

@@ -111,7 +111,7 @@ export default function CallScreen() {
         return () => clearInterval(interval);
     }, [wasConnected]);
 
-    const uiConnected = wasConnected || isActuallyConnected;
+    const uiConnected = wasConnected || isActuallyConnected || (!!remoteStream && activeCall?.isAccepted);
     // const [isMuted, setIsMuted] = useState(false); // Managed by activeCall
     const [isSpeaker, setIsSpeaker] = useState(false);
 
@@ -607,14 +607,15 @@ export default function CallScreen() {
                         <View style={styles.overlay} />
 
                         {/* Remote Video Stream */}
-                        {isVideo && RemoteVideoComponent && remoteStream && activeCall.isAccepted && !activeCall.remoteVideoOff && (
+                        {isVideo && remoteStream && activeCall.isAccepted && !activeCall.remoteVideoOff && (
                             <RemoteVideoComponent
+                                key={`remote-video-${remoteStreamUpdate}`}
                                 ref={rtcPipRef}
                                 streamURL={typeof remoteStream.toURL === 'function' ? remoteStream.toURL() : remoteStream}
-                                style={styles.remoteVideo}
+                                style={[styles.remoteVideo, { zIndex: 1 }]}
                                 objectFit="cover"
                                 mirror={false}
-                                zOrder={1}
+                                zOrder={0}
                             />
                         )}
 
