@@ -1,19 +1,20 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, TextInput, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Platform } from 'react-native';
+import { View, Text, TextInput, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Platform, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SERVER_URL, safeFetchJson, proxySupabaseUrl } from '../config/api';
 import { useApp } from '../context/AppContext';
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import GlassView from '../components/ui/GlassView';
 import { SoulAvatar } from '../components/SoulAvatar';
 import { LinearGradient } from 'expo-linear-gradient';
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import Animated, { FadeInDown, FadeInRight } from 'react-native-reanimated';
 
 export default function SearchScreen() {
     const { currentUser } = useApp();
     const [query, setQuery] = useState('');
     const [results, setResults] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [connectingId, setConnectingId] = useState<string | null>(null);
     const [searchError, setSearchError] = useState<string | null>(null);
     const router = useRouter();
 
@@ -29,21 +30,16 @@ export default function SearchScreen() {
             const { success, data, error } = await safeFetchJson<any>(
                 `${SERVER_URL}/api/users/search?query=${encodeURIComponent(text)}`,
                 {
-                    headers: {
-                        'x-user-id': currentUser?.id || ''
-                    }
+                    headers: { 'x-user-id': currentUser?.id || '' }
                 }
             );
 
             if (success && data?.success) {
-                setResults(data.users);
+                setResults(data.users || []);
             } else {
-                const msg = error || 'Search failed';
-                console.warn('[Search] Search failed:', msg);
-                setSearchError(msg);
+                setSearchError(error || 'Search failed');
             }
         } catch (err: any) {
-            console.warn('[Search] Unexpected error:', err);
             setSearchError(err?.message || 'Network error');
         } finally {
             setLoading(false);
@@ -58,6 +54,7 @@ export default function SearchScreen() {
     }, [query, searchUsers]);
 
     const sendRequest = async (receiverId: string) => {
+        setConnectingId(receiverId);
         try {
             const { success, data, error } = await safeFetchJson<any>(
                 `${SERVER_URL}/api/connections/request`, 
@@ -72,13 +69,83 @@ export default function SearchScreen() {
             );
 
             if (success && data?.success) {
-                // Update local status optimistically
                 setResults(prev => prev.map(u => u.id === receiverId ? { ...u, connectionStatus: 'request_sent' } : u));
-            } else if (error) {
-                console.warn('[Search] Request failed:', error);
+            } else {
+                Alert.alert('Error', error || 'Failed to send request');
             }
         } catch (err) {
-            console.warn('[Search] Unexpected request error:', err);
+            console.warn('[Search] Request error:', err);
+        } finally {
+            setConnectingId(null);
+        }
+    };
+
+    const handleAccept = async (userId: string) => {
+        setConnectingId(userId);
+        try {
+            // First find the request ID (in search results, data usually has connectionStatus received)
+            // But let's check if the server endpoint supports accepting by userId OR if we need to fetch requests first
+            // Based on server/index.js, it's PUT /api/connections/request/:requestId/accept
+            // So we need the requestId. 
+            // In a better implementation, the enriched search results should include the requestId if it exists.
+            
+            // Let's first fetch pending requests to get the correct ID
+            const { data: reqData } = await safeFetchJson<any>(`${SERVER_URL}/api/connections/requests`, {
+                headers: { 'x-user-id': currentUser?.id || '' }
+            });
+            
+            const incomingReq = reqData?.incoming?.find(r => r.sender_id === userId);
+            if (!incomingReq) {
+                // If not found, maybe just redirect to requests screen
+                router.push('/requests');
+                return;
+            }
+
+            const { success, error } = await safeFetchJson<any>(
+                `${SERVER_URL}/api/connections/request/${incomingReq.id}/accept`,
+                {
+                    method: 'PUT',
+                    headers: { 'x-user-id': currentUser?.id || '' }
+                }
+            );
+
+            if (success) {
+                setResults(prev => prev.map(u => u.id === userId ? { ...u, connectionStatus: 'connected' } : u));
+            } else {
+                Alert.alert('Error', error || 'Failed to accept');
+            }
+        } catch (err) {
+            console.error('[Search] Accept error:', err);
+        } finally {
+            setConnectingId(null);
+        }
+    };
+
+    const handleCancel = async (userId: string) => {
+        setConnectingId(userId);
+        try {
+            const { data: reqData } = await safeFetchJson<any>(`${SERVER_URL}/api/connections/requests`, {
+                headers: { 'x-user-id': currentUser?.id || '' }
+            });
+            
+            const outgoingReq = reqData?.outgoing?.find(r => r.receiver_id === userId);
+            if (!outgoingReq) return;
+
+            const { success } = await safeFetchJson<any>(
+                `${SERVER_URL}/api/connections/request/${outgoingReq.id}/cancel`,
+                {
+                    method: 'DELETE',
+                    headers: { 'x-user-id': currentUser?.id || '' }
+                }
+            );
+
+            if (success) {
+                setResults(prev => prev.map(u => u.id === userId ? { ...u, connectionStatus: 'not_connected' } : u));
+            }
+        } catch (err) {
+            console.error('[Search] Cancel error:', err);
+        } finally {
+            setConnectingId(null);
         }
     };
 
@@ -90,34 +157,71 @@ export default function SearchScreen() {
                     <SoulAvatar uri={proxySupabaseUrl(item.avatar_url)} size={52} />
                     <View style={styles.userInfo}>
                         <Text style={styles.username}>{item.username}</Text>
-                        <Text style={styles.fullName}>{item.full_name || `@${item.username}`}</Text>
+                        <Text style={styles.fullName}>{item.display_name || item.full_name || `@${item.username}`}</Text>
                     </View>
                     
                     {item.connectionStatus === 'not_connected' && (
-                        <TouchableOpacity style={styles.connectButton} onPress={() => sendRequest(item.id)}>
-                            <Text style={styles.connectText}>Connect</Text>
+                        <TouchableOpacity 
+                            style={styles.connectButtonWrapper} 
+                            onPress={() => sendRequest(item.id)}
+                            disabled={connectingId === item.id}
+                        >
+                            <LinearGradient
+                                colors={['#3b82f6', '#2563eb']}
+                                style={styles.connectButton}
+                            >
+                                {connectingId === item.id ? (
+                                    <ActivityIndicator size="small" color="#fff" />
+                                ) : (
+                                    <Text style={styles.connectText}>Connect</Text>
+                                )}
+                            </LinearGradient>
                         </TouchableOpacity>
                     )}
                     
                     {item.connectionStatus === 'request_sent' && (
-                        <View style={styles.pendingBadge}>
-                            <MaterialIcons name="hourglass-empty" size={14} color="rgba(255,255,255,0.6)" />
-                            <Text style={styles.pendingText}>Sent</Text>
-                        </View>
+                        <TouchableOpacity style={styles.pendingBadge} onPress={() => handleCancel(item.id)}>
+                            {connectingId === item.id ? (
+                                <ActivityIndicator size="small" color="rgba(255,255,255,0.4)" />
+                            ) : (
+                                <>
+                                    <MaterialIcons name="hourglass-empty" size={14} color="rgba(255,255,255,0.6)" />
+                                    <Text style={styles.pendingText}>Sent</Text>
+                                </>
+                            )}
+                        </TouchableOpacity>
                     )}
 
                     {item.connectionStatus === 'request_received' && (
                         <TouchableOpacity 
-                            style={[styles.connectButton, { backgroundColor: '#22c55e' }]} 
-                            onPress={() => router.push('/requests')} // We'll implement this screen next
+                            style={[styles.connectButtonWrapper]} 
+                            onPress={() => handleAccept(item.id)}
+                            disabled={connectingId === item.id}
                         >
-                            <Text style={styles.connectText}>Accept</Text>
+                            <LinearGradient
+                                colors={['#22c55e', '#16a34a']}
+                                style={styles.connectButton}
+                            >
+                                {connectingId === item.id ? (
+                                    <ActivityIndicator size="small" color="#fff" />
+                                ) : (
+                                    <Text style={styles.connectText}>Accept</Text>
+                                )}
+                            </LinearGradient>
                         </TouchableOpacity>
                     )}
                     
                     {item.connectionStatus === 'connected' && (
-                        <TouchableOpacity style={styles.chatButton} onPress={() => router.push(`/chat/${item.id}`)}>
-                            <MaterialIcons name="chat" size={20} color="#fff" />
+                        <TouchableOpacity 
+                            style={styles.chatButton} 
+                            onPress={() => router.push(`/chat/${item.id}`)}
+                        >
+                            <LinearGradient
+                                colors={['#3b82f6', '#2563eb']}
+                                style={styles.chatButtonGradient}
+                            >
+                                <MaterialIcons name="chat" size={20} color="#fff" />
+                            </LinearGradient>
                         </TouchableOpacity>
                     )}
                 </View>
@@ -127,7 +231,7 @@ export default function SearchScreen() {
 
     return (
         <View style={styles.container}>
-            <LinearGradient colors={['#1a1a1a', '#000']} style={StyleSheet.absoluteFill} />
+            <LinearGradient colors={['#000000', '#080808']} style={StyleSheet.absoluteFill} />
             <View style={styles.header}>
                 <TouchableOpacity onPress={() => router.back()} style={styles.backButton} activeOpacity={0.7}>
                     <MaterialIcons name="arrow-back-ios" size={20} color="#fff" />
@@ -156,22 +260,17 @@ export default function SearchScreen() {
                 keyExtractor={item => item.id}
                 contentContainerStyle={styles.list}
                 ListEmptyComponent={
-                    !loading ? (
-                        searchError ? (
-                            <View style={styles.emptyContainer}>
-                                <MaterialIcons name="wifi-off" size={60} color="rgba(255,255,255,0.1)" />
-                                <Text style={styles.emptyText}>Could not connect to server</Text>
-                            </View>
-                        ) : query.length >= 2 ? (
-                            <View style={styles.emptyContainer}>
-                                <MaterialIcons name="person-search" size={60} color="rgba(255,255,255,0.1)" />
-                                <Text style={styles.emptyText}>No users found named "{query}"</Text>
-                            </View>
-                        ) : (
-                            <View style={styles.emptyContainer}>
-                                <Text style={styles.hintText}>Type at least 2 characters to search</Text>
-                            </View>
-                        )
+                    !loading && query.length >= 2 ? (
+                        <View style={styles.emptyContainer}>
+                            <MaterialIcons name="person-search" size={60} color="rgba(255,255,255,0.1)" />
+                            <Text style={styles.emptyText}>
+                                {searchError ? 'Could not connect to server' : `No users found named "${query}"`}
+                            </Text>
+                        </View>
+                    ) : !loading && query.length < 2 ? (
+                        <View style={styles.emptyContainer}>
+                            <Text style={styles.hintText}>Type at least 2 characters to search</Text>
+                        </View>
                     ) : null
                 }
             />
@@ -194,8 +293,10 @@ const styles = StyleSheet.create({
         height: 44, 
         justifyContent: 'center', 
         alignItems: 'center',
-        backgroundColor: 'rgba(255,255,255,0.1)',
-        borderRadius: 22
+        backgroundColor: 'rgba(255,255,255,0.05)',
+        borderRadius: 22,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)'
     },
     searchWrapper: { flex: 1, height: 48, borderRadius: 24, overflow: 'hidden' },
     searchGlass: { ...StyleSheet.absoluteFillObject },
@@ -209,13 +310,14 @@ const styles = StyleSheet.create({
     },
     searchInput: { flex: 1, color: '#fff', fontSize: 16, marginLeft: 10, height: '100%' },
     list: { paddingHorizontal: 20, paddingBottom: 60, flexGrow: 1 },
-    userCard: { height: 84, borderRadius: 24, marginBottom: 16, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+    userCard: { height: 84, borderRadius: 24, marginBottom: 16, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
     glassBackground: { ...StyleSheet.absoluteFillObject },
     cardContent: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 },
     userInfo: { flex: 1, marginLeft: 16 },
     username: { color: '#fff', fontSize: 17, fontWeight: '700' },
     fullName: { color: 'rgba(255,255,255,0.5)', fontSize: 14, marginTop: 2 },
-    connectButton: { backgroundColor: '#3b82f6', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20 },
+    connectButtonWrapper: { borderRadius: 20, overflow: 'hidden' },
+    connectButton: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, minWidth: 90, alignItems: 'center' },
     connectText: { color: '#fff', fontWeight: '800', fontSize: 13, letterSpacing: 0.5 },
     pendingBadge: { 
         flexDirection: 'row', 
@@ -224,21 +326,26 @@ const styles = StyleSheet.create({
         paddingHorizontal: 14, 
         paddingVertical: 8, 
         borderRadius: 18,
-        gap: 6
+        gap: 6,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)'
     },
     pendingText: { color: 'rgba(255,255,255,0.5)', fontWeight: '600', fontSize: 13 },
     chatButton: { 
-        backgroundColor: '#22c55e', 
         width: 44, 
         height: 44, 
         borderRadius: 22, 
-        justifyContent: 'center', 
-        alignItems: 'center',
-        shadowColor: '#22c55e',
+        overflow: 'hidden',
+        shadowColor: '#3b82f6',
         shadowOffset: { width: 0, height: 4 },
         shadowOpacity: 0.3,
         shadowRadius: 8,
         elevation: 4
+    },
+    chatButtonGradient: {
+        flex: 1,
+        justifyContent: 'center', 
+        alignItems: 'center',
     },
     emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', marginTop: 100 },
     emptyText: { color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: 16, fontSize: 16, fontWeight: '500' },

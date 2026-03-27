@@ -437,52 +437,54 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     };
     
     const myLegacyId = currentUser?.id ? uuidToLegacy[currentUser.id] : null;
+    const legacyIds = new Set(['shri', 'hari']);
+    const superUserUuids = Object.values(legacyToUuid);
 
-    // First pass: group by their "Primary ID" (UUID if available)
-    const grouped = new Map<string, any>();
+    // 1. First pass: group by their "Primary ID" (UUID if available) to merge duplicates
+    const unified = new Map<string, Contact>();
     
     contacts.forEach(c => {
       const primaryId = legacyToUuid[c.id] || c.id;
       
-      // Skip self
-      if (primaryId === currentUser?.id || c.id === myLegacyId) return;
+      // Filter out self
+      if (primaryId === currentUser?.id) return;
+      if (c.id === 'shri' || c.id === 'hari') {
+         if (legacyToUuid[c.id] === currentUser?.id) return;
+      }
 
-      const existing = grouped.get(primaryId);
+      const existing = unified.get(primaryId);
       if (!existing) {
-        grouped.set(primaryId, { ...c, id: primaryId });
-      } else {
-        // Merge - keep the one with more info or latest activity
-        const hasBetterInfo = c.avatar && !existing.avatar;
-        const hasLatestMessage = c.lastMessage && c.lastMessage !== 'Start a conversation' && existing.lastMessage === 'Start a conversation';
-        
-        if (hasBetterInfo || hasLatestMessage) {
-           grouped.set(primaryId, { ...c, id: primaryId });
-        }
+        const finalName = primaryId === legacyToUuid['shri'] ? 'Shri' : 
+                          (primaryId === legacyToUuid['hari'] ? 'Hari' : c.name);
+                          
+        unified.set(primaryId, { ...c, id: primaryId, name: finalName });
       }
     });
 
-    const otherContacts = Array.from(grouped.values());
-    
-    const legacyIds = new Set(['shri', 'hari']);
-    const hasRealContacts = otherContacts.some(c => !legacyIds.has(c.id) && !Object.values(legacyToUuid).includes(c.id));
-
-    return otherContacts.filter(contact => {
+    // 2. Filter the unified list based on connections/superusers
+    return Array.from(unified.values()).filter(contact => {
       const primaryId = contact.id;
       const altId = uuidToLegacy[primaryId] || primaryId;
 
-      // Check both primary and alternative ID for activity
-      const hasMessages = (messages?.[primaryId]?.length || 0) > 0 || (messages?.[altId]?.length || 0) > 0;
-      const hasStatus = (statuses || []).some(s => s.userId === primaryId || s.userId === altId);
-      const hasMeaningfulLastMessage =
-        !!contact.lastMessage && contact.lastMessage !== 'Start a conversation';
-
-      const isSuperUserContact = legacyIds.has(primaryId) || legacyIds.has(altId);
-      const amISuperUser = currentUser?.id && (legacyIds.has(currentUser.id) || Object.values(legacyToUuid).includes(currentUser.id));
-
-      if (Platform.OS === 'android') return true; // Show all on Android until stability confirmed
+      // Special Superuser Logic: Both superusers see each other always.
+      // But they don't see everyone else unless connected.
+      const isSuperUser = legacyIds.has(altId) || superUserUuids.includes(primaryId);
+      const amISuperUser = legacyIds.has(currentUser?.id || '') || superUserUuids.includes(currentUser?.id || '');
       
-      // Keep if there's any activity
-      return hasMessages || hasStatus || hasMeaningfulLastMessage;
+      const isSelfSuperUserInteraction = isSuperUser && amISuperUser;
+
+      // Filtering out "Unknown" users (except if they are superusers for some reason)
+      if (!isSuperUser && (!contact.name || contact.name.toLowerCase() === 'unknown')) {
+          return false;
+      }
+
+      // Check for activity or connections
+      const hasMessages = (messages?.[primaryId]?.length || 0) > 0 || (messages?.[altId]?.length || 0) > 0;
+      const hasMeaningfulLastMessage = !!contact.lastMessage && contact.lastMessage !== 'Start a conversation';
+
+      // Final criteria:
+      // Show if they are superusers seeing each other OR if there's connection activity
+      return isSelfSuperUserInteraction || hasMessages || hasMeaningfulLastMessage;
     });
   }, [contacts, messages, statuses, currentUser]);
 
@@ -760,13 +762,12 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
                     <>
                       <Image source={{ uri: myStoryPreviewUrl }} style={styles.myStatusPreviewBgFull} />
                       <View style={styles.myStatusAvatarBadgeCorner} pointerEvents="none">
-                        {!!currentUser?.avatar ? (
-                           <Image source={{ uri: proxySupabaseUrl(currentUser.avatar) }} style={styles.myStatusAvatarSmall} />
-                        ) : (
-                           <View style={[styles.myStatusAvatarSmall, { backgroundColor: '#1c1c1e', alignItems: 'center', justifyContent: 'center' }]}>
-                               <MaterialIcons name="person" size={14} color="rgba(255,255,255,0.4)" />
-                           </View>
-                        )}
+                        <SoulAvatar 
+                           uri={proxySupabaseUrl(currentUser?.avatar)} 
+                           size={28} 
+                           avatarType={currentUser?.avatarType as any}
+                           style={styles.myStatusAvatarSmall} 
+                        />
                         <View style={styles.myStatusAddBadgeBlue}>
                           <MaterialIcons name="add" size={14} color="#fff" />
                         </View>
@@ -776,13 +777,12 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
                   ) : (
                     <>
                       <View style={styles.myStatusAvatarContainer} pointerEvents="none">
-                        {!!currentUser?.avatar ? (
-                           <Image source={{ uri: proxySupabaseUrl(currentUser.avatar) }} style={styles.myStatusAvatar} />
-                        ) : (
-                           <View style={[styles.myStatusAvatar, { backgroundColor: '#1c1c1e', alignItems: 'center', justifyContent: 'center' }]}>
-                               <MaterialIcons name="person" size={24} color="rgba(255,255,255,0.4)" />
-                           </View>
-                        )}
+                        <SoulAvatar 
+                           uri={proxySupabaseUrl(currentUser?.avatar)} 
+                           size={44} 
+                           avatarType={currentUser?.avatarType as any}
+                           style={styles.myStatusAvatar} 
+                        />
                         <View style={styles.myStatusAddBadge}><MaterialIcons name="add" size={16} color="#fff" /></View>
                       </View>
                       <Text style={styles.startStoryText}>
@@ -824,7 +824,12 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
               )}
               <View style={styles.statusOverlay} pointerEvents="none">
                 <View style={[styles.contactAvatarBadge, { borderColor: hasUnseen ? '#3b82f6' : 'rgba(255,255,255,0.4)' }]}>
-                  <Image source={{ uri: proxySupabaseUrl(contact.avatar) || DEFAULT_AVATAR }} style={styles.smallStatusAvatar} />
+                  <SoulAvatar 
+                     uri={proxySupabaseUrl(contact.avatar)} 
+                     size={32} 
+                     avatarType={contact.avatarType as any}
+                     style={styles.smallStatusAvatar} 
+                  />
                 </View>
                 <LinearGradient
                   colors={['transparent', 'rgba(0,0,0,0.8)']}

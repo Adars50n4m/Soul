@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Platform, RefreshControl } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Platform, RefreshControl, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SERVER_URL, safeFetchJson, proxySupabaseUrl } from '../config/api';
 import { useApp } from '../context/AppContext';
@@ -15,6 +15,7 @@ export default function RequestsScreen() {
     const [outgoing, setOutgoing] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [actionId, setActionId] = useState<string | null>(null);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const router = useRouter();
 
@@ -32,12 +33,9 @@ export default function RequestsScreen() {
                 setIncoming(data.incoming || []);
                 setOutgoing(data.outgoing || []);
             } else {
-                const msg = error || 'Could not load requests';
-                console.warn('[Requests] Fetch failed:', msg);
-                setErrorMsg(msg);
+                setErrorMsg(error || 'Could not load requests');
             }
         } catch (err: any) {
-            console.warn('[Requests] Unexpected fetch error:', err);
             setErrorMsg(err?.message || 'Network error');
         } finally {
             setLoading(false);
@@ -50,11 +48,12 @@ export default function RequestsScreen() {
     }, [fetchRequests]);
 
     const handleAction = async (requestId: string, action: 'accept' | 'reject' | 'cancel') => {
+        setActionId(requestId);
         try {
             const method = action === 'cancel' ? 'DELETE' : 'PUT';
             const endpoint = `${SERVER_URL}/api/connections/request/${requestId}/${action}`;
             
-            const { success, data, error } = await safeFetchJson<any>(endpoint, {
+            const { success, error } = await safeFetchJson<any>(endpoint, {
                 method,
                 headers: { 
                     'Content-Type': 'application/json',
@@ -62,15 +61,16 @@ export default function RequestsScreen() {
                 }
             });
 
-            if (success && data?.success) {
-                // Remove from local state
+            if (success) {
                 setIncoming(prev => prev.filter(r => r.id !== requestId));
                 setOutgoing(prev => prev.filter(r => r.id !== requestId));
-            } else if (error) {
-                console.error(`[Requests] Request ${action} failed:`, error);
+            } else {
+                Alert.alert('Error', error || `Failed to ${action}`);
             }
         } catch (err) {
-            console.error(`[Requests] Unexpected ${action} error:`, err);
+            console.error(`[Requests] ${action} error:`, err);
+        } finally {
+            setActionId(null);
         }
     };
 
@@ -84,9 +84,9 @@ export default function RequestsScreen() {
         return (
             <Animated.View entering={FadeInDown.duration(400)}>
                 <View style={styles.requestCard}>
-                    <GlassView intensity={20} tint="dark" style={styles.glassBackground} />
+                    <GlassView intensity={25} tint="dark" style={styles.glassBackground} />
                     <View style={styles.cardContent}>
-                        <SoulAvatar uri={proxySupabaseUrl(user?.avatar_url)} size={48} />
+                        <SoulAvatar uri={proxySupabaseUrl(user?.avatar_url)} size={52} />
                         <View style={styles.userInfo}>
                             <Text style={styles.username}>{user?.username || 'Unknown'}</Text>
                             <Text style={styles.message} numberOfLines={1}>
@@ -97,24 +97,35 @@ export default function RequestsScreen() {
                         {isIncoming ? (
                             <View style={styles.actionButtons}>
                                 <TouchableOpacity 
-                                    style={[styles.smallButton, styles.acceptButton]} 
+                                    style={[styles.smallButton, { backgroundColor: '#3b82f6' }]} 
                                     onPress={() => handleAction(item.id, 'accept')}
+                                    disabled={actionId === item.id}
                                 >
-                                    <MaterialIcons name="check" size={20} color="#fff" />
+                                    {actionId === item.id ? (
+                                        <ActivityIndicator size="small" color="#fff" />
+                                    ) : (
+                                        <MaterialIcons name="check" size={20} color="#fff" />
+                                    )}
                                 </TouchableOpacity>
                                 <TouchableOpacity 
-                                    style={[styles.smallButton, styles.rejectButton]} 
+                                    style={[styles.smallButton, { backgroundColor: 'rgba(255,255,255,0.08)' }]} 
                                     onPress={() => handleAction(item.id, 'reject')}
+                                    disabled={actionId === item.id}
                                 >
-                                    <MaterialIcons name="close" size={20} color="#fff" />
+                                    <MaterialIcons name="close" size={20} color="rgba(255,255,255,0.6)" />
                                 </TouchableOpacity>
                             </View>
                         ) : (
                             <TouchableOpacity 
-                                style={[styles.smallButton, styles.rejectButton]} 
+                                style={styles.cancelButton} 
                                 onPress={() => handleAction(item.id, 'cancel')}
+                                disabled={actionId === item.id}
                             >
-                                <Text style={styles.cancelText}>Cancel</Text>
+                                {actionId === item.id ? (
+                                    <ActivityIndicator size="small" color="rgba(255,255,255,0.4)" />
+                                ) : (
+                                    <Text style={styles.cancelText}>Cancel</Text>
+                                )}
                             </TouchableOpacity>
                         )}
                     </View>
@@ -125,13 +136,13 @@ export default function RequestsScreen() {
 
     return (
         <View style={styles.container}>
-            <LinearGradient colors={['#1a1a1a', '#000']} style={StyleSheet.absoluteFill} />
-            <View style={styles.header}>
+            <LinearGradient colors={['#000000', '#080808']} style={StyleSheet.absoluteFill} />
+            <div style={styles.header}>
                 <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
                     <MaterialIcons name="arrow-back-ios" size={20} color="#fff" />
                 </TouchableOpacity>
-                <Text style={styles.title}>Soul Requests</Text>
-            </View>
+                <Text style={styles.title}>Requests</Text>
+            </div>
 
             <FlatList
                 refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#3b82f6" />}
@@ -152,26 +163,14 @@ export default function RequestsScreen() {
                 )}
                 keyExtractor={item => item.title}
                 contentContainerStyle={styles.list}
-                ListEmptyComponent={
-                    !loading ? (
+                ListHeaderComponent={
+                    !loading && incoming.length === 0 && outgoing.length === 0 ? (
                         <View style={styles.emptyContainer}>
-                            {errorMsg ? (
-                                <>
-                                    <MaterialIcons name="wifi-off" size={80} color="rgba(255,255,255,0.05)" />
-                                    <Text style={styles.emptyText}>Could not connect to server</Text>
-                                    <TouchableOpacity style={styles.findButton} onPress={() => { setLoading(true); fetchRequests(); }}>
-                                        <Text style={styles.findText}>Retry</Text>
-                                    </TouchableOpacity>
-                                </>
-                            ) : (
-                                <>
-                                    <MaterialIcons name="people-outline" size={80} color="rgba(255,255,255,0.05)" />
-                                    <Text style={styles.emptyText}>No pending requests</Text>
-                                    <TouchableOpacity style={styles.findButton} onPress={() => router.push('/search')}>
-                                        <Text style={styles.findText}>Find People</Text>
-                                    </TouchableOpacity>
-                                </>
-                            )}
+                            <MaterialIcons name="people-outline" size={80} color="rgba(255,255,255,0.05)" />
+                            <Text style={styles.emptyText}>No pending requests</Text>
+                            <TouchableOpacity style={styles.findButton} onPress={() => router.push('/search')}>
+                                <Text style={styles.findText}>Find People</Text>
+                            </TouchableOpacity>
                         </View>
                     ) : null
                 }
@@ -192,26 +191,50 @@ const styles = StyleSheet.create({
         alignItems: 'center', 
         paddingTop: Platform.OS === 'ios' ? 60 : 40, 
         paddingHorizontal: 20, 
-        marginBottom: 20
+        marginBottom: 20,
+        gap: 12
     },
-    backButton: { width: 44, height: 44, justifyContent: 'center' },
-    title: { color: '#fff', fontSize: 24, fontWeight: '800', marginLeft: 10 },
-    list: { paddingHorizontal: 20, paddingBottom: 40 },
-    sectionTitle: { color: 'rgba(255,255,255,0.4)', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 15, marginTop: 10 },
-    requestCard: { height: 76, borderRadius: 22, marginBottom: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+    backButton: { 
+        width: 44, 
+        height: 44, 
+        justifyContent: 'center', 
+        alignItems: 'center',
+        backgroundColor: 'rgba(255,255,255,0.05)',
+        borderRadius: 22,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)'
+    },
+    title: { color: '#fff', fontSize: 24, fontWeight: '800' },
+    list: { paddingHorizontal: 20, paddingBottom: 60, flexGrow: 1 },
+    sectionTitle: { 
+        color: 'rgba(255,255,255,0.4)', 
+        fontSize: 13, 
+        fontWeight: '700', 
+        textTransform: 'uppercase', 
+        letterSpacing: 1, 
+        marginBottom: 15, 
+        marginTop: 10 
+    },
+    requestCard: { height: 84, borderRadius: 24, marginBottom: 16, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
     glassBackground: { ...StyleSheet.absoluteFillObject },
-    cardContent: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14 },
-    userInfo: { flex: 1, marginLeft: 12 },
-    username: { color: '#fff', fontSize: 16, fontWeight: '700' },
-    message: { color: 'rgba(255,255,255,0.4)', fontSize: 13, marginTop: 2 },
-    actionButtons: { flexDirection: 'row', gap: 8 },
-    smallButton: { width: 38, height: 38, borderRadius: 19, justifyContent: 'center', alignItems: 'center' },
-    acceptButton: { backgroundColor: '#3b82f6' },
-    rejectButton: { backgroundColor: 'rgba(255,255,255,0.1)' },
-    cancelText: { color: 'rgba(255,255,255,0.5)', fontSize: 12, fontWeight: '700', paddingHorizontal: 12 },
+    cardContent: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 },
+    userInfo: { flex: 1, marginLeft: 16 },
+    username: { color: '#fff', fontSize: 17, fontWeight: '700' },
+    message: { color: 'rgba(255,255,255,0.4)', fontSize: 14, marginTop: 2 },
+    actionButtons: { flexDirection: 'row', gap: 10 },
+    smallButton: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
+    cancelButton: { 
+        backgroundColor: 'rgba(255,255,255,0.05)', 
+        paddingHorizontal: 16, 
+        paddingVertical: 10, 
+        borderRadius: 20,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)'
+    },
+    cancelText: { color: 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: '700' },
     emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', marginTop: 100 },
     emptyText: { color: 'rgba(255,255,255,0.2)', fontSize: 18, fontWeight: '600', marginTop: 20 },
-    findButton: { marginTop: 20, backgroundColor: 'rgba(255,255,255,0.1)', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 24 },
+    findButton: { marginTop: 20, backgroundColor: 'rgba(255,255,255,0.1)', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 24, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
     findText: { color: '#fff', fontWeight: '700' },
-    loader: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }
+    loader: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.8)' }
 });

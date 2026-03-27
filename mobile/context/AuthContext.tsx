@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
 import { supabase, LEGACY_TO_UUID } from '../config/supabase';
-import { authService } from '../services/AuthService';
+import { authService, AvatarType } from '../services/AuthService';
 import { offlineService } from '../services/LocalDBService';
 import { proxySupabaseUrl } from '../config/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -23,7 +23,7 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
     readReceipts: true,
 };
 
-export type AvatarType = 'default' | 'teddy' | 'custom';
+// AvatarType imported from AuthService
 export type TeddyVariant = 'boy' | 'girl';
 
 export interface User {
@@ -94,7 +94,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 if (userId === LEGACY_TO_UUID['shri']) {
                     setCurrentUser({
                         id: userId,
-                        name: 'Shri Ram',
+                        name: 'Shri',
                         username: 'shri',
                         avatar: 'https://avatar.iran.liara.run/public/boy?username=shri',
                         avatarType: 'teddy',
@@ -104,7 +104,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 } else if (userId === LEGACY_TO_UUID['hari']) {
                     setCurrentUser({
                         id: userId,
-                        name: 'Hari Om',
+                        name: 'Hari',
                         username: 'hari',
                         avatar: 'https://avatar.iran.liara.run/public/boy?username=hari',
                         avatarType: 'teddy',

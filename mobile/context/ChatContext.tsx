@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { useState, useEffect, createContext, useContext, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../config/supabase';
-import { proxySupabaseUrl } from '../config/api';
+import { proxySupabaseUrl, SERVER_URL, safeFetchJson } from '../config/api';
 import { chatService, type ChatMessage } from '../services/ChatService';
 import { offlineService, type QueuedMessage } from '../services/LocalDBService';
 import { useAuth } from './AuthContext';
@@ -114,34 +114,38 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     try {
       const dbQueryTimeout = 15000;
-      const [localContacts, localMessages] = (await Promise.race([
-        Promise.all([
-          offlineService.getContacts(),
-          offlineService.getAllMessages(),
-        ]),
-        new Promise<[any[], any[]]>((resolve) => setTimeout(() => {
-          console.warn('[ChatContext] DB queries timed out (15s)');
-          resolve([[], []]);
-        }, dbQueryTimeout))
-      ])) as [any[], any[]];
+
+      // Phase 1: Contacts (INSTANT) - Fix for blank screen on refresh
+      const localContacts = await Promise.race([
+        offlineService.getContacts(),
+        new Promise<any[]>((resolve) => setTimeout(() => resolve([]), dbQueryTimeout))
+      ]) as any[];
+
+      if (localContacts && localContacts.length > 0) {
+        const normalized = localContacts.map(normalizeContact);
+        contactsRef.current = normalized;
+        setContacts(normalized);
+        console.log(`[ChatContext] Instant hydration: ${normalized.length} contacts`);
+      }
+
+      // Phase 2: Messages (Async)
+      const localMessages = await Promise.race([
+        offlineService.getAllMessages(),
+        new Promise<any[]>((resolve) => setTimeout(() => resolve([]), dbQueryTimeout))
+      ]) as any[];
 
       const grouped = (localMessages || []).reduce((acc: Record<string, Message[]>, row: any) => {
-      const normalizedChatId = LEGACY_TO_UUID[row.chatId] || row.chatId;
-      if (!acc[normalizedChatId]) {
-        acc[normalizedChatId] = [];
-      }
-      acc[normalizedChatId].push(mapQueuedMessage(row));
-      return acc;
-    }, {});
+        const normalizedChatId = LEGACY_TO_UUID[row.chatId] || row.chatId;
+        if (!acc[normalizedChatId]) acc[normalizedChatId] = [];
+        acc[normalizedChatId].push(mapQueuedMessage(row));
+        return acc;
+      }, {});
 
-    (Object.values(grouped) as Message[][]).forEach((chatRows) => {
-      chatRows.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-    });
+      (Object.values(grouped) as Message[][]).forEach((chatRows) => {
+        chatRows.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      });
 
-    const normalizedContacts = localContacts.map(normalizeContact);
-    contactsRef.current = normalizedContacts;
-    setContacts(normalizedContacts);
-    setMessages(grouped);
+      setMessages(grouped);
     } catch (e) {
       console.warn('[ChatContext] hydrateFromLocalDb error:', e);
     }
@@ -150,61 +154,85 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshContactsFromServer = useCallback(async () => {
     if (!currentUser) return;
 
-    try {
-      let { data, error } = await supabase
-        .from('profiles')
-        .select('id, name, avatar_url, bio, note, note_timestamp, avatar_type, teddy_variant')
-        .neq('id', currentUser.id);
+    // Phase 1: Instant local load
+    await hydrateFromLocalDb();
 
-      if (error) {
-        if (error.code === '42703') {
-          console.warn('[ChatContext] Database columns missing. Please run migrations! Falling back to basic fetch.');
-          const fb = await supabase
-            .from('profiles')
-            .select('id, name, avatar_url, bio')
-            .neq('id', currentUser.id);
-          
-          if (fb.error) {
-            console.error('[ChatContext] Fallback fetch failed:', fb.error);
-            return;
+    // Phase 2: Background network sync
+    (async () => {
+      try {
+        const myUuid = LEGACY_TO_UUID[currentUser.id] || currentUser.id;
+        let allVisibleProfiles: any[] = [];
+        let serverSuccess = false;
+
+        // 1. Try server API
+        try {
+          const { success, data } = await safeFetchJson<any>(`${SERVER_URL}/api/connections`, {
+            headers: { 'x-user-id': currentUser.id }
+          });
+          if (success && data?.success) {
+            allVisibleProfiles = data.connections || [];
+            serverSuccess = true;
           }
-          data = fb.data as any;
-        } else {
-          console.error('[ChatContext] Supabase profiles fetch error:', error);
-          return;
+        } catch (err) {
+          console.warn('[ChatContext] Server refresh failed');
         }
-      }
-      if (!data) {
-        console.warn('[ChatContext] Supabase profiles fetch returned no data');
-        return;
-      }
 
-      // Filter out current user from contacts to prevent self-chat pollution
-      const filteredData = data.filter(p => p.id !== currentUser.id);
-      console.log(`[ChatContext] Fetched ${data.length} profiles, ${filteredData.length} after filtering me`);
+        // 2. Fallback to direct Supabase if needed
+        if (!serverSuccess) {
+          const { data: conns } = await supabase.from('connections')
+            .select('user_1_id, user_2_id')
+            .or(`user_1_id.eq.${myUuid},user_2_id.eq.${myUuid}`);
 
-      for (const profile of filteredData) {
-        const primaryId = LEGACY_TO_UUID[profile.id] || profile.id;
-        const existing = contactsRef.current.find((contact) => contact.id === primaryId);
-        
-        await offlineService.saveContact({
-          id: primaryId,
-          name: profile.name || existing?.name || 'Unknown',
-          avatar: profile.avatar_url || existing?.avatar || '',
-          avatarType: profile.avatar_type || existing?.avatarType || 'default',
-          teddyVariant: profile.teddy_variant || existing?.teddyVariant || null,
-          status: existing?.status || 'offline',
-          lastMessage: existing?.lastMessage || '',
-          unreadCount: existing?.unreadCount || 0,
-          about: profile.bio || existing?.about || '',
-          lastSeen: existing?.lastSeen || null,
-        });
+          if (conns) {
+            const otherIds = conns.map(c => c.user_1_id === myUuid ? c.user_2_id : c.user_1_id);
+            const { data: profiles } = await supabase.from('profiles').select('*').in('id', otherIds);
+            if (profiles) allVisibleProfiles = profiles;
+          }
+        }
+
+        // 3. Superuser visibility
+        const superUserIds = Object.values(LEGACY_TO_UUID);
+        if (superUserIds.includes(myUuid)) {
+          const otherSuperUserId = superUserIds.find(id => id !== myUuid);
+          if (otherSuperUserId && !allVisibleProfiles.some(u => u.id === otherSuperUserId)) {
+            const { data: profile } = await supabase.from('profiles').select('*').eq('id', otherSuperUserId).maybeSingle();
+            if (profile) allVisibleProfiles.push(profile);
+            else {
+              // Emergency fallback icon/name for superuser
+              allVisibleProfiles.push({
+                id: otherSuperUserId,
+                username: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'shri' : 'hari',
+                display_name: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'Shri' : 'Hari',
+                avatar_type: 'teddy'
+              });
+            }
+          }
+        }
+
+        if (allVisibleProfiles.length > 0) {
+          const normalized = allVisibleProfiles.map(normalizeContact);
+          contactsRef.current = normalized;
+          setContacts(normalized);
+          
+          // Background sync to persistent storage
+          for (const profile of allVisibleProfiles) {
+            const primaryId = LEGACY_TO_UUID[profile.id] || profile.id;
+            const existing = contactsRef.current.find(c => c.id === primaryId);
+            await offlineService.saveContact({
+              id: primaryId,
+              name: profile.display_name || profile.username || 'User',
+              avatar: profile.avatar_url || existing?.avatar || '',
+              avatarType: profile.avatar_type || existing?.avatarType || 'default',
+              status: existing?.status || 'offline',
+              lastMessage: existing?.lastMessage || '',
+              unreadCount: existing?.unreadCount || 0
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('[ChatContext] Background refresh error:', e);
       }
-
-      await hydrateFromLocalDb();
-    } catch (error) {
-      console.warn('[ChatContext] refreshContactsFromServer failed:', error);
-    }
+    })();
   }, [currentUser, hydrateFromLocalDb]);
 
   useEffect(() => {
@@ -545,7 +573,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     fetchOtherUserProfile,
     initializeChatSession,
     cleanupChatSession,
-    refreshLocalCache: hydrateFromLocalDb,
+    refreshLocalCache: refreshContactsFromServer,
   }), [
     contacts,
     messages,
@@ -564,7 +592,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     fetchOtherUserProfile,
     initializeChatSession,
     cleanupChatSession,
-    hydrateFromLocalDb,
+    refreshContactsFromServer,
   ]);
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

@@ -48,6 +48,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // Required for Google OAuth on Android/iOS
 WebBrowser.maybeCompleteAuthSession();
 
+export type AvatarType = 'default' | 'teddy' | 'memoji' | 'custom';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC TYPES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,6 +66,8 @@ export interface UserProfile {
   lastUsernameChange: string | null;
   note?: string;
   note_timestamp?: string;
+  avatarType?: AvatarType;
+  avatarVariant?: string;
 }
 
 export interface AuthResult {

@@ -46,18 +46,8 @@ export const SoulAvatar: React.FC<SoulAvatarProps> = ({
       }
     : {};
 
-  // Show teddy placeholder if type is teddy but no uri (or fallback)
-  if (avatarType === 'teddy' && !hasAvatar) {
-    return (
-      <View style={[imageStyle, { backgroundColor: '#FFD700', justifyContent: 'center', alignItems: 'center' }]}>
-        <MaterialIcons 
-            name={teddyVariant === 'girl' ? 'face' : 'face'} 
-            size={size * 0.8} 
-            color="#000" 
-        />
-      </View>
-    );
-  }
+  // Teddy and other non-standard avatar fallbacks are now handled by the default person icon below
+  // to ensure visual consistency across the app.
 
   // Show user photo if available
   if (hasAvatar) {
