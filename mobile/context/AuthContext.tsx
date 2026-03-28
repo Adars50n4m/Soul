@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
-import { Platform } from 'react-native';
+import { Platform, AppState, Alert } from 'react-native';
 import { supabase, LEGACY_TO_UUID } from '../config/supabase';
 import { authService, AvatarType } from '../services/AuthService';
 import { offlineService } from '../services/LocalDBService';
@@ -59,7 +59,13 @@ export const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [currentUser, setCurrentUser] = useState<User | null>(null);
     const [isReady, setIsReady] = useState(false);
+    const [deviceSessionId, setDeviceSessionId] = useState<string | null>(null);
     const currentUserRef = useRef<User | null>(null);
+    const deviceSessionIdRef = useRef<string | null>(null);
+
+    useEffect(() => {
+        deviceSessionIdRef.current = deviceSessionId;
+    }, [deviceSessionId]);
 
     useEffect(() => {
         currentUserRef.current = currentUser;
@@ -76,6 +82,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     resolve(null);
                 }, 5000))
             ]);
+            // Session Management: Generate and sync device session ID
+            let localSessionId = await AsyncStorage.getItem('ss_device_session_id');
+            if (!localSessionId) {
+                localSessionId = `soul_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                await AsyncStorage.setItem('ss_device_session_id', localSessionId);
+            }
+            setDeviceSessionId(localSessionId);
+
+            // Update profile with the new session ID
+            await supabase
+                .from('profiles')
+                .update({ active_session_id: localSessionId })
+                .eq('id', userId);
+
             if (profile) {
                 const userObj: User = {
                     id: profile.id,
@@ -93,6 +113,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 await AsyncStorage.setItem('ss_current_user', userId);
             } else {
                 // FALLBACK: For Developer Bypass users (shri/hari) who don't exist in Supabase DB
+                console.log('[AuthContext] Profile not found, applying bypass logic for:', userId);
                 if (userId === LEGACY_TO_UUID['shri']) {
                     setCurrentUser({
                         id: userId,
@@ -297,7 +318,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         await authService.signOut();
         setCurrentUser(null);
-        await AsyncStorage.removeItem('ss_current_user');
+        await AsyncStorage.multiRemove(['ss_current_user', 'ss_device_session_id']);
         router.replace('/login');
     }, []);
 
@@ -334,6 +355,81 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         return result;
     }, [currentUser, refreshProfile]);
+
+    // ── SESSION MONITORING: Real-time logout if logged in elsewhere ──────────
+    useEffect(() => {
+        if (!currentUser?.id) return;
+
+        console.log('[AuthContext] Subscribing to session monitor for:', currentUser.id);
+        
+        const channel = supabase
+            .channel(`session_monitor_${currentUser.id}`)
+            .on(
+                'postgres_changes',
+                {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'profiles',
+                    filter: `id=eq.${currentUser.id}`
+                },
+                (payload) => {
+                    const newSessionId = payload.new.active_session_id;
+                    const currentLocalId = deviceSessionIdRef.current;
+                    
+                    console.log(`[AuthContext] Session update detected: DB=${newSessionId}, Local=${currentLocalId}`);
+                    
+                    if (newSessionId && currentLocalId && newSessionId !== currentLocalId) {
+                        console.warn('[AuthContext] Session mismatch detected! Triggering logout...');
+                        Alert.alert(
+                            'Logged Out',
+                            'You have been logged out because you logged in on another device.',
+                            [{ text: 'OK', onPress: () => logout() }],
+                            { cancelable: false }
+                        );
+                    }
+                }
+            )
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
+    }, [currentUser?.id, logout]);
+
+    // ── SESSION MONITORING: Re-validate on App Resume ────────────────────────
+    useEffect(() => {
+        const subscription = AppState.addEventListener('change', async (nextAppState) => {
+            if (nextAppState === 'active' && currentUser?.id) {
+                console.log('[AuthContext] App active, re-validating session...');
+                try {
+                    const { data, error } = await supabase
+                        .from('profiles')
+                        .select('active_session_id')
+                        .eq('id', currentUser.id)
+                        .single();
+                    
+                    if (data && !error) {
+                        const dbSessionId = data.active_session_id;
+                        const localId = deviceSessionIdRef.current;
+                        
+                        if (dbSessionId && localId && dbSessionId !== localId) {
+                            console.warn('[AuthContext] Foreground session mismatch! Triggering logout...');
+                            Alert.alert(
+                                'Session Expired',
+                                'Account active on another device. Please log in again to continue.',
+                                [{ text: 'OK', onPress: () => logout() }],
+                                { cancelable: false }
+                            );
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[AuthContext] Foreground session check failed:', e);
+                }
+            }
+        });
+
+        return () => subscription.remove();
+    }, [currentUser?.id, logout]);
 
     const value = {
         currentUser,
