@@ -33,7 +33,14 @@ export const GlassView = ({
         : ['rgba(255, 255, 255, 0.5)', 'rgba(240, 240, 250, 0.3)'];
 
     return (
-        <View style={[styles.container, style]}>
+        <View style={[
+            styles.container, 
+            style,
+            // Optimization for iOS shadow calculation: 
+            // Providing a nearly-transparent background helps the shadow engine
+            // calculate the shadow efficiently for views with shadows and no background.
+            Platform.OS === 'ios' && { backgroundColor: 'rgba(0,0,0,0.01)' }
+        ]}>
             {IS_ANDROID && (
                 <>
                     {/* Level 1: Static background */}

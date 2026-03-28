@@ -436,7 +436,7 @@ class AuthService {
         path: 'auth/callback',
       });
 
-      console.log(`[Auth] Redirect URI: ${redirectUri}`);
+      console.log(`[Auth] Google OAuth: Starting with redirectUri: ${redirectUri}`);
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
@@ -446,13 +446,23 @@ class AuthService {
         },
       });
 
-      if (error) throw error;
+      if (error) {
+        console.error('[Auth] Supabase OAuth initiation error:', error);
+        throw error;
+      }
+
+      console.log(`[Auth] Supabase OAuth URL received: ${data.url}`);
 
       // Open the browser for Google login
       const result = await WebBrowser.openAuthSessionAsync(
         data.url ?? '',
         redirectUri
       );
+
+      console.log(`[Auth] Google OAuth result type: ${result.type}`);
+      if (result.type === 'success') {
+          console.log(`[Auth] Google OAuth Success URL: ${result.url}`);
+      }
 
       if (result.type !== 'success') {
         return { success: false, error: 'Google sign-in was cancelled.' };
@@ -493,13 +503,22 @@ class AuthService {
 
   // Helper to establish session and determine if it's a new user
   private async establishSession(access: string, refresh: string): Promise<AuthResult> {
+    console.log('[Auth] Establishing session with tokens...');
     const { data: sessionData, error: sessionError } = await supabase.auth.setSession({
       access_token: access,
       refresh_token: refresh,
     });
 
-    if (sessionError) throw sessionError;
-    if (!sessionData.user) return { success: false, error: 'Failed to establish session.' };
+    if (sessionError) {
+      console.error('[Auth] Session establishment error:', sessionError);
+      throw sessionError;
+    }
+    if (!sessionData.user) {
+      console.warn('[Auth] No user returned after setSession');
+      return { success: false, error: 'Failed to establish session.' };
+    }
+
+    console.log(`[Auth] Session established for user: ${sessionData.user.id}`);
 
     const profile = await this.getProfile(sessionData.user.id);
     const isNewUser = !profile || !profile.username;

@@ -4,13 +4,12 @@ import { supabase } from '../config/supabase';
 import { proxySupabaseUrl, SERVER_URL, safeFetchJson } from '../config/api';
 import { chatService, type ChatMessage } from '../services/ChatService';
 import { offlineService, type QueuedMessage } from '../services/LocalDBService';
+import { soulFolderService } from '../services/SoulFolderService';
 import { useAuth } from './AuthContext';
 import { type Contact, type Message } from '../types';
 
-export const LEGACY_TO_UUID: Record<string, string> = {
-  'shri': 'f00f00f0-0000-0000-0000-000000000002',
-  'hari': 'f00f00f0-0000-0000-0000-000000000001',
-};
+import { normalizeId, getSuperuserName, LEGACY_TO_UUID, isWithinEditWindow } from '../utils/idNormalization';
+import { Alert } from 'react-native';
 
 interface ChatContextType {
   contacts: Contact[];
@@ -78,7 +77,8 @@ function mapChatMessage(message: ChatMessage, currentUserId: string): Message {
 }
 
 function normalizeContact(row: any): Contact {
-  const name = row.display_name || row.full_name || row.name || row.username || (row.id ? `@${row.id.substring(0, 5)}` : 'User');
+  const superuserName = getSuperuserName(row.id);
+  const name = superuserName || row.display_name || row.full_name || row.name || row.username || (row.id ? `@${row.id.substring(0, 5)}` : 'User');
   return {
     id: row.id,
     name: name,
@@ -88,6 +88,7 @@ function normalizeContact(row: any): Contact {
     unreadCount: row.unreadCount ?? row.unread_count ?? 0,
     about: row.about ?? row.bio ?? '',
     lastSeen: row.lastSeen ?? row.last_seen ?? undefined,
+    last_updated_at: row.updated_at || row.updatedAt || undefined,
   };
 }
 
@@ -99,27 +100,35 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [uploadProgressTracker, setUploadProgressTracker] = useState<Record<string, number>>({});
   const [otherUser, setOtherUser] = useState<any | null>(null);
-  const [connectivity, setConnectivity] = useState(chatService.getConnectivityState());
+  const [connectivity, setConnectivity] = useState(() => chatService.getConnectivityState());
   const presenceChannelRef = useRef<any>(null);
   const activeChatIdRef = useRef<string | null>(null);
+  const lastServerSyncRef = useRef<number>(0);
 
   const contactsRef = useRef<Contact[]>([]);
 
-  const hydrateFromLocalDb = useCallback(async () => {
+  const hydrateFromLocalDb = useCallback(async (passedUserId?: string) => {
     try {
-      const hydrationTimeout = 15000;
+      const hydrationTimeout = 5000;
+      const start = Date.now();
       await Promise.race([
         offlineService.initialize(),
+        soulFolderService.init(),
         new Promise<void>((resolve) => setTimeout(() => {
-          console.warn('[ChatContext] Offline DB init timed out (15s), moving on');
+          console.warn(`[ChatContext] Offline DB/Folder init timed out after ${Date.now() - start}ms, moving on`);
           resolve();
         }, hydrationTimeout))
       ]);
 
       // FIX: Migrate legacy IDs (shri, hari) to UUIDs so history is preserved
       await offlineService.migrateLegacyIds(LEGACY_TO_UUID);
+      
+      // Perform one-time migration of old media files if needed (in background)
+      soulFolderService.migrateFromOldCache().catch(() => {});
+      soulFolderService.migrateOldStorageServiceFiles().catch(() => {});
+      
     } catch (e) {
-      console.warn('[ChatContext] Offline DB init failed:', e);
+      console.warn('[ChatContext] Offline init failed:', e);
     }
 
     try {
@@ -132,10 +141,31 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       ]) as any[];
 
       if (localContacts && localContacts.length > 0) {
-        const normalized = localContacts.map(mapLocalContact);
+        // ROBUST FILTERING: If currentUser is not yet available, try to get ID from AsyncStorage
+        let myUuid = passedUserId || currentUser?.id;
+        if (!myUuid) {
+          const cachedId = await require('@react-native-async-storage/async-storage').default.getItem('ss_current_user');
+          if (cachedId) myUuid = cachedId;
+        }
+
+        const normalized = localContacts
+          .map(mapLocalContact)
+          .filter(c => {
+            if (!myUuid) return true;
+            const cid = LEGACY_TO_UUID[c.id] || c.id;
+            const mid = LEGACY_TO_UUID[myUuid] || myUuid;
+            
+            // If we found the user's ID in the local DB, PURGE IT permanently.
+            if (cid === mid) {
+              offlineService.deleteContact(c.id).catch(() => {}); // Purge ghost contact
+              return false;
+            }
+            return true;
+          });
+
         contactsRef.current = normalized;
         setContacts(normalized);
-        console.log(`[ChatContext] Instant hydration: ${normalized.length} contacts`);
+        console.log(`[ChatContext] Instant hydration: ${normalized.length} contacts (filtered self: ${!!myUuid})`);
       }
 
       // Phase 2: Messages (Async)
@@ -165,9 +195,16 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!currentUser) return;
 
     // Phase 1: Instant local load
-    await hydrateFromLocalDb();
+    await hydrateFromLocalDb(currentUser.id);
 
-    // Phase 2: Background network sync
+    // Phase 2: Background network sync with 5-minute throttling
+    const now = Date.now();
+    const FIVE_MINUTES = 5 * 60 * 1000;
+    if (now - lastServerSyncRef.current < FIVE_MINUTES) {
+      console.log('[ChatContext] Skipping server refresh (synced recently)');
+      return;
+    }
+
     (async () => {
       try {
         const myUuid = LEGACY_TO_UUID[currentUser.id] || currentUser.id;
@@ -208,7 +245,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const { data: profile } = await supabase.from('profiles').select('*').eq('id', otherSuperUserId).maybeSingle();
             if (profile) allVisibleProfiles.push(profile);
             else {
-              // Emergency fallback icon/name for superuser
               allVisibleProfiles.push({
                 id: otherSuperUserId,
                 username: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'shri' : 'hari',
@@ -220,13 +256,18 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         if (allVisibleProfiles.length > 0) {
-          const normalized = allVisibleProfiles.map(normalizeContact);
+          const normalized = allVisibleProfiles
+            .filter(p => {
+              const pId = LEGACY_TO_UUID[p.id] || p.id;
+              return pId !== myUuid;
+            })
+            .map(normalizeContact);
           contactsRef.current = normalized;
           setContacts(normalized);
           
-          // Background sync to persistent storage
           for (const profile of allVisibleProfiles) {
             const primaryId = LEGACY_TO_UUID[profile.id] || profile.id;
+            if (primaryId === myUuid) continue; // Skip saving self to contacts DB
             const existing = contactsRef.current.find(c => c.id === primaryId);
             await offlineService.saveContact({
               id: primaryId,
@@ -238,6 +279,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
               unreadCount: existing?.unreadCount || 0
             });
           }
+          lastServerSyncRef.current = Date.now();
         }
       } catch (e) {
         console.warn('[ChatContext] Background refresh error:', e);
@@ -260,7 +302,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let cancelled = false;
 
     (async () => {
-      await hydrateFromLocalDb();
+      await hydrateFromLocalDb(currentUser.id);
       if (!cancelled) {
         await refreshContactsFromServer();
       }
@@ -271,13 +313,29 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [currentUser, hydrateFromLocalDb, refreshContactsFromServer]);
 
+  /**
+   * Smart Merge: Preservation of local-only state (like localFileUri)
+   */
   const upsertMessage = useCallback((partnerId: string, nextMessage: Message) => {
     setMessages((prev) => {
       const current = prev[partnerId] || [];
-      const exists = current.find((item) => item.id === nextMessage.id);
-      const updated = exists
-        ? current.map((item) => (item.id === nextMessage.id ? { ...item, ...nextMessage } : item))
-        : [...current, nextMessage];
+      const index = current.findIndex((item) => item.id === nextMessage.id);
+      
+      let updated;
+      if (index !== -1) {
+        const existing = current[index];
+        // CRITICAL FIX: Merge updates but PRESERVE localFileUri if nextMessage doesn't have it
+        // This is where most "re-download" issues happen!
+        updated = [...current];
+        updated[index] = {
+          ...existing,
+          ...nextMessage,
+          localFileUri: nextMessage.localFileUri || existing.localFileUri,
+          thumbnailUri: nextMessage.thumbnailUri || existing.thumbnailUri
+        };
+      } else {
+        updated = [...current, nextMessage];
+      }
 
       updated.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
       return { ...prev, [partnerId]: updated };
@@ -289,9 +347,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     setContacts((prev) => {
       const existing = prev.find((contact) => contact.id === partnerId);
-      if (!existing) {
-        return prev;
-      }
+      if (!existing) return prev;
 
       const unreadDelta =
         message.sender === 'them' && activeChatIdRef.current !== partnerId ? 1 : 0;
@@ -308,12 +364,23 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, []);
 
-  const handleIncomingMessage = useCallback((message: ChatMessage) => {
+  /**
+   * Improved incoming message handling with database verification
+   */
+  const handleIncomingMessage = useCallback(async (message: ChatMessage) => {
     if (!currentUser) return;
 
-    const partnerId =
-      message.sender_id === currentUser.id ? message.receiver_id : message.sender_id;
+    const partnerId = message.sender_id === currentUser.id ? message.receiver_id : message.sender_id;
     const normalized = mapChatMessage(message, currentUser.id);
+
+    // FIX Root Cause: Before updating state, check if we already have a localFileUri in SQLite
+    if (normalized.media && !normalized.localFileUri) {
+      const localPath = await offlineService.getMediaDownload(normalized.id);
+      if (localPath) {
+        normalized.localFileUri = localPath;
+        console.log(`[ChatContext] Restored path from DB for ${normalized.id}: ${localPath}`);
+      }
+    }
 
     upsertMessage(partnerId, normalized);
     updateContactPreview(partnerId, normalized);
@@ -322,7 +389,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const handleStatusUpdate = useCallback((messageId: string, status: ChatMessage['status'], newId?: string) => {
     setMessages((prev) => {
       const nextState = { ...prev };
-
       for (const chatId of Object.keys(nextState)) {
         const chatRows = nextState[chatId];
         const hasMatch = chatRows.some((message) => message.id === messageId || (!!newId && message.id === newId));
@@ -332,7 +398,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (message.id !== messageId && (!newId || message.id !== newId)) {
             return message;
           }
-
           return {
             ...message,
             id: newId && message.id === messageId ? newId : message.id,
@@ -340,15 +405,33 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
         });
       }
+      return nextState;
+    });
+  }, []);
 
+  const handleRemoteDelete = useCallback((messageId: string) => {
+    console.log(`[ChatContext] Handling remote delete for ${messageId}`);
+    setMessages((prev) => {
+      const nextState = { ...prev };
+      for (const chatId of Object.keys(nextState)) {
+        nextState[chatId] = (nextState[chatId] || []).filter(m => m.id !== messageId);
+      }
       return nextState;
     });
   }, []);
 
   const initializeChatSession = useCallback(async (partnerId: string) => {
     if (!currentUser) return;
-
     activeChatIdRef.current = partnerId;
+
+    // Load from SQLite first for instant responsiveness
+    const existingMessages = await offlineService.getMessages(partnerId, 500);
+    setMessages((prev) => ({
+      ...prev,
+      [partnerId]: existingMessages.map(mapQueuedMessage),
+    }));
+
+    // Start network session (syncs with Supabase)
     await chatService.initialize(
       currentUser.id,
       partnerId,
@@ -358,15 +441,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       () => setConnectivity(chatService.getConnectivityState()),
       (msgId, progress) => {
         setUploadProgressTracker(prev => ({ ...prev, [msgId]: progress }));
-      }
+      },
+      undefined, // onAcknowledgment
+      handleRemoteDelete
     );
     setConnectivity(chatService.getConnectivityState());
-
-    const existingMessages = await offlineService.getMessages(partnerId, 500);
-    setMessages((prev) => ({
-      ...prev,
-      [partnerId]: existingMessages.map(mapQueuedMessage),
-    }));
   }, [currentUser, handleIncomingMessage, handleStatusUpdate]);
 
   const cleanupChatSession = useCallback((partnerId?: string) => {
@@ -388,15 +467,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     channel.on('presence', { event: 'sync' }, () => {
       const state = channel.presenceState();
       const users = new Set<string>();
-
       Object.values(state).forEach((presences: any) => {
         presences.forEach((presence: any) => {
-          if (presence.user_id) {
-            users.add(presence.user_id);
-          }
+          if (presence.user_id) users.add(presence.user_id);
         });
       });
-
       const uniqueUsers = Array.from(users);
       setOnlineUsers(uniqueUsers);
       setContacts((prev) =>
@@ -423,15 +498,74 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     });
 
+    // --- REAL-TIME PROFILE UPDATES (DP, Name, Note) ---
+    const profileChannel = supabase
+      .channel('profile-sync-global')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'profiles' },
+        (payload) => {
+          const updated = payload.new as any;
+          const updatedId = LEGACY_TO_UUID[updated.id] || updated.id;
+          const myPrimaryId = LEGACY_TO_UUID[currentUser.id] || currentUser.id;
+          
+          if (updatedId === myPrimaryId) return; // Ignore own changes (AuthContext handles them)
+
+          setContacts((prev) => {
+            const index = prev.findIndex(c => (LEGACY_TO_UUID[c.id] || c.id) === updatedId);
+            if (index === -1) return prev; // Not in my contacts
+
+            const existing = prev[index];
+            
+            // VALIDATION: Only update if the incoming timestamp is newer
+            const existingTs = existing.last_updated_at ? new Date(existing.last_updated_at).getTime() : 0;
+            const newTs = updated.updated_at ? new Date(updated.updated_at).getTime() : 0;
+            
+            if (newTs <= existingTs && existingTs !== 0) {
+                console.log(`[ChatContext] Skipping profile update for ${updated.id} (already up-to-date)`);
+                return prev;
+            }
+
+            console.log(`[ChatContext] Real-time profile update for ${updated.id}: ${updated.display_name || updated.username}`);
+            
+            const next = [...prev];
+            const normalized = normalizeContact(updated);
+            next[index] = {
+                ...existing,
+                ...normalized,
+                last_updated_at: updated.updated_at
+            };
+
+            // PERSIST TO SQLITE
+            offlineService.saveContact({
+                id: updated.id,
+                name: updated.display_name || updated.username || 'User',
+                avatar: updated.avatar_url || '',
+                avatarType: updated.avatar_type || 'default',
+                status: existing.status,
+                lastMessage: existing.lastMessage,
+                unreadCount: existing.unreadCount,
+                about: updated.bio || '',
+                updatedAt: updated.updated_at,
+                note: updated.note,
+                noteTimestamp: updated.note_timestamp
+            }).catch(e => console.warn('[ChatContext] Failed to persist real-time profile update:', e));
+
+            return next;
+          });
+        }
+      )
+      .subscribe();
+
     return () => {
       channel.untrack();
       supabase.removeChannel(channel);
+      supabase.removeChannel(profileChannel);
     };
   }, [currentUser]);
 
   const sendChatMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string, localUri?: string) => {
     if (!currentUser) return;
-
     if (activeChatIdRef.current !== chatId) {
       await initializeChatSession(chatId);
     }
@@ -446,6 +580,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const updateMessage = useCallback(async (chatId: string, messageId: string, updates: Partial<Message>) => {
     if (!chatId) return;
+    
+    const current = messages[chatId]?.find(m => m.id === messageId);
+    if (current && !isWithinEditWindow(current.timestamp)) {
+      Alert.alert('Time Limit Exceeded', 'You can only edit messages within 5 minutes of sending.');
+      return;
+    }
     
     setMessages((prev) => {
       const chatMsgs = prev[chatId];
@@ -462,7 +602,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (updates.localFileUri) {
       await offlineService.updateMessageLocalUri(messageId, updates.localFileUri);
     }
-  }, []);
+  }, [messages]);
 
   const addReaction = useCallback(async (chatId: string, messageId: string, emoji: string | null) => {
     setMessages((prev) => ({
@@ -476,18 +616,27 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           : message
       ),
     }));
-
     await offlineService.updateMessageReaction(messageId, emoji);
   }, []);
 
   const deleteMessage = useCallback(async (chatId: string, messageId: string) => {
+    const current = messages[chatId]?.find(m => m.id === messageId);
+    
+    // Within 5 minutes and I am the sender -> DELETE FOR EVERYONE
+    if (current && current.sender === 'me' && isWithinEditWindow(current.timestamp)) {
+      console.log(`[ChatContext] Deleting for everyone: ${messageId}`);
+      await chatService.requestDeleteForEveryone(messageId);
+      // Fall through to local delete
+    } else {
+      console.log(`[ChatContext] Deleting for me only: ${messageId}`);
+    }
+
     setMessages((prev) => ({
       ...prev,
       [chatId]: (prev[chatId] || []).filter((message) => message.id !== messageId),
     }));
-
     await offlineService.deleteMessage(messageId);
-  }, []);
+  }, [messages]);
 
   const toggleHeart = useCallback(async (chatId: string, messageId: string) => {
     const current = messages[chatId]?.find((message) => message.id === messageId);
@@ -497,7 +646,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const sendTyping = useCallback((isTyping: boolean) => {
     if (!currentUser || !otherUser) return;
-
     presenceChannelRef.current?.send({
       type: 'broadcast',
       event: isTyping ? 'typing' : 'stop-typing',
@@ -507,12 +655,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const clearChatMessages = useCallback(async (partnerId: string) => {
     await offlineService.clearChat(partnerId);
-
-    setMessages((prev) => ({
-      ...prev,
-      [partnerId]: [],
-    }));
-
+    setMessages((prev) => ({ ...prev, [partnerId]: [] }));
     setContacts((prev) =>
       prev.map((contact) =>
         contact.id === partnerId
@@ -537,15 +680,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const response = await fetch(`${SERVER_URL}/api/connections/${partnerId}`, {
         method: 'DELETE',
-        headers: {
-          'x-user-id': currentUser?.id || '',
-        }
+        headers: { 'x-user-id': currentUser?.id || '' }
       });
       const data = await response.json() as any;
       if (data.success) {
-        // Remove from local contacts
         setContacts(prev => prev.filter(c => c.id !== partnerId));
-        // Clear chat history
         await clearChatMessages(partnerId);
       }
     } catch (err) {
@@ -554,10 +693,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentUser, clearChatMessages]);
 
   const fetchOtherUserProfile = useCallback(async (userId: string) => {
-    // FIX: Standardize userId first to handle legacy/UUID consistently
     const sid = (userId && LEGACY_TO_UUID[userId]) || userId;
-
-    // FIX: Support hardcoded bypass users (shri/hari)
     if (sid === LEGACY_TO_UUID['shri']) {
       setOtherUser({
         id: sid,
@@ -578,11 +714,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
       return;
     }
-
     try {
-      // Use the mapped UUID (sid) instead of raw userId
-      const queryId = sid;
-      const { data } = await supabase.from('profiles').select('*').eq('id', queryId).single();
+      const { data } = await supabase.from('profiles').select('*').eq('id', sid).single();
       if (data) {
         setOtherUser({
           id: data.id,
@@ -597,12 +730,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  const value = useMemo<ChatContextType>(() => ({
+  const contextValue = useMemo(() => ({
     contacts,
     messages,
     onlineUsers,
     typingUsers,
-    uploadProgressTracker,
     otherUser,
     connectivity,
     setOtherUser,
@@ -618,6 +750,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initializeChatSession,
     cleanupChatSession,
     refreshLocalCache: refreshContactsFromServer,
+    uploadProgressTracker,
     archiveContact,
     unfriendContact,
   }), [
@@ -625,9 +758,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     messages,
     onlineUsers,
     typingUsers,
-    uploadProgressTracker,
     otherUser,
     connectivity,
+    setOtherUser,
     sendChatMessage,
     updateMessage,
     addReaction,
@@ -643,7 +776,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     unfriendContact,
   ]);
 
-  return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
+  return <ChatContext.Provider value={contextValue}>{children}</ChatContext.Provider>;
 };
 
 export const useChat = () => {

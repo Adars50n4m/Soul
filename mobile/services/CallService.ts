@@ -55,6 +55,8 @@ class CallService {
     private reconnectTimer: NodeJS.Timeout | null = null;
     private personalChannelSubscribed: boolean = false;
     private processedSignalIds: Set<string> = new Set();
+    private signalPollTimer: NodeJS.Timeout | null = null;
+    private lastSignalPollAt: string = new Date().toISOString();
 
     addStatusListener(handler: (connected: boolean) => void): void {
         this.statusListeners.add(handler);
@@ -98,7 +100,47 @@ class CallService {
         this.userId = userId;
         this.reconnectAttempts = 0;
         this.processedSignalIds.clear();
+        this.lastSignalPollAt = new Date().toISOString();
         this._subscribePersonalChannel(userId);
+        this.startSignalPolling();
+    }
+
+    private startSignalPolling() {
+        if (this.signalPollTimer) clearInterval(this.signalPollTimer);
+        this.signalPollTimer = setInterval(() => this.pollForSignals(), 3000); 
+    }
+
+    private async pollForSignals() {
+        if (!this.userId) return;
+        try {
+            const { data, error } = await supabase
+                .from('call_signals')
+                .select('*')
+                .eq('receiver_id', this.userId)
+                .gt('created_at', this.lastSignalPollAt)
+                .order('created_at', { ascending: true });
+
+            if (error) throw error;
+
+            if (data && data.length > 0) {
+                this.lastSignalPollAt = data[data.length - 1].created_at;
+                data.forEach(row => {
+                    // Reconstruct CallSignal from DB row
+                    const signal: CallSignal = {
+                        ...(row.payload as any),
+                        type: row.type as any,
+                        signalId: row.signal_id,
+                        callerId: row.sender_id,
+                        calleeId: row.receiver_id,
+                        timestamp: row.created_at
+                    };
+                    this.handleIncomingSignal(signal);
+                });
+            }
+        } catch (err) {
+            // Non-fatal, just log it
+            console.log('[CallService] Signal polling check:', err);
+        }
     }
 
     private _subscribePersonalChannel(userId: string): void {
@@ -526,6 +568,21 @@ class CallService {
         const signalType = signal.type;
         const recipientId = this.getRecipientId(signal);
 
+        // 1. PRIMARY: Insert into DB (works through proxies, firewall friendly)
+        try {
+            await supabase.from('call_signals').insert({
+                signal_id: signal.signalId,
+                sender_id: this.userId,
+                receiver_id: recipientId,
+                type: signalType,
+                payload: signal
+            });
+            console.log(`[CallService] ✅ Signal [${signalType}] persisted to DB`);
+        } catch (dbErr) {
+            console.warn('[CallService] ❌ DB signaling failed:', dbErr);
+            // Continue to Broadcast anyway as fallback-of-fallback
+        }
+
         // 2. BONUS: Also try broadcast (faster if WebSocket works)
         try {
             if (signalType === 'call-request' || signalType === 'call-accept' || 
@@ -642,6 +699,11 @@ class CallService {
             this.roomChannel.unsubscribe();
             supabase.removeChannel(this.roomChannel);
             this.roomChannel = null;
+        }
+
+        if (this.signalPollTimer) {
+            clearInterval(this.signalPollTimer);
+            this.signalPollTimer = null;
         }
         
         // Clear persisted state

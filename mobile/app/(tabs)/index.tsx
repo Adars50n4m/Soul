@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
-import { View, Text, Image, Pressable, StyleSheet, StatusBar, Dimensions, Alert, FlatList, Platform, TouchableOpacity, RefreshControl } from 'react-native';
+import { View, Text, Image, Pressable, StyleSheet, StatusBar, Dimensions, Alert, FlatList, Platform, TouchableOpacity, RefreshControl, ActionSheetIOS, TextInput, Modal } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 
 import { useRouter, useNavigation } from 'expo-router';
@@ -27,7 +27,9 @@ import SwipeableRow from '../../components/ui/SwipeableRow';
 
 import { useApp } from '../../context/AppContext';
 import { usePresence } from '../../context/PresenceContext';
-import { LEGACY_TO_UUID } from '../../config/supabase';
+import { useScrollMotion } from '../../components/navigation/ScrollMotionProvider';
+import { normalizeId, getSuperuserName, LEGACY_TO_UUID, UUID_TO_LEGACY } from '../../utils/idNormalization';
+import { SHRI_ID, HARI_ID } from '../../config/supabase';
 import { SoulAvatar } from '../../components/SoulAvatar';
 import { StatusViewerModal } from '../../components/StatusViewerModal';
 import { MediaPreviewModal } from '../../components/MediaPreviewModal';
@@ -248,6 +250,97 @@ const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, isTyping, get
 
 ChatListItem.displayName = 'ChatListItem';
 
+const AnimatedMoreMenu = ({ router, isSearching }: { router: any, isSearching: boolean }) => {
+  const [expanded, setExpanded] = useState(false);
+  const progress = useSharedValue(0);
+
+  useEffect(() => {
+    progress.value = withSpring(expanded ? 1 : 0, { damping: 16, stiffness: 180 });
+  }, [expanded]);
+
+  useEffect(() => {
+    if (isSearching) setExpanded(false);
+  }, [isSearching]);
+
+  const containerStyle = useAnimatedStyle(() => ({
+    width: interpolate(progress.value, [0, 1], [40, 200]),
+    height: interpolate(progress.value, [0, 1], [40, 134]),
+    borderRadius: interpolate(progress.value, [0, 1], [20, 16]),
+    backgroundColor: expanded ? 'rgba(0,0,0,0.6)' : 'transparent',
+  }));
+
+  const iconStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 0.4], [1, 0]),
+    transform: [
+      { scale: interpolate(progress.value, [0, 0.5], [1, 0.2]) },
+      { rotate: `${interpolate(progress.value, [0, 1], [0, 90])}deg` }
+    ] as any,
+  }));
+
+  const menuStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0.6, 1], [0, 1]),
+    transform: [{ translateY: interpolate(progress.value, [0, 1], [-10, 0]) }],
+  }));
+
+  return (
+    <View style={[{ zIndex: expanded ? 1000 : 1, width: 40, height: 40 }]}>
+      {expanded && (
+         <Pressable 
+           style={[{ position: 'absolute', width: Dimensions.get('window').width * 2, height: Dimensions.get('window').height * 2, top: -Dimensions.get('window').height, right: -Dimensions.get('window').width, bottom: undefined, left: undefined, zIndex: 1 }]}
+           onPress={() => setExpanded(false)}
+         />
+      )}
+      <Animated.View style={[
+        { position: 'absolute', top: 0, right: 0, overflow: 'hidden', zIndex: 10, borderWidth: expanded ? 1 : 0, borderColor: expanded ? 'rgba(255,255,255,0.1)' : 'transparent' },
+        containerStyle
+      ]}>
+        <GlassView intensity={expanded ? 50 : 0} tint="dark" style={{ flex: 1, backgroundColor: 'transparent' }}>
+          {/* Menu Items */}
+          <Animated.View style={[StyleSheet.absoluteFill, menuStyle, { paddingVertical: 0, justifyContent: 'flex-start' }]} pointerEvents={expanded ? 'auto' : 'none'}>
+             {/* Cancel/Cut Option - Takes the exact position of the original 3-dots */}
+             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', height: 40, width: '100%', alignItems: 'center', paddingRight: 4 }}>
+                <Pressable onPress={() => setExpanded(false)} style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' }}>
+                  <MaterialIcons name="close" size={22} color="#fff" />
+                </Pressable>
+             </View>
+
+             <View style={[styles.moreMenuDividerMorph, { marginHorizontal: 0, opacity: 0.3 }]} />
+
+             <Pressable 
+                style={styles.moreMenuItemMorph}
+                onPress={() => { setExpanded(false); router.push('/search'); }}
+              >
+                <MaterialIcons name="person-search" size={20} color="#fff" style={styles.moreMenuIconMorph} />
+                <Text style={styles.moreMenuTextMorph}>Find Soulmates</Text>
+              </Pressable>
+              
+              <View style={styles.moreMenuDividerMorph} />
+              
+              <Pressable 
+                style={styles.moreMenuItemMorph}
+                onPress={() => { setExpanded(false); router.push('/requests'); }}
+              >
+                <MaterialIcons name="notifications-none" size={20} color="#fff" style={styles.moreMenuIconMorph} />
+                <Text style={styles.moreMenuTextMorph}>View Requests</Text>
+              </Pressable>
+          </Animated.View>
+
+          {/* Trigger Icon */}
+          <Pressable 
+            style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]}
+            onPress={() => !expanded && setExpanded(true)}
+            pointerEvents={expanded ? 'none' : 'auto'}
+          >
+            <Animated.View style={iconStyle}>
+              <MaterialIcons name="more-vert" size={24} color="#fff" />
+            </Animated.View>
+          </Pressable>
+        </GlassView>
+      </Animated.View>
+    </View>
+  );
+};
+
 export default function HomeScreen() {
   const {
     contacts,
@@ -271,6 +364,7 @@ export default function HomeScreen() {
   const navigation = useNavigation();
   const router = useRouter();
   const isFocused = useIsFocused();
+  const { onScroll: handleScrollMotion } = useScrollMotion('index');
 
   // Status Handlers
   const [selectedStatusContact, setSelectedStatusContact] = useState<Contact | null>(null);
@@ -280,6 +374,9 @@ export default function HomeScreen() {
   const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' } | null>(null);
   const [isUploadingStatus, setIsUploadingStatus] = useState(false);
   const [statusInitialLayout, setStatusInitialLayout] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  
   const statusRefs = useRef<Record<string, any>>({});
   const statusRailOpacity = useSharedValue(hasRenderedHomeOnce ? 0 : 1);
   const statusRailOffset = useSharedValue(0);
@@ -419,7 +516,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
           views: s.views || [],
           music: s.music,
         };
-        const primaryUserId = (LEGACY_TO_UUID as any)[s.userId] || s.userId;
+        const primaryUserId = normalizeId(s.userId);
         if (!map.has(primaryUserId)) map.set(primaryUserId, []);
         map.get(primaryUserId)!.push(story);
       });
@@ -430,18 +527,16 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
   }, [statuses]);
 
   const myStories = useMemo(
-    () => currentUser ? (contactStoriesMap.get(currentUser.id) || []) : [],
+    () => currentUser ? (contactStoriesMap.get(normalizeId(currentUser.id)) || []) : [],
     [contactStoriesMap, currentUser]
   );
 
   const visibleContacts = useMemo(() => {
     if (!contacts) return [];
     const legacyToUuid = LEGACY_TO_UUID;
-    const uuidToLegacy: Record<string, string> = {
-      '4d28b137-66ff-4417-b451-b1a421e34b25': 'shri',
-      '02e52f08-6c1e-497f-93f6-b29c275b8ca4': 'hari'
-    };
+    const uuidToLegacy = UUID_TO_LEGACY;
     
+    const myNormalizedId = normalizeId(currentUser?.id);
     const myLegacyId = currentUser?.id ? uuidToLegacy[currentUser.id] : null;
     const legacyIds = new Set(['shri', 'hari']);
     const superUserUuids = Object.values(legacyToUuid);
@@ -450,19 +545,14 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     const unified = new Map<string, Contact>();
     
     contacts.forEach(c => {
-      const primaryId = legacyToUuid[c.id] || c.id;
+      const primaryId = normalizeId(c.id);
       
       // Filter out self
-      if (primaryId === currentUser?.id) return;
-      if (c.id === 'shri' || c.id === 'hari') {
-         if (legacyToUuid[c.id] === currentUser?.id) return;
-      }
+      if (primaryId === myNormalizedId) return;
 
       const existing = unified.get(primaryId);
       if (!existing) {
-        const finalName = primaryId === legacyToUuid['shri'] ? 'Shri' : 
-                          (primaryId === legacyToUuid['hari'] ? 'Hari' : c.name);
-                          
+        const finalName = getSuperuserName(primaryId) || c.name;
         unified.set(primaryId, { ...c, id: primaryId, name: finalName });
       }
     });
@@ -495,6 +585,13 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
       return (isSelfSuperUserInteraction || hasMessages || hasMeaningfulLastMessage) && !isArchived;
     });
   }, [contacts, messages, statuses, currentUser]);
+
+  const filteredVisibleContacts = useMemo(() => {
+    if (!searchQuery.trim()) return visibleContacts;
+    return visibleContacts.filter(c => 
+      c.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
+    );
+  }, [visibleContacts, searchQuery]);
 
   const contactsWithStories = useMemo(() => {
      try {
@@ -549,11 +646,8 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
       return;
     }
 
-    if (currentUser.note) {
-      setIsNoteModalVisible(true);
-    } else {
-      setIsMediaPickerVisible(true);
-    }
+    // Always open media picker if no stories exist, even if a note exists
+    setIsMediaPickerVisible(true);
   };
 
   const closeModalRobustly = useCallback(() => {
@@ -683,6 +777,138 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     });
   }, [homeMorphProgress, router]);
 
+  const renderStatusItem = useCallback(({ item, index }: { item: any; index: number }) => {
+    if (item.id === 'my-status') {
+      const myStoryPreviewUrl = myStories[0]?.url;
+      const hasStory = myStories.length > 0;
+      
+      return (
+        <Pressable 
+          ref={ref => statusRefs.current['my-status'] = ref}
+          style={styles.statusCard} 
+          onPress={() => {
+            statusRefs.current['my-status']?.measureInWindow((x: number, y: number, width: number, height: number) => {
+              handleMyStatusPress({ x, y, width, height });
+            });
+          }}
+        >
+          <View style={styles.statusCardSurface}>
+            <View style={[styles.myStatusBackground, hasStory && { justifyContent: 'center', alignItems: 'center' }]}>
+              {hasStory && myStoryPreviewUrl ? (
+                <View style={StyleSheet.absoluteFill}>
+                  <Image source={{ uri: myStoryPreviewUrl }} style={styles.myStatusPreviewBgFull} />
+                  <LinearGradient
+                    colors={['rgba(0,0,0,0.5)', 'transparent']}
+                    style={styles.myStatusTopGradient}
+                  />
+                  <View style={styles.myStatusAvatarBadgeCorner} pointerEvents="none">
+                    <SoulAvatar 
+                       uri={proxySupabaseUrl(currentUser?.avatar)} 
+                       size={34} 
+                       avatarType={currentUser?.avatarType as any}
+                       isOnline={false}
+                       style={styles.avatarGlow}
+                    />
+                  </View>
+                </View>
+              ) : (
+                <View style={styles.myStatusEmptyPlaceholder}>
+                  <View style={styles.myStatusAvatarMain}>
+                    <SoulAvatar 
+                       uri={proxySupabaseUrl(currentUser?.avatar)} 
+                       size={64} 
+                       avatarType={currentUser?.avatarType as any}
+                       isOnline={false}
+                    />
+                    <View style={styles.addStatusBadgeContainer}>
+                      <LinearGradient
+                        colors={['#3b82f6', '#2563eb']}
+                        style={styles.addStatusBadgeGradient}
+                      >
+                        <MaterialIcons name="add" size={18} color="#fff" />
+                      </LinearGradient>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </View>
+            
+            {/* Glassy bottom bar */}
+            <View style={styles.statusInfoGlassWrapper}>
+              <GlassView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
+              <View style={styles.statusInfoContent}>
+                <Text style={styles.statusName} numberOfLines={1}>My Status</Text>
+              </View>
+            </View>
+          </View>
+          {currentUser?.note && isNoteValid(currentUser.noteTimestamp) && !isNoteModalVisible && (
+            <View style={styles.notePositioner} pointerEvents="box-none">
+              <Pressable onPress={() => setIsNoteModalVisible(true)}>
+                <NoteBubble text={currentUser.note} isMe />
+              </Pressable>
+            </View>
+          )}
+        </Pressable>
+      );
+    }
+    
+    const contact = item as Contact;
+    const stories = contactStoriesMap.get(contact.id) || [];
+    const hasUnseen = stories.some(s => !s.seen);
+    const storyUrl = stories[0]?.url;
+
+    return (
+      <Pressable 
+        key={contact.id}
+        ref={ref => statusRefs.current[contact.id] = ref}
+        style={styles.statusCard} 
+        onPress={() => {
+          statusRefs.current[contact.id]?.measureInWindow((x: number, y: number, width: number, height: number) => {
+            handleStatusPress(contact, { x, y, width, height });
+          });
+        }}
+      >
+        <View style={styles.statusCardSurface}>
+          {storyUrl ? (
+            <Image source={{ uri: storyUrl }} style={styles.statusMediaBackground} />
+          ) : (
+            <View style={[styles.statusMediaBackground, styles.statusPlaceholder]} />
+          )}
+          
+          <View style={styles.statusOverlay} pointerEvents="none">
+            {/* Story Ring - Blue gradient for unseen */}
+            <View style={styles.contactAvatarPositioner}>
+              <LinearGradient
+                colors={hasUnseen ? ['#3b82f6', '#8b5cf6', '#ec4899'] : ['rgba(255,255,255,0.2)', 'rgba(255,255,255,0.2)']}
+                style={[styles.storyRing, { padding: 2 }]}
+              >
+                <View style={styles.storyRingInner}>
+                  <SoulAvatar 
+                     uri={proxySupabaseUrl(contact.avatar)} 
+                     size={42} 
+                     avatarType={contact.avatarType as any}
+                  />
+                </View>
+              </LinearGradient>
+            </View>
+
+            <LinearGradient
+              colors={['transparent', 'rgba(0,0,0,0.85)']}
+              style={styles.statusNameGradient}
+            >
+              <Text style={styles.statusNameText}>{contact.name}</Text>
+            </LinearGradient>
+          </View>
+        </View>
+        {contact.note && isNoteValid(contact.noteTimestamp) && (
+            <View style={styles.notePositioner} pointerEvents="none">
+                <NoteBubble text={contact.note} />
+            </View>
+        )}
+      </Pressable>
+    );
+  }, [myStories, currentUser, contactStoriesMap, handleMyStatusPress, handleStatusPress]);
+
   // Pre-compute last messages map to avoid recalculating in renderItem
   const lastMessagesMap = useMemo(() => {
     const map: Record<string, { text?: string; timestamp?: string }> = {};
@@ -748,22 +974,42 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
   const renderHeader = useCallback(() => (
     <View style={styles.homeHeaderWrapper}>
       <View style={styles.topHeader}>
-        <View style={styles.headerActions}>
-           <TouchableOpacity 
-             onPress={() => router.push('/requests')} 
-             style={styles.headerIconButton}
-             activeOpacity={0.7}
-           >
-             <MaterialIcons name="notifications-none" size={26} color="#fff" />
-           </TouchableOpacity>
-           <TouchableOpacity 
-             onPress={() => router.push('/search')} 
-             style={styles.headerIconButton}
-             activeOpacity={0.7}
-           >
-             <MaterialIcons name="person-add-alt-1" size={26} color="#fff" />
-           </TouchableOpacity>
-        </View>
+        {isSearching ? (
+          <View style={styles.searchBarContainer}>
+            <TextInput
+              style={styles.searchBarInput}
+              placeholder="Search chats..."
+              placeholderTextColor="rgba(255,255,255,0.4)"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoFocus
+              selectionColor="#fff"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.searchClearBtn}>
+                <MaterialIcons name="close" size={20} color="rgba(255,255,255,0.5)" />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity 
+              onPress={() => { setIsSearching(false); setSearchQuery(''); }} 
+              style={styles.searchCancelBtn}
+            >
+              <Text style={styles.searchCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={styles.headerActions}>
+            <Text style={styles.headerTitle}>Soul</Text>
+            <TouchableOpacity 
+              onPress={() => setIsSearching(true)} 
+              style={styles.headerIconButton}
+              activeOpacity={0.7}
+            >
+              <MaterialIcons name="search" size={24} color="#fff" />
+            </TouchableOpacity>
+            <AnimatedMoreMenu router={router} isSearching={isSearching} />
+          </View>
+        )}
       </View>
       <Animated.View style={[styles.statusRail, statusRailAnimStyle]}>
       <FlatList
@@ -773,114 +1019,11 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.statusContent}
         removeClippedSubviews={false} // Better touch stability on Android
-        renderItem={({ item }) => {
-          if (item.id === 'my-status') {
-            const myStoryPreviewUrl = myStories[0]?.url;
-            return (
-              <Pressable 
-                ref={ref => statusRefs.current['my-status'] = ref}
-                style={styles.statusCard} 
-                onPress={() => {
-                  statusRefs.current['my-status']?.measureInWindow((x: number, y: number, width: number, height: number) => {
-                    handleMyStatusPress({ x, y, width, height });
-                  });
-                }}
-                android_ripple={{ color: 'rgba(255,255,255,0.1)' }}
-              >
-                <View style={styles.statusCardSurface}>
-                <View style={[styles.myStatusBackground, myStories.length > 0 && { justifyContent: 'flex-start', alignItems: 'flex-start' }]}>
-                  {!!myStoryPreviewUrl ? (
-                    <>
-                      <Image source={{ uri: myStoryPreviewUrl }} style={styles.myStatusPreviewBgFull} />
-                      <View style={styles.myStatusAvatarBadgeCorner} pointerEvents="none">
-                        <SoulAvatar 
-                           uri={proxySupabaseUrl(currentUser?.avatar)} 
-                           size={32} 
-                           avatarType={currentUser?.avatarType as any}
-                           isOnline={false}
-                        />
-                        <View style={styles.myStatusAddBadgeBlue}>
-                          <MaterialIcons name="add" size={12} color="#fff" />
-                        </View>
-                      </View>
-                      <Text style={[styles.startStoryText, styles.myStatusTextBottom]}>My status</Text>
-                    </>
-                  ) : (
-                    <>
-                      <View style={styles.myStatusAvatarContainer} pointerEvents="none">
-                        <SoulAvatar 
-                           uri={proxySupabaseUrl(currentUser?.avatar)} 
-                           size={64} 
-                           avatarType={currentUser?.avatarType as any}
-                           isOnline={false}
-                        />
-                        <View style={styles.myStatusAddBadge}><MaterialIcons name="add" size={18} color="#fff" /></View>
-                      </View>
-                      <Text style={styles.startStoryText}>
-                        {currentUser?.note && isNoteValid(currentUser.noteTimestamp)
-                          ? 'Your Note'
-                          : 'Start a story'}
-                      </Text>
-                    </>
-                  )}
-                </View>
-                </View>
-                {currentUser?.note && isNoteValid(currentUser.noteTimestamp) && (
-                  <View style={styles.notePositioner} pointerEvents="none">
-                     <NoteBubble text={currentUser.note} isMe />
-                  </View>
-                )}
-              </Pressable>
-            );
-          }
-          const contact = item as Contact;
-          const hasUnseen = contact.stories?.some(s => !s.seen);
-          const storyUrl = contact.stories?.[0]?.url;
-          return (
-            <Pressable 
-                ref={ref => statusRefs.current[contact.id] = ref}
-                style={styles.statusCard} 
-                onPress={() => {
-                  statusRefs.current[contact.id]?.measureInWindow((x: number, y: number, width: number, height: number) => {
-                    handleStatusPress(contact, { x, y, width, height });
-                  });
-                }}
-                android_ripple={{ color: 'rgba(255,255,255,0.1)' }}
-            >
-              <View style={styles.statusCardSurface}>
-              {storyUrl ? (
-                  <Image source={{ uri: storyUrl }} style={styles.statusMediaBackground} />
-              ) : (
-                  <View style={[styles.statusMediaBackground, styles.statusPlaceholder]} />
-              )}
-              <View style={styles.statusOverlay} pointerEvents="none">
-                <View style={[styles.contactAvatarBadge, { borderColor: hasUnseen ? '#3b82f6' : 'rgba(255,255,255,0.4)' }]}>
-                  <SoulAvatar 
-                     uri={proxySupabaseUrl(contact.avatar)} 
-                     size={44} 
-                     avatarType={contact.avatarType as any}
-                  />
-                </View>
-                <LinearGradient
-                  colors={['transparent', 'rgba(0,0,0,0.8)']}
-                  style={styles.statusNameGradient}
-                >
-                  <Text style={styles.statusNameText}>{contact.name}</Text>
-                </LinearGradient>
-              </View>
-              </View>
-              {contact.note && isNoteValid(contact.noteTimestamp) && (
-                  <View style={styles.notePositioner} pointerEvents="none">
-                      <NoteBubble text={contact.note} />
-                  </View>
-              )}
-            </Pressable>
-          );
-        }}
+        renderItem={renderStatusItem}
       />
       </Animated.View>
     </View>
-  ), [contactsWithStories, myStories, currentUser, handleMyStatusPress, handleStatusPress, statusRailAnimStyle]);
+  ), [contactsWithStories, myStories, currentUser, renderStatusItem, statusRailAnimStyle, router, isSearching, searchQuery]);
 
   return (
     <View style={styles.container}>
@@ -888,12 +1031,14 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
       <Animated.View pointerEvents="none" style={[styles.homeMorphBackdrop, homeBackdropAnimatedStyle]} />
       <Animated.View style={[styles.homeContent, homeContentAnimatedStyle]}>
         <FlatList
-          data={visibleContacts}
+          data={filteredVisibleContacts}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           ListHeaderComponent={renderHeader}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
+          onScroll={handleScrollMotion}
+          scrollEventThrottle={16}
           refreshControl={
             <RefreshControl
               refreshing={false}
@@ -974,6 +1119,12 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         visible={isNoteModalVisible}
         onClose={closeModalRobustly}
       />
+
+      {/* Glass Custom Dropdown Menu */}
+      <NoteCreatorModal
+        visible={isNoteModalVisible}
+        onClose={closeModalRobustly}
+      />
     </View>
   );
 }
@@ -987,16 +1138,55 @@ const styles = StyleSheet.create({
   homeContent: {
     flex: 1,
   },
-  homeHeaderWrapper: { paddingTop: Platform.OS === 'ios' ? 50 : 30 },
+  homeHeaderWrapper: { paddingTop: Platform.OS === 'ios' ? 50 : 30, zIndex: 1000, elevation: 10 },
   topHeader: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    justifyContent: 'flex-end', 
     paddingHorizontal: 20,
     paddingVertical: 10,
-    height: 60
+    height: 60,
+    justifyContent: 'center',
+    zIndex: 1000,
+    elevation: 10,
   },
-  headerActions: { flexDirection: 'row', gap: 15 },
+  headerActions: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    gap: 15,
+  },
+  headerTitle: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: '700',
+    letterSpacing: -0.5,
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 40,
+  },
+  searchBarInput: {
+    flex: 1,
+    height: '100%',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    color: '#fff',
+    fontSize: 16,
+  },
+  searchClearBtn: {
+    position: 'absolute',
+    right: 76,
+    padding: 10,
+  },
+  searchCancelBtn: {
+    marginLeft: 12,
+    paddingVertical: 8,
+  },
+  searchCancelText: {
+    color: '#bcbbbb',
+    fontSize: 16,
+    fontWeight: '500',
+  },
   headerIconButton: { 
     width: 44, 
     height: 44, 
@@ -1005,53 +1195,110 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     justifyContent: 'center' 
   },
-  statusRail: { marginTop: 10, marginBottom: 0, overflow: 'visible' },
-  statusContent: { paddingHorizontal: 20, paddingVertical: 12, paddingTop: 10, gap: 12, overflow: 'visible' },
-  statusCard: { width: 110, height: 160, marginTop: 10, borderRadius: 24, backgroundColor: 'transparent', zIndex: 10, overflow: 'visible' },
+  statusRail: { marginTop: 15, marginBottom: 0, overflow: 'visible' },
+  statusContent: { paddingHorizontal: 20, paddingVertical: 12, paddingTop: 35, gap: 14, overflow: 'visible' },
+  statusCard: { 
+    width: 115, 
+    height: 175, 
+    marginTop: 10, 
+    borderRadius: 28, 
+    backgroundColor: 'transparent', 
+    zIndex: 10, 
+    overflow: 'visible',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 6 },
+        shadowOpacity: 0.35,
+        shadowRadius: 10,
+      },
+      android: {
+        elevation: 10,
+      }
+    })
+  },
   statusCardSurface: {
     flex: 1,
-    borderRadius: 24,
+    borderRadius: 28,
     backgroundColor: '#1a1a1a',
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
   },
-  myStatusBackground: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#121212', borderRadius: 24, overflow: 'hidden' },
+  myStatusBackground: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0f0f0f', borderRadius: 28, overflow: 'hidden' },
   myStatusPreviewBg: { ...StyleSheet.absoluteFillObject, opacity: 0.42 },
   myStatusPreviewBgFull: { ...StyleSheet.absoluteFillObject, opacity: 1 },
-  myStatusAvatarContainer: { position: 'relative', marginBottom: 12 },
-  myStatusAvatar: { width: 64, height: 64, borderRadius: 32 },
-  myStatusAvatarSmall: { width: 32, height: 32, borderRadius: 16 },
-  myStatusAvatarBadgeCorner: { position: 'absolute', top: 10, left: 10, zIndex: 5 },
-  myStatusAddBadge: { position: 'absolute', bottom: 0, right: 0, width: 22, height: 22, borderRadius: 11, backgroundColor: '#3b82f6', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#121212' },
-  myStatusAddBadgeBlue: { position: 'absolute', bottom: -1, right: -1, width: 18, height: 18, borderRadius: 9, backgroundColor: '#3b82f6', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#000' },
-  startStoryText: { color: 'rgba(255,255,255,0.8)', fontSize: 13, fontWeight: '600', textAlign: 'center' },
-  myStatusTextBottom: { position: 'absolute', bottom: 16, width: '100%', textAlign: 'center', color: '#fff', fontSize: 15, fontWeight: '700' },
-  statusMediaBackground: { ...StyleSheet.absoluteFillObject, backgroundColor: '#1a1a1a', borderRadius: 24 },
-  statusPlaceholder: { backgroundColor: 'rgba(255,255,255,0.08)' },
+  myStatusTopGradient: { position: 'absolute', top: 0, left: 0, right: 0, height: 60, zIndex: 1 },
+  myStatusAvatarMain: { position: 'relative', alignItems: 'center', justifyContent: 'center' },
+  myStatusAvatarBadgeCorner: { position: 'absolute', top: 12, left: 12, zIndex: 10 },
+  avatarGlow: { shadowColor: '#3b82f6', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 10 },
+  addStatusBadgeContainer: { 
+    position: 'absolute', 
+    bottom: -2, 
+    right: -2, 
+    width: 28, 
+    height: 28, 
+    borderRadius: 14, 
+    backgroundColor: '#000', 
+    alignItems: 'center', 
+    justifyContent: 'center',
+    zIndex: 15
+  },
+  addStatusBadgeGradient: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#000',
+  },
+  statusInfoGlassWrapper: { 
+    position: 'absolute', 
+    bottom: 0, 
+    left: 0, 
+    right: 0, 
+    height: 54, 
+    overflow: 'hidden',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)'
+  },
+  statusInfoContent: { padding: 12, alignItems: 'center', justifyContent: 'center' },
+  statusName: { color: '#fff', fontSize: 13, fontWeight: '600', letterSpacing: 0.4, textAlign: 'center' },
+  statusTime: { color: 'rgba(255,255,255,0.6)', fontSize: 10.5, fontWeight: '500', textAlign: 'center' },
+  statusMediaBackground: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0f0f0f', borderRadius: 28 },
+  statusPlaceholder: { backgroundColor: 'rgba(255,255,255,0.05)' },
+  myStatusEmptyPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 20 },
   statusOverlay: { ...StyleSheet.absoluteFillObject },
-  contactAvatarBadge: { position: 'absolute', top: 10, left: 10, width: 48, height: 48, borderRadius: 24, borderWidth: 2, padding: 2, backgroundColor: 'rgba(0,0,0,0.4)', alignItems: 'center', justifyContent: 'center' },
-  smallStatusAvatar: { width: '100%', height: '100%', borderRadius: 22 },
+  contactAvatarPositioner: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 50, alignItems: 'center', justifyContent: 'center' },
+  storyRing: { borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
+  storyRingInner: { backgroundColor: '#000', borderRadius: 28, padding: 2 },
   statusNameGradient: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    height: 60,
-    justifyContent: 'flex-end',
-    padding: 12,
+    height: 70,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 14,
+    paddingTop: 24,
   },
   statusNameText: {
     color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-    textShadowColor: 'rgba(0, 0, 0, 0.75)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
+    fontSize: 14,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.9)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 4,
   },
   listContent: { paddingBottom: 100, paddingHorizontal: 4 },
   chatItem: { marginBottom: 8, marginHorizontal: 16, borderRadius: 36, height: 72 },
   notePositioner: {
       position: 'absolute',
-      top: -7,
+      top: -32, // Adjusted from -38 to be slightly lower
       left: 0,
       right: 0,
       alignItems: 'center',
@@ -1070,4 +1317,23 @@ const styles = StyleSheet.create({
   lastMessage: { color: 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: '500' },
   rightSide: { alignItems: 'flex-end', justifyContent: 'center', paddingRight: 4, gap: 4 },
   timestamp: { color: 'rgba(255,255,255,0.5)', fontSize: 11, fontWeight: '600' },
+  moreMenuItemMorph: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  moreMenuIconMorph: {
+    marginRight: 10,
+  },
+  moreMenuTextMorph: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  moreMenuDividerMorph: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    marginHorizontal: 14,
+  },
 });

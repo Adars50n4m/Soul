@@ -79,7 +79,7 @@ export default function RequestsScreen() {
         fetchRequests();
     };
 
-    const renderRequestItem = ({ item, isIncoming }: { item: any; isIncoming: boolean }) => {
+    const renderRequestItem = useCallback(({ item, isIncoming }: { item: any; isIncoming: boolean }) => {
         const user = isIncoming ? item.sender : item.receiver;
         return (
             <Animated.View entering={FadeInDown.duration(400)}>
@@ -132,7 +132,22 @@ export default function RequestsScreen() {
                 </View>
             </Animated.View>
         );
-    };
+    }, [activeTheme, handleAction, actionId]);
+
+    const renderSectionItem = useCallback(({ item: section }: { item: { title: string; data: any[] } }) => {
+        if (section.data.length === 0) return null;
+        
+        return (
+            <>
+                <Text style={styles.sectionTitle}>{section.title}</Text>
+                {section.data.map((req) => (
+                    <React.Fragment key={req.id}>
+                        {renderRequestItem({ item: req, isIncoming: section.title === 'Incoming' })}
+                    </React.Fragment>
+                ))}
+            </>
+        );
+    }, [renderRequestItem]);
 
     return (
         <View style={styles.container}>
@@ -150,17 +165,7 @@ export default function RequestsScreen() {
                     { title: 'Incoming', data: incoming },
                     { title: 'Outgoing', data: outgoing }
                 ]}
-                renderItem={({ item }) => (
-                    <>
-                        {item.data.length > 0 && <Text style={styles.sectionTitle}>{item.title}</Text>}
-                        <FlatList
-                            data={item.data}
-                            renderItem={({ item: req }) => renderRequestItem({ item: req, isIncoming: item.title === 'Incoming' })}
-                            keyExtractor={req => req.id}
-                            scrollEnabled={false}
-                        />
-                    </>
-                )}
+                renderItem={renderSectionItem}
                 keyExtractor={item => item.title}
                 contentContainerStyle={styles.list}
                 ListHeaderComponent={

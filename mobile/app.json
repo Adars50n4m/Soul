@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
     "ios": {
       "appleTeamId": "7842J35MTZ",
       "supportsTablet": true,
@@ -19,7 +18,10 @@
         "UIBackgroundModes": [
           "audio",
           "fetch",
-          "processing"
+          "processing",
+          "voip",
+          "picture-in-picture",
+          "remote-notification"
         ],
         "LSApplicationQueriesSchemes": [
           "mailto"

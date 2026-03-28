@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 13;
+const DB_TARGET_VERSION = 15;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -112,7 +112,8 @@ async function migration_v1(db: any): Promise<void> {
       mime_type      TEXT,
       delivered_at   TEXT,
       read_at        TEXT,
-      idempotency_key TEXT
+      idempotency_key TEXT,
+      media_duration INTEGER
     );`,
 
     // ── sync_queue ─────────────────────────────────────────────────────────
@@ -408,6 +409,38 @@ async function migration_v13(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v14 — Add `media_duration` column to `messages` table
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v14(db: any): Promise<void> {
+  const safeAlter = async (sql: string) => {
+    try { await db.execAsync(sql); } catch (e: any) {
+        const msg = e?.message || String(e);
+        if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+            console.warn(`[SQLite] Migration helper WARN v14:`, msg);
+        }
+    }
+  };
+  await safeAlter(`ALTER TABLE messages ADD COLUMN media_duration INTEGER;`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v15 — Add `updated_at` to `contacts` table for validation
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v15(db: any): Promise<void> {
+  const safeAlter = async (sql: string) => {
+    try { await db.execAsync(sql); } catch (e: any) {
+        const msg = e?.message || String(e);
+        if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+            console.warn(`[SQLite] Migration helper WARN v15:`, msg);
+        }
+    }
+  };
+  await safeAlter(`ALTER TABLE contacts ADD COLUMN updated_at TEXT;`);
+  await safeAlter(`ALTER TABLE contacts ADD COLUMN note TEXT;`);
+  await safeAlter(`ALTER TABLE contacts ADD COLUMN note_timestamp TEXT;`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
@@ -437,11 +470,15 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
       `ALTER TABLE messages ADD COLUMN delivered_at TEXT;`,
       `ALTER TABLE messages ADD COLUMN read_at TEXT;`,
       `ALTER TABLE messages ADD COLUMN idempotency_key TEXT;`,
+      `ALTER TABLE messages ADD COLUMN media_duration INTEGER;`,
       
       // Ensure contacts columns exist
       `ALTER TABLE contacts ADD COLUMN about TEXT DEFAULT '';`,
       `ALTER TABLE contacts ADD COLUMN last_seen TEXT;`,
       `ALTER TABLE contacts ADD COLUMN is_archived INTEGER DEFAULT 0;`,
+      `ALTER TABLE contacts ADD COLUMN updated_at TEXT;`,
+      `ALTER TABLE contacts ADD COLUMN note TEXT;`,
+      `ALTER TABLE contacts ADD COLUMN note_timestamp TEXT;`,
       
       // Ensure sync queue exists
       `CREATE TABLE IF NOT EXISTS pending_sync_ops (
@@ -530,6 +567,8 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
         case 11: await migration_v11(db); break;
         case 12: await migration_v12(db); break;
         case 13: await migration_v13(db); break;
+        case 14: await migration_v14(db); break;
+        case 15: await migration_v15(db); break;
         default:
           console.error(`[SQLite] No migration logic for v${nextVersion}!`);
       }

@@ -17,8 +17,9 @@ export function NoteBubble({ text, isMe }: NoteBubbleProps) {
                 <Text numberOfLines={4} style={styles.text}>{text}</Text>
             </View>
             <View style={styles.tailAnchor}>
-                <View style={[styles.tailMain, { backgroundColor: activeTheme.surface }]} />
-                <View style={[styles.tailDot, { backgroundColor: activeTheme.surface }]} />
+                <View style={[styles.tailRoot, { backgroundColor: '#262626' }]} />
+                <View style={[styles.tailMain, { backgroundColor: '#262626' }]} />
+                <View style={[styles.tailDotSmall, { backgroundColor: '#262626' }]} />
             </View>
         </View>
     );
@@ -31,59 +32,63 @@ const styles = StyleSheet.create({
         overflow: 'visible',
     },
     bubble: {
-        paddingHorizontal: 24,
-        paddingVertical: 18,
-        borderRadius: 28,
-        maxWidth: 176,
-        minWidth: 116,
+        paddingHorizontal: 18,
+        paddingVertical: 12,
+        borderRadius: 22,
+        maxWidth: 160,
+        minWidth: 100,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: '#2f3138',
+        backgroundColor: '#262626',
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.08)',
+        borderColor: 'rgba(255,255,255,0.14)',
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.28,
-        shadowRadius: 18,
-        elevation: 12,
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.35,
+        shadowRadius: 10,
+        elevation: 8,
     },
     text: {
         color: '#fff',
-        fontSize: 14,
+        fontSize: 15,
         lineHeight: 18,
-        fontWeight: '500',
+        fontWeight: '700',
         textAlign: 'center',
     },
     tailAnchor: {
         position: 'absolute',
-        left: 22,
-        bottom: -14,
-        width: 26,
-        height: 26,
+        top: '100%',
+        left: 20,
+        width: 80,
+        height: 60,
         overflow: 'visible',
+    },
+    tailRoot: {
+        position: 'absolute',
+        top: 2, // Slight adjustment for larger size
+        left: 0, // Slight adjustment for larger size
+        width: 15.5, // Bada wala
+        height: 15.5,
+        borderRadius: 7.75,
+        zIndex: 1,
     },
     tailMain: {
         position: 'absolute',
-        left: 0,
-        top: 0,
-        width: 18,
-        height: 18,
-        borderBottomLeftRadius: 16,
-        borderBottomRightRadius: 14,
-        borderTopLeftRadius: 2,
-        borderTopRightRadius: 12,
-        backgroundColor: '#2f3138',
-        transform: [{ rotate: '8deg' }],
-    },
-    tailDot: {
-        position: 'absolute',
-        left: 8,
-        top: 20,
-        width: 10,
-        height: 10,
-        borderRadius: 999,
-        backgroundColor: '#2f3138',
+        top: 24,
+        left: 10,
+        width: 8, // Medium
+        height: 8,
+        borderRadius: 4,
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.04)',
+        borderColor: 'rgba(255,255,255,0.06)',
+    },
+    tailDotSmall: {
+        position: 'absolute',
+        top: 42,
+        left: 18,
+        width: 4.5, // Chhota wala
+        height: 4.5,
+        borderRadius: 2.25,
+        opacity: 0.7,
     },
 });

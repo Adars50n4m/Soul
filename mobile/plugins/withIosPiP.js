@@ -7,6 +7,7 @@ function withIosPiP(config) {
     const bgModes = config.modResults.UIBackgroundModes || [];
     if (!bgModes.includes('audio')) bgModes.push('audio');
     if (!bgModes.includes('voip')) bgModes.push('voip');
+    if (!bgModes.includes('picture-in-picture')) bgModes.push('picture-in-picture');
     config.modResults.UIBackgroundModes = bgModes;
     return config;
   });

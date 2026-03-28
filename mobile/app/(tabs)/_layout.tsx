@@ -13,6 +13,7 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { useApp } from '../../context/AppContext';
+import { ScrollMotionProvider, useScrollMotion } from '../../components/navigation/ScrollMotionProvider';
 
 // Tells expo-router how to construct initial tab state during hydration
 // Prevents "Cannot read property 'stale' of undefined" in TabRouter.getRehydratedState
@@ -97,21 +98,37 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
     opacity: tabBarOpacity.value,
   }));
 
+  // Safely extract route info before hooks
+  const focusedRoute = state?.routes?.[state.index];
+  const focusedOptions = focusedRoute ? descriptors?.[focusedRoute.key]?.options : undefined;
+  const focusedRouteId = focusedRoute?.name || 'index';
+
+  const { hidden: isTabBarHidden } = useScrollMotion(focusedRouteId);
+  const translateY = useSharedValue(0);
+
+  useEffect(() => {
+    translateY.value = withSpring(isTabBarHidden ? 150 : 0, {
+      damping: 20,
+      stiffness: 160,
+      mass: 0.8
+    });
+  }, [isTabBarHidden, translateY]);
+
+  const dropDownStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }]
+  }));
+
   // Guard: state may be undefined during initial navigation hydration
-  if (!state || !state.routes || state.routes.length === 0 || !descriptors) {
+  if (!state || !state.routes || state.routes.length === 0 || !descriptors || !focusedRoute) {
     return null;
   }
-
-  const focusedRoute = state.routes[state.index];
-  if (!focusedRoute) return null;
-  const focusedOptions = descriptors[focusedRoute.key]?.options;
 
   if (focusedOptions?.tabBarStyle?.display === 'none') {
     return null;
   }
 
   return (
-    <Animated.View style={[styles.tabBarContainer, tabBarFadeStyle]}>
+    <Animated.View style={[styles.tabBarContainer, tabBarFadeStyle, dropDownStyle]}>
       <View style={styles.tabBarGlassContainer}>
         {/* Layer 1: The Glass background */}
         <GlassView
@@ -171,33 +188,35 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
 
 export default function TabLayout() {
   return (
-    <Tabs
-      tabBar={props => <TabBar {...props} />}
-      screenOptions={{
-        headerShown: false,
-      }}
-      initialRouteName="index"
-      backBehavior="initialRoute"
-    >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Chats',
+    <ScrollMotionProvider>
+      <Tabs
+        tabBar={props => <TabBar {...props} />}
+        screenOptions={{
+          headerShown: false,
         }}
-      />
-      <Tabs.Screen
-        name="calls"
-        options={{
-          title: 'Calls',
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          title: 'Settings',
-        }}
-      />
-    </Tabs>
+        initialRouteName="index"
+        backBehavior="initialRoute"
+      >
+        <Tabs.Screen
+          name="index"
+          options={{
+            title: 'Chats',
+          }}
+        />
+        <Tabs.Screen
+          name="calls"
+          options={{
+            title: 'Calls',
+          }}
+        />
+        <Tabs.Screen
+          name="settings"
+          options={{
+            title: 'Settings',
+          }}
+        />
+      </Tabs>
+    </ScrollMotionProvider>
   );
 }
 

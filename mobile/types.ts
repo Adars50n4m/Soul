@@ -15,6 +15,7 @@ export interface Message {
         name?: string;
         caption?: string;
         thumbnail?: string;
+        duration?: number;
     };
     // Offline media support
     localFileUri?: string;
@@ -59,6 +60,7 @@ export interface Contact {
     note?: string; // New field for Soul Notes (status bubble)
     noteTimestamp?: string; // ISO date string
     isArchived?: boolean;
+    last_updated_at?: string; // Server timestamp for profile validation
 }
 
 export interface StatusUpdate {
@@ -108,8 +110,9 @@ export interface ActiveCall {
     isIncoming: boolean;
     isAccepted: boolean;
     isRinging?: boolean;
-    callerName?: string;
-    callerAvatar?: string;
+    contactName?: string;
+    contactAvatar?: string;
+    avatar?: string; // Alias for flexibility
     roomId?: string; // Added for debugging and signaling
     remoteMuted?: boolean;
     remoteVideoOff?: boolean;

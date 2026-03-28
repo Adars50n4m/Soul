@@ -10,7 +10,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { useApp } from '../../context/AppContext';
 import { useCall } from '../../context/CallContext';
-import { SHRI_ID, HARI_ID } from '../../config/supabase';
+import { normalizeId, getSuperuserName, LEGACY_TO_UUID } from '../../utils/idNormalization';
 import Animated, {
     useSharedValue, useAnimatedStyle, withSpring, withTiming, interpolate, runOnJS, Easing,
     useAnimatedScrollHandler, Extrapolation, SharedTransition
@@ -69,12 +69,11 @@ export default function ProfileScreen() {
     const { width, height } = useWindowDimensions();
 
     const params = useLocalSearchParams<{ id: string }>();
-    const id = Array.isArray(params.id) ? params.id[0] : params.id;
+    const id = normalizeId(Array.isArray(params.id) ? params.id[0] : params.id);
     const router = useRouter();
     const navigation = useNavigation();
     const { currentUser, otherUser, contacts, messages, activeTheme, clearChatMessages, connectivity, fetchOtherUserProfile } = useApp();
     const { startCall } = useCall();
-    const isCloudConnected = connectivity?.isRealtimeConnected;
 
     // Determine which user's profile to show
     const isOwnProfile = id === currentUser?.id;
@@ -85,6 +84,7 @@ export default function ProfileScreen() {
     // For other users, prefer contact from list (same as chat screen), fallback to otherUser
     const otherUserData = contactFromList || otherUser;
     const profileUser = isOwnProfile ? currentUser : otherUserData;
+    const profileName = getSuperuserName(id) || profileUser?.name || profileUser?.display_name || (id ? `@${id.substring(0, 5)}` : 'User');
 
     // Fetch other user profile data on mount
     useEffect(() => {
@@ -272,7 +272,7 @@ export default function ProfileScreen() {
         try {
             await Share.share({
                 url: item.url,
-                message: `Check out this ${item.type} from SoulSync!`,
+                message: `Check out this ${item.type} from Soul!`,
             });
         } catch (error) {
             console.error(error);
@@ -307,6 +307,17 @@ export default function ProfileScreen() {
         });
     }, [id, profileUser]);
 
+    const headerContentAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: fadeAnim.value
+    }));
+
+    const mediaSectionAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: fadeAnim.value,
+        transform: [{ translateY: slideAnim.value }]
+    }));
+
+    const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+
     if (!profileUser) {
         return (
             <View style={styles.container}>
@@ -327,8 +338,6 @@ export default function ProfileScreen() {
             </View>
         );
     }
-
-    const { width: screenWidth, height: screenHeight } = useWindowDimensions();
 
     return (
         <View style={styles.container}>
@@ -420,21 +429,19 @@ export default function ProfileScreen() {
                     style={[
                         styles.heroSection,
                         contentAnimatedStyle,
-                        useAnimatedStyle(() => ({
-                            opacity: fadeAnim.value
-                        }))
+                        headerContentAnimatedStyle
                     ]}
                 >
                     <View style={styles.nameContent}>
                         <View style={styles.nameRow}>
-                            <Text style={styles.userName}>{profileUser.name}</Text>
+                            <Text style={styles.userName}>{profileName}</Text>
                             <MaterialIcons name="verified" size={26} color="#ffffff" style={{ marginTop: 8 }} />
                         </View>
                         <Text style={styles.userHandle}>
-                            @{profileUser.username || 
-                              (profileUser.id === SHRI_ID ? 'shri' : 
-                               profileUser.id === HARI_ID ? 'hari' : 
-                               profileUser.id?.split('-')[0]) || 
+                            @{profileUser?.username || 
+                              (id === LEGACY_TO_UUID['shri'] ? 'shri' : 
+                               id === LEGACY_TO_UUID['hari'] ? 'hari' : 
+                               (profileUser?.id || id)?.split('-')[0]) || 
                               'soul_user'}
                         </Text>
                     </View>
@@ -477,10 +484,7 @@ export default function ProfileScreen() {
                 <Animated.View
                     style={[
                         styles.mediaSection,
-                        useAnimatedStyle(() => ({
-                            opacity: fadeAnim.value,
-                            transform: [{ translateY: slideAnim.value }]
-                        }))
+                        mediaSectionAnimatedStyle
                     ]}
                 >
                     <Text style={styles.sectionTitle}>SHARED MEDIA</Text>

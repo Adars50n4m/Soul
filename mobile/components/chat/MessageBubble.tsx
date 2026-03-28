@@ -333,7 +333,14 @@ const MessageBubble = React.memo(({
             const showDownloadOverlay = !isMe && !usableLocalUri;
             const shouldMeasureImage = !showDownloadOverlay || aspectRatio == null;
             if (media.type === 'audio') {
-                return <VoiceNotePlayer uri={media.url} isMe={isMe} theme={activeTheme} />;
+                return (
+                    <VoiceNotePlayer 
+                        uri={usableLocalUri || media.url} 
+                        isMe={isMe} 
+                        theme={activeTheme} 
+                        initialDuration={media.duration} 
+                    />
+                );
             }
 
             const currentAspectRatio = aspectRatio || DEFAULT_MEDIA_RATIO;

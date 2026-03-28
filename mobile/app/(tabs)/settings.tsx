@@ -8,7 +8,9 @@ import * as Linking from 'expo-linking';
 import Animated, {
     useAnimatedScrollHandler,
     useSharedValue,
+    runOnJS,
 } from 'react-native-reanimated';
+import { useScrollMotion } from '../../components/navigation/ScrollMotionProvider';
 
 import ProfileHeader from '../../components/ProfileHeader';
 
@@ -32,8 +34,11 @@ export default function SettingsScreen() {
     const isNavigatingRef = useRef(false);
     const scrollY = useSharedValue(0);
 
+    const { onScrollRaw: handleScrollMotionRaw } = useScrollMotion('settings');
+
     const onScroll = useAnimatedScrollHandler((event) => {
         scrollY.value = event.contentOffset.y;
+        runOnJS(handleScrollMotionRaw)(event.contentOffset.y);
     });
 
     useFocusEffect(

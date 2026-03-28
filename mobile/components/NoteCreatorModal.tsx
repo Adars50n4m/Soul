@@ -17,7 +17,7 @@ interface NoteCreatorModalProps {
 
 export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalProps) => {
     const { width, height } = useWindowDimensions();
-    const { currentUser, saveNote, deleteNote, activeTheme } = useApp();
+    const { currentUser, updateNote, activeTheme } = useApp();
     const [noteText, setNoteText] = useState(currentUser?.note || '');
     const [prevVisible, setPrevVisible] = useState(visible);
 
@@ -48,13 +48,13 @@ export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalP
 
     const handleDone = () => {
         if (noteText.trim()) {
-            saveNote(noteText.trim());
+            updateNote(noteText.trim());
         }
         onClose();
     };
 
     const handleDelete = () => {
-        deleteNote();
+        updateNote(null);
         setNoteText('');
         onClose();
     };
@@ -104,6 +104,12 @@ export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalP
                                     maxLength={60}
                                     selectionColor={activeTheme.primary}
                                 />
+                                {/* Tail dots for consistency */}
+                                <View style={styles.tailAnchor}>
+                                    <View style={[styles.tailRoot, { backgroundColor: '#262626' }]} />
+                                    <View style={[styles.tailMain, { backgroundColor: '#262626' }]} />
+                                    <View style={[styles.tailDotSmall, { backgroundColor: '#262626' }]} />
+                                </View>
                             </Animated.View>
 
                             <Image 
@@ -214,10 +220,47 @@ const styles = StyleSheet.create({
     },
     input: {
         color: '#fff',
-        fontSize: 18,
-        fontWeight: '500',
+        fontSize: 20,
+        fontWeight: '700',
         textAlign: 'center',
         width: '100%',
+    },
+    tailAnchor: {
+        position: 'absolute',
+        top: '100%',
+        left: 40,
+        width: 80,
+        height: 60,
+    },
+    tailRoot: {
+        position: 'absolute',
+        top: 2,
+        left: 0,
+        width: 16,
+        height: 16,
+        borderRadius: 8,
+        borderWidth: 1.5,
+        borderColor: 'rgba(255,255,255,0.12)',
+    },
+    tailMain: {
+        position: 'absolute',
+        top: 28,
+        left: 10,
+        width: 9,
+        height: 9,
+        borderRadius: 4.5,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.06)',
+    },
+    tailDotSmall: {
+        position: 'absolute',
+        top: 48,
+        left: 20,
+        width: 5,
+        height: 5,
+        borderRadius: 2.5,
+        opacity: 0.6,
+        backgroundColor: '#fff', // Slightly different for modal preview
     },
     hintText: {
         color: 'rgba(255,255,255,0.4)',

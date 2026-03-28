@@ -220,17 +220,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         let timeoutId: ReturnType<typeof setTimeout>;
 
         console.log('[AuthContext] Initializing - checking session...');
-
-        // Set a safety timeout to prevent app from hanging forever
+        
+        const startInit = Date.now();
         const sessionPromise = supabase.auth.getSession();
         const timeoutPromise = new Promise<null>((resolve) => {
             timeoutId = setTimeout(() => {
-                console.log('[AuthContext] Session check timed out (10s), continuing anyway');
+                console.log(`[AuthContext] Session check timed out after ${Date.now() - startInit}ms, continuing anyway`);
                 resolve(null);
-            }, 10000); // Increased to 10 seconds for better reliability in slow networks
+            }, 10000);
         });
 
         Promise.race([sessionPromise, timeoutPromise]).then((sessionResult: any) => {
+            console.log(`[AuthContext] Session race complete after ${Date.now() - startInit}ms`);
             if (!isMounted) return;
             clearTimeout(timeoutId);
 
@@ -250,29 +251,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
 
             if (session) {
-                console.log('[AuthContext] Session found, syncing profile...');
-                synchronizeSession(session.user.id).finally(() => {
+                console.log('[AuthContext] Session found, syncing profile for:', session.user.id);
+                // Race the entire sync process to ensure we don't hang the splash screen
+                Promise.race([
+                    synchronizeSession(session.user.id),
+                    new Promise((resolve) => setTimeout(() => {
+                        console.warn('[AuthContext] synchronizeSession timed out (7s)');
+                        resolve(null);
+                    }, 7000))
+                ]).finally(() => {
                     if (isMounted) {
-                        console.log('[AuthContext] Profile sync complete, readying app');
+                        console.log(`[AuthContext] Reached ready state (total init time: ${Date.now() - startInit}ms)`);
                         setIsReady(true);
                     }
                 });
             } else {
-                // FIX: Fallback to AsyncStorage for Developer Bypass accounts (shri/hari) 
-                // or if Supabase is slow but we have a cached user.
+                console.log('[AuthContext] No session found, checking cache...');
                 AsyncStorage.getItem('ss_current_user').then(cachedUserId => {
                     if (isMounted) {
                         if (cachedUserId) {
-                            console.log('[AuthContext] No Supabase session, but found cached user:', cachedUserId);
+                            console.log('[AuthContext] Found cached user:', cachedUserId);
                             synchronizeSession(cachedUserId).finally(() => {
-                                if (isMounted) setIsReady(true);
+                                if (isMounted) {
+                                    console.log(`[AuthContext] Cache sync complete (total init time: ${Date.now() - startInit}ms), readying app`);
+                                    setIsReady(true);
+                                }
                             });
                         } else {
-                            console.log('[AuthContext] No session or cached user found');
+                            console.log(`[AuthContext] No session or cached user (total init time: ${Date.now() - startInit}ms), readying app`);
                             setIsReady(true);
                         }
                     }
-                }).catch(() => {
+                }).catch((err) => {
+                    console.error('[AuthContext] Cache check failed:', err);
                     if (isMounted) setIsReady(true);
                 });
             }

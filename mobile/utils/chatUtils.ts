@@ -7,6 +7,7 @@ export interface ChatMediaItem {
     name?: string;
     localFileUri?: string;
     thumbnail?: string;
+    duration?: number;
 }
 
 export const getMessageMediaItems = (msg: Message | any): ChatMediaItem[] => {

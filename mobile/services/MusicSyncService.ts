@@ -63,9 +63,19 @@ class MusicSyncService {
             }
         });
 
-        this.channel.subscribe((status) => {
-            console.log(`[MusicSync] Broadcast status: ${status}`);
-        });
+        if (this.channel) {
+            this.channel.subscribe((status) => {
+                console.log(`[MusicSync] Broadcast status: ${status}`);
+                if (status === 'TIMED_OUT' || status === 'CLOSED') {
+                    console.log('[MusicSync] Attempting to reconnect channel...');
+                    setTimeout(() => {
+                        if (this.isInitialized) {
+                            this.setupBroadcastListener();
+                        }
+                    }, 5000);
+                }
+            });
+        }
     }
 
     broadcastUpdate(state: Partial<PlaybackState>): void {

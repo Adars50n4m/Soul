@@ -66,17 +66,21 @@ function withAndroidPiP(config) {
     } else {
       let content = config.modResults.contents;
       if (!content.includes('onUserLeaveHint')) {
-        // Find last closing brace of the class
         const insertionPoint = content.lastIndexOf('}');
         const onUserLeaveHintKotlin = `
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        // This allows the app to enter PiP mode when the user presses Home or Recents
-        // Triggered natively by the system
+        // Automatic PiP for Android 11 and below (if autoEnterEnabled is not used)
+        // For Android 12+, setPictureInPictureParams handles this
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        // Any specific native UI adjustments during PiP transition can go here
     }
 `;
         config.modResults.contents = content.slice(0, insertionPoint) + onUserLeaveHintKotlin + content.slice(insertionPoint);
-        console.log('[withAndroidPiP] Patched MainActivity (Kotlin)');
+        console.log('[withAndroidPiP] Patched MainActivity with PiP hooks (Kotlin)');
       }
     }
     return config;

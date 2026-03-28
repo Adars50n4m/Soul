@@ -50,28 +50,28 @@ if (IS_DEV) {
     const localUrl = `http://${debugHost}:3000`;
 
     // Overwrite localhost/10.0.2.2 with the real host IP so physical devices can reach it.
-    if (resolvedServerUrl.includes('localhost') || resolvedServerUrl.includes('10.0.2.2')) {
-      console.log(`[Env] Resolving SERVER_URL for ${Platform.OS}: ${localUrl} (from Expo dev host)`);
+    if (resolvedServerUrl.includes('localhost') || resolvedServerUrl.includes('127.0.0.1') || resolvedServerUrl.includes('10.0.2.2')) {
+      console.log(`[Env] Resolving SERVER_URL from ${resolvedServerUrl} to ${localUrl} (Expo Host)`);
       resolvedServerUrl = localUrl;
     }
   } else {
-    // Fallback for older Expo versions or when the debugger host is not available.
-    if (resolvedServerUrl.includes('localhost') || resolvedServerUrl.includes('10.0.2.2')) {
-      // EMERGENCY FALLBACK: If we can't find the debug host, but we're in DEV, 
-      // we'll try to use a common pattern or a provided env var.
+    // Fallback for when the debugger host is not available.
+    if (resolvedServerUrl.includes('localhost') || resolvedServerUrl.includes('127.0.0.1')) {
       const fallbackIp = getEnvVar('EXPO_PUBLIC_HOST_IP', null);
       if (fallbackIp) {
         resolvedServerUrl = `http://${fallbackIp}:3000`;
-        console.log(`[Env] Using EXPO_PUBLIC_HOST_IP: ${resolvedServerUrl}`);
+        console.log(`[Env] Using EXPO_PUBLIC_HOST_IP fallback: ${resolvedServerUrl}`);
+      } else if (Platform.OS === 'android') {
+        resolvedServerUrl = 'http://10.0.2.2:3000';
+        console.log('[Env] Using Android Emulator loopback (10.0.2.2)');
       } else {
-        resolvedServerUrl = Platform.OS === 'android' ? 'http://10.0.2.2:3000' : 'http://localhost:3000';
-        console.warn('[Env] No Expo dev host found. If you are on a physical device, set EXPO_PUBLIC_SERVER_URL to your LAN IP or tunnel URL.');
+        console.warn('[Env] SERVER_URL is localhost. If using a physical device, this WILL fail. Set EXPO_PUBLIC_SERVER_URL to your LAN IP.');
       }
     }
   }
 }
 export const SERVER_URL = resolvedServerUrl;
-console.log(`[Env] FINAL SERVER_URL: ${SERVER_URL}`);
+console.log(`[Env] Final Connectivity URL: ${SERVER_URL}`);
 
 
 // 4. Music API (JioSaavn)

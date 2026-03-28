@@ -20,65 +20,45 @@ let isTaskRegistered = false;
 
 /**
  * Background sync task definition
- * This runs when the app is in background or terminated
+ * MUST be called at the top level for Expo to find it when the app is woken up 
+ * by the OS in the background.
  */
-// Silent task registration
 try {
-  // Only register background tasks on Android for now as iOS needs native capability.
-  // TaskManager.defineTask MUST be top-level.
-  if (Platform.OS === 'android') {
-    const isDefined = TaskManager.isTaskDefined && TaskManager.isTaskDefined(BACKGROUND_SYNC_TASK);
-    if (isDefined) {
-      console.log(`[BackgroundSync] Task ${BACKGROUND_SYNC_TASK} already defined`);
-    } else {
-      console.log(`[BackgroundSync] Defining task: ${BACKGROUND_SYNC_TASK}`);
-      TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
-        const syncPromise = (async () => {
-          try {
-            console.log('[BackgroundSync] Starting background sync...');
-            
-            // Get current user
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) {
-              console.log('[BackgroundSync] No authenticated user, skipping');
-              return BackgroundFetch.BackgroundFetchResult.NoData;
-            }
-            
-            // 1. Fetch unread messages from Supabase (Downlink)
-            const syncedCount = await syncMessagesFromServer(user.id);
-            
-            // 2. Flush outgoing queue (Uplink)
-            const flushedCount = await flushOutgoingQueue(user.id);
-            
-            console.log(`[BackgroundSync] Synced ${syncedCount} down, ${flushedCount} up`);
-            
-            if (syncedCount > 0 || flushedCount > 0) {
-              if (syncedCount > 0) await showSyncNotification(syncedCount);
-              return BackgroundFetch.BackgroundFetchResult.NewData;
-            }
-            
-            return BackgroundFetch.BackgroundFetchResult.NoData;
-          } catch (error) {
-            console.error('[BackgroundSync] Error in task execution:', error);
-            return BackgroundFetch.BackgroundFetchResult.Failed;
-          }
-        })();
+  console.log(`[BackgroundSync] Defining task: ${BACKGROUND_SYNC_TASK}`);
+  TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
+    const syncPromise = (async () => {
+      try {
+        console.log('[BackgroundSync] Starting background sync...');
+        
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return BackgroundFetch.BackgroundFetchResult.NoData;
+        
+        const syncedCount = await syncMessagesFromServer(user.id);
+        const flushedCount = await flushOutgoingQueue(user.id);
+        
+        if (syncedCount > 0 || flushedCount > 0) {
+          if (syncedCount > 0) await showSyncNotification(syncedCount);
+          return BackgroundFetch.BackgroundFetchResult.NewData;
+        }
+        return BackgroundFetch.BackgroundFetchResult.NoData;
+      } catch (error) {
+        console.error('[BackgroundSync] Error in task execution:', error);
+        return BackgroundFetch.BackgroundFetchResult.Failed;
+      }
+    })();
 
-        // ANR Prevention: Ensure task returns within 25 seconds (OS limit is usually 30s)
-        const timeoutPromise = new Promise<BackgroundFetch.BackgroundFetchResult>((resolve) => {
-          setTimeout(() => {
-            console.warn('[BackgroundSync] Task timed out to prevent ANR');
-            resolve(BackgroundFetch.BackgroundFetchResult.NoData);
-          }, 25000);
-        });
+    const timeoutPromise = new Promise<BackgroundFetch.BackgroundFetchResult>((resolve) => {
+      setTimeout(() => {
+        console.warn('[BackgroundSync] Task timed out to prevent ANR');
+        resolve(BackgroundFetch.BackgroundFetchResult.NoData);
+      }, 25000);
+    });
 
-        return await Promise.race([syncPromise, timeoutPromise]);
-      });
-      console.log(`[BackgroundSync] Task ${BACKGROUND_SYNC_TASK} defined successfully`);
-    }
-  }
+    return await Promise.race([syncPromise, timeoutPromise]);
+  });
+  console.log(`[BackgroundSync] Task ${BACKGROUND_SYNC_TASK} defined successfully`);
 } catch (error) {
-  console.warn('[BackgroundSync] Failed to check/define task:', error);
+  console.warn('[BackgroundSync] Failed to define task at top level:', error);
 }
 
 /**

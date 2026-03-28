@@ -53,21 +53,14 @@ export const unstable_settings = {
 };
 
 function RootContent() {
+  console.log('[RootContent] Rendering...');
   const context = useContext(AppContext);
   const router = useRouter();
   const segments = useSegments();
 
-  // Default values if context is not available
+  // Handle Splash Screen hiding separately to keep it outside the context switch if possible,
+  // but since we need isReady, we must handle it carefully.
   const { activeCall, currentUser, isReady } = context || { activeCall: null, currentUser: null, isReady: false };
-
-  // Show loading indicator while waiting for context to initialize
-  if (!context) {
-    return (
-      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#BC002A" />
-      </View>
-    );
-  }
 
   // Handle Splash Screen hiding
   useEffect(() => {
@@ -81,15 +74,25 @@ function RootContent() {
   }, []); // This useEffect runs once on mount for background sync setup
 
   useEffect(() => {
+    console.log('[RootLayout] isReady status:', isReady);
     if (isReady) {
-      SplashScreen.hideAsync().catch(() => {});
+      console.log('[RootLayout] Hiding splash screen...');
+      SplashScreen.hideAsync().catch((err) => {
+        console.warn('[RootLayout] Error hiding splash screen:', err);
+      });
     }
+    
+    // Safety timeout: if isReady is still false after 15 seconds, log a warning
+    const timer = setTimeout(() => {
+        if (!isReady) {
+            console.warn('[RootLayout] STILL NOT READY after 15s - check initialization sequence');
+        }
+    }, 15000);
+    return () => clearTimeout(timer);
   }, [isReady]); // This useEffect handles splash screen hiding based on isReady
 
     useEffect(() => {
         if (!currentUser?.id) return;
-        // backgroundSync already registered in the first useEffect on mount,
-        // but we can re-verify if needed when user changes.
         console.log('[RootLayout] User synced:', currentUser.id);
     }, [currentUser?.id]);
 
@@ -132,6 +135,15 @@ function RootContent() {
         });
         return () => subscription.remove();
     }, [activeCall?.isAccepted, activeCall?.isIncoming, activeCall?.isMinimized, segments, isReady]);
+
+  // Show loading indicator while waiting for context to initialize
+  if (!context) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color="#BC002A" />
+      </View>
+    );
+  }
 
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>

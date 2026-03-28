@@ -8,14 +8,22 @@ interface VoiceNotePlayerProps {
     uri: string;
     isMe: boolean;
     theme: any;
+    initialDuration?: number;
 }
 
 
-const VoiceNotePlayer = ({ uri, isMe, theme }: VoiceNotePlayerProps) => {
+const VoiceNotePlayer = ({ uri, isMe, theme, initialDuration }: VoiceNotePlayerProps) => {
     const soundRef = useRef<Audio.Sound | null>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [position, setPosition] = useState(0);
-    const [duration, setDuration] = useState(0);
+    const [duration, setDuration] = useState(initialDuration || 0);
+
+    // Update duration if prop changes
+    useEffect(() => {
+        if (initialDuration && initialDuration > 0) {
+            setDuration(initialDuration);
+        }
+    }, [initialDuration]);
 
     const onPlaybackStatusUpdate = (status: any) => {
         if (status.isLoaded) {

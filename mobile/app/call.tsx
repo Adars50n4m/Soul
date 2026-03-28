@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { BlurView } from 'expo-blur';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
@@ -49,7 +49,8 @@ const getWebRTCModules = () => {
 
 const webrtcModules = getWebRTCModules();
 const RTCView = webrtcModules.RTCView;
-const RemoteVideoComponent = RTCView; // Force RTCView for main background
+const RTCPIPView = webrtcModules.RTCPIPView;
+const RemoteVideoComponent = RTCPIPView || RTCView; // Use PIP-enhanced view if available
 const startIOSPIP = webrtcModules.startIOSPIP;
 const stopIOSPIP = webrtcModules.stopIOSPIP;
 const webRTCService = webrtcModules.webRTCService;
@@ -70,6 +71,7 @@ export default function CallScreen() {
     const [callDuration, setCallDuration] = useState(0);
     const [localStream, setLocalStream] = useState<any>(null);
     const [remoteStream, setRemoteStream] = useState<any>(null);
+    const [remoteStreamUpdate, setRemoteStreamUpdate] = useState(0);
     const webrtcListenerRef = useRef<any>(null);
 
     const [callState, setCallState] = useState<CallState>(() => {
@@ -77,18 +79,23 @@ export default function CallScreen() {
         return 'ringing';
     });
 
-    const [remoteStreamUpdate, setRemoteStreamUpdate] = useState(0);
+    const hasRemoteTracks = useMemo(() => {
+        if (!remoteStream) return false;
+        try {
+            const audio = remoteStream.getAudioTracks?.() || [];
+            const video = remoteStream.getVideoTracks?.() || [];
+            const generic = remoteStream.getTracks?.() || [];
+            const legacy = remoteStream._tracks || [];
+            return audio.length > 0 || video.length > 0 || generic.length > 0 || legacy.length > 0;
+        } catch (e) {
+            return !!remoteStream._tracks?.length;
+        }
+    }, [remoteStream, remoteStreamUpdate]);
 
-    const hasRemoteTracks = remoteStream && (
-        (remoteStream.getAudioTracks && remoteStream.getAudioTracks().length > 0) || 
-        (remoteStream.getVideoTracks && remoteStream.getVideoTracks().length > 0) ||
-        (remoteStream._tracks && remoteStream._tracks.length > 0)
-    );
+    const [wasConnected, setWasConnected] = useState(false);
     
     // isActuallyConnected: Either the protocol says 'connected' OR we have media flowing
     const isActuallyConnected = callState === 'connected' || (hasRemoteTracks && activeCall?.isAccepted);
-    
-    const [wasConnected, setWasConnected] = useState(false);
     
     // Aggressive Sync: If service is connected or we have tracks, we ARE connected.
     useEffect(() => {
@@ -123,12 +130,13 @@ export default function CallScreen() {
         return () => clearInterval(interval);
     }, [wasConnected, remoteStream]);
 
-    const uiConnected = wasConnected || isActuallyConnected || (!!remoteStream && activeCall?.isAccepted);
+    const uiConnected = wasConnected || isActuallyConnected || (!!hasRemoteTracks && activeCall?.isAccepted);
     // const [isMuted, setIsMuted] = useState(false); // Managed by activeCall
     const [isSpeaker, setIsSpeaker] = useState(false);
 
     // Picture-in-Picture (Android) State
-    const { isInPipMode: androidIsInPipMode } = Platform.OS === 'android' ? ExpoPip.useIsInPip() : { isInPipMode: false };
+    const androidPipState = ExpoPip.useIsInPip();
+    const androidIsInPipMode = Platform.OS === 'android' ? androidPipState.isInPipMode : false;
     const [iosIsInPipMode, setIosIsInPipMode] = useState(false);
     const [showDiagnostics, setShowDiagnostics] = useState(false); // For user verification
 
@@ -199,7 +207,17 @@ export default function CallScreen() {
     const contextY = useSharedValue(0);
     const screenTranslateY = useSharedValue(0);
 
-    const contact = contacts.find(c => c.id === activeCall?.contactId);
+    const contact = useMemo(() => {
+        const found = contacts.find(c => c.id === activeCall?.contactId);
+        if (found) return found;
+        // Fallback to activeCall metadata if contact not in list (e.g. recent add)
+        return {
+            id: activeCall?.contactId || '',
+            name: activeCall?.contactName || 'User',
+            avatar: activeCall?.avatar || activeCall?.contactAvatar || '',
+        } as any;
+    }, [contacts, activeCall]);
+
     const isVideo = activeCall?.type === 'video';
 
     const handleMinimize = useCallback(() => {

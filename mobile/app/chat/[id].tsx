@@ -635,6 +635,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             const permission = await Audio.requestPermissionsAsync();
             if (permission.status !== 'granted') {
                 Alert.alert('Permission required', 'Please enable microphone access to record voice notes.');
+                isPreparingRecordingRef.current = false;
                 return;
             }
 
@@ -676,6 +677,8 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 }
             });
 
+            isPreparingRecordingRef.current = false;
+            
             // If finger was released while recorder was still preparing, resolve immediately.
             if (pendingStopAfterPrepareRef.current) {
                 const { shouldSend } = pendingStopAfterPrepareRef.current;
@@ -727,7 +730,9 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             const uri = recording.getURI();
 
             if (shouldSend && uri) {
-                handleSendAudio(uri);
+                const status = await recording.getStatusAsync();
+                const durationMillis = status.durationMillis || (recordingDuration * 1000);
+                handleSendAudio(uri, durationMillis);
             }
             await Audio.setAudioModeAsync({
                 allowsRecordingIOS: false,
@@ -757,12 +762,13 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         }
     };
 
-    const handleSendAudio = async (uri: string) => {
+    const handleSendAudio = async (uri: string, duration?: number) => {
         if (!id) return;
         try {
             const media: Message['media'] = {
                 type: 'audio',
                 url: '', // will be set by ChatService after background upload
+                duration,
             };
             
             // Instantly send message to local DB, passing the local uri for background upload
@@ -1460,11 +1466,6 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                         maxLength={1000}
                                     />
 
-                                    {/* Emoji button (optional, can remove if not needed) */}
-                                    <Pressable style={styles.emojiInputButton}>
-                                        <MaterialIcons name="sentiment-satisfied" size={20} color="rgba(255,255,255,0.5)" />
-                                    </Pressable>
-
                                     {/* Mic button on right inside */}
                                     {inputText.trim() ? (
                                         <Pressable
@@ -1740,7 +1741,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 onSelectAudio={handleSelectDocument}
                 onSelectNote={() => {
                     setShowMediaPicker(false);
-                    Alert.alert("SoulSync Notes", "Leave a note from the Home screen!");
+                    Alert.alert("Soul Notes", "Leave a note from the Home screen!");
                 }}
             />
 
@@ -2107,10 +2108,6 @@ const styles = StyleSheet.create({
         paddingVertical: 0,
         paddingHorizontal: 8,
         fontWeight: '300',
-    },
-    emojiInputButton: {
-        padding: 4,
-        flexShrink: 0,
     },
     sendButton: {
         width: 36,

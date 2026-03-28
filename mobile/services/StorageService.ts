@@ -1,10 +1,10 @@
 import * as FileSystem from 'expo-file-system';
-import { SERVER_URL, proxySupabaseUrl, safeFetchJson } from '../config/api';
+import { SERVER_URL, safeFetchJson } from '../config/api';
 import { R2_CONFIG } from '../config/r2';
 import { r2StorageService } from './R2StorageService';
-// Temporarily keeping supabase instance around as a fallback if needed
-import { supabase } from '../config/supabase';
 import { offlineService } from './LocalDBService';
+import { mediaDownloadService } from './MediaDownloadService';
+import { soulFolderService } from './SoulFolderService';
 
 // Public R2 URL for direct access when server is unavailable
 const R2_PUBLIC_BASE = R2_CONFIG.PUBLIC_URL && !R2_CONFIG.PUBLIC_URL.includes('XXXXXXXXXXXX')
@@ -25,184 +25,137 @@ export const storageService = {
             let contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
             if (['mp4', 'mov', 'avi', 'mkv'].includes(ext)) {
                 contentType = `video/${ext === 'mov' ? 'quicktime' : ext}`;
-            } else if (['m4a', 'mp3', 'wav', 'aac', 'caf'].includes(ext)) {
-                contentType = `audio/${ext === 'm4a' ? 'x-m4a' : ext}`;
+            } else if (['m4a', 'mp3', 'wav', 'aac', 'caf', 'opus'].includes(ext)) {
+                // Precision: iOS uses audio/x-m4a or audio/x-caf usually
+                if (ext === 'm4a') contentType = 'audio/x-m4a';
+                else if (ext === 'caf') contentType = 'audio/x-caf';
+                else if (ext === 'mp3') contentType = 'audio/mpeg';
+                else contentType = `audio/${ext}`;
             }
 
             console.log(`[StorageService] Determined contentType: ${contentType}, fileName: ${fileName}`);
 
-            // 1. Get Presigned PUT URL from Node Server
-            console.log(`[StorageService] Fetching presigned upload URL from: ${SERVER_URL}/api/media/presign-upload`);
+            // 1. Get Presigned PUT URL from Node Server (with short timeout)
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout for presign
+
             const { success, data, error } = await safeFetchJson<{ presignedUrl: string, key: string }>(
                 `${SERVER_URL}/api/media/presign-upload`, 
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ fileName, contentType })
+                    body: JSON.stringify({ fileName, contentType }),
+                    signal: controller.signal
                 }
-            );
+            ).finally(() => clearTimeout(timeoutId));
             
             if (!success || !data) {
-                console.warn('[StorageService] Presign upload failed:', error);
-                if (bucket === 'chat-media' || bucket === 'status-media' || bucket === 'avatars') {
-                    console.log('[StorageService] Falling back to direct R2 worker upload');
-                    const workerUrl = await r2StorageService.uploadImage(uri, bucket, folder);
-                    if (workerUrl) {
-                        return workerUrl;
-                    }
+                console.warn(`[StorageService] Presign failed (${error}). Falling back to Direct R2.`);
+                // Fallback to direct R2 worker if server fails
+                try {
+                    return await r2StorageService.uploadImage(uri, bucket, folder);
+                } catch (fallbackErr: any) {
+                    console.error('[StorageService] Fallback also failed:', fallbackErr.message);
+                    throw new Error(error || 'Failed to get presigned URL from server');
                 }
-                throw new Error(error || 'Failed to get presigned URL from server');
             }
             
             const { presignedUrl, key } = data;
-            console.log(`[StorageService] Got presigned upload URL for key: ${key}`);
 
-            // Intercept ph:// URIs and resolve to local file:// using MediaLibrary
+            // Resolve ph:// URIs
             if (uri.startsWith('ph://')) {
                 try {
-                    console.log(`[StorageService] Intercepted ph:// URI: ${uri}`);
                     const assetId = uri.substring(5).split('/')[0];
                     const MediaLibrary = require('expo-media-library');
                     const info = await MediaLibrary.getAssetInfoAsync(assetId);
                     if (info && (info.localUri || info.uri)) {
                         uri = info.localUri || info.uri;
-                        console.log(`[StorageService] Resolved ph:// to: ${uri}`);
                     }
                 } catch (err) {
                     console.warn(`[StorageService] Failed to resolve ph:// URI:`, err);
                 }
             }
 
-            // 2. Upload file directly to R2 using FileSystem
-            let fileInfo = await FileSystem.getInfoAsync(uri);
+            // Verify file exists
+            const fileInfo = await FileSystem.getInfoAsync(uri);
             if (!fileInfo.exists) {
-                console.log(`[StorageService] File not found at ${uri}, attempting file:// prefix check`);
-                if (!uri.startsWith('file://') && !uri.startsWith('content://')) {
+                // Try file:// prefix
+                if (!uri.startsWith('file://')) {
                     const fixedUri = 'file://' + uri;
                     const secondCheck = await FileSystem.getInfoAsync(fixedUri);
-                    if (secondCheck.exists) {
-                        uri = fixedUri;
-                        fileInfo = secondCheck; // Use the verified info
-                        console.log(`[StorageService] Found file with prefix: ${uri}`);
-                    } else {
-                        throw new Error('File does not exist locally: ' + uri);
-                    }
+                    if (secondCheck.exists) uri = fixedUri;
+                    else throw new Error('File not found: ' + uri);
                 } else {
-                    throw new Error('File does not exist locally: ' + uri);
+                    throw new Error('File not found: ' + uri);
                 }
             }
 
-            // Ensure we have a size for the log
-            const fileSize = (fileInfo as any).size || 'unknown';
-            console.log(`[StorageService] Starting upload via createUploadTask to R2. Size: ${fileSize}`);
-            
+            // 2. Upload to R2
             const uploadTask = FileSystem.createUploadTask(
                 presignedUrl,
                 uri,
                 {
                     httpMethod: 'PUT',
                     uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-                    headers: {
-                        'Content-Type': contentType,
-                    }
+                    headers: { 'Content-Type': contentType }
                 },
                 (progress) => {
                     if (onProgress) {
-                        const fraction = progress.totalBytesSent / progress.totalBytesExpectedToSend;
-                        onProgress(fraction);
+                        onProgress(progress.totalBytesSent / progress.totalBytesExpectedToSend);
                     }
                 }
             );
 
             const uploadRes = await uploadTask.uploadAsync();
 
-            console.log(`[StorageService] uploadAsync finished with status: ${uploadRes?.status}`);
-
             if (uploadRes?.status !== 200 && uploadRes?.status !== 201 && uploadRes?.status !== 204) {
-                 console.warn(`[StorageService] R2 Upload failed with body: ${uploadRes?.body}`);
-                 throw new Error(`R2 Upload failed: ${uploadRes?.status} - ${uploadRes?.body}`);
+                 throw new Error(`R2 Upload failed: ${uploadRes?.status}`);
             }
 
-            console.log(`[StorageService] Upload successful! Returning key: ${key}`);
+            console.log(`[StorageService] Upload successful: ${key}`);
             return key; 
         } catch (e: any) {
-            console.warn(`[StorageService] uploadImage CRITICAL error:`, e.message);
+            console.warn(`[StorageService] Upload error:`, e.message);
+            // Emergency fallback
             if (bucket === 'chat-media' || bucket === 'status-media' || bucket === 'avatars') {
-                try {
-                    console.log('[StorageService] Retrying via direct R2 worker fallback');
-                    const workerUrl = await r2StorageService.uploadImage(uri, bucket, folder);
-                    if (workerUrl) {
-                        return workerUrl;
-                    }
-                } catch (workerError: any) {
-                    console.warn('[StorageService] Direct R2 worker upload also failed:', workerError?.message);
-                }
+                return await r2StorageService.uploadImage(uri, bucket, folder);
             }
             throw e; 
         }
     },
 
     /**
-     * Delete multiple files from storage via Server
+     * Get local playable/viewable URL for an R2 key (with WhatsApp-style organized caching)
      */
-    async deleteMedia(urls: string[], bucket: string): Promise<void> {
-        if (!urls || urls.length === 0) return;
-
-        console.log(`🗑️ Deleting ${urls.length} media keys via server`);
-        
-        // This takes the 'keys' and tells the Node server to remove them
-        const keys = urls.map(url => url.split('/').pop()).filter((key): key is string => !!key);
-        
-        if (keys.length === 0) return;
-
-        try {
-            const { success, error } = await safeFetchJson<any>(
-                `${SERVER_URL}/api/media/delete`, 
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ keys })
-                }
-            );
-
-            if (success) {
-                console.log(`✅ Successfully queued deletion of ${keys.length} files`);
-            } else {
-                console.warn('[Storage] Failed to delete media via server:', error);
-            }
-        } catch (e) {
-            console.warn('[Storage] Deletion API call failed:', e);
-        }
-    },
-
-    /**
-     * Get local playable/viewable URL for an R2 key (with offline caching)
-     */
-    async getMediaUrl(r2Key: string): Promise<string | null> {
+    async getMediaUrl(r2Key: string, messageId?: string, mediaType?: string): Promise<string | null> {
         if (!r2Key) return null;
         
-        // Return as-is if it's already a local file or data URI
+        // Return as-is if it's already a local file
         if (r2Key.startsWith('file://') || r2Key.startsWith('data:')) {
             return r2Key;
         }
 
-        console.log(`[StorageService] Resolving media for key: ${r2Key}`);
-
         try {
-            // 1. Check local SQLite cache
-            const cachedPath = await offlineService.getMediaDownload(r2Key);
-            if (cachedPath) {
-                const info = await FileSystem.getInfoAsync(cachedPath);
-                if (info.exists) {
-                    console.log(`[StorageService] Cache hit: ${cachedPath}`);
-                    return cachedPath;
+            // 1. Check local SQLite cache first (if we have a messageId)
+            if (messageId) {
+                const cachedPath = await offlineService.getMediaDownload(messageId);
+                if (cachedPath) {
+                    const info = await FileSystem.getInfoAsync(cachedPath);
+                    if (info.exists) return cachedPath;
                 }
-                console.log(`[StorageService] Cache record found but file missing: ${cachedPath}`);
             }
 
-            // 2. Fetch Presigned Download URL from Server
-            console.log(`[StorageService] Fetching presigned URL from: ${SERVER_URL}/api/media/presign-download`);
-            const { success, data, error } = await safeFetchJson<{ presignedUrl: string }>(
+            // 2. Fallback: Search in the new organized Soul folders
+            // This handles cases where we have the file but lost the DB record
+            const ext = r2Key.split('.').pop()?.split('?')[0] || 'jpg';
+            const inferredType = mediaType || soulFolderService.inferMediaType(ext);
+            
+            // Note: We don't know the exact filename because SoulFolderService 
+            // uses dynamic counters, but we can check if the file exists anyway
+            // if we really need to. For now, we proceed to download if DB hit failed.
+
+            // 3. Fetch Presigned Download URL from Server
+            const { success, data } = await safeFetchJson<{ presignedUrl: string }>(
                 `${SERVER_URL}/api/media/presign-download`, 
                 {
                     method: 'POST',
@@ -211,50 +164,57 @@ export const storageService = {
                 }
             );
 
-            if (!success || !data?.presignedUrl) {
-                console.warn('[StorageService] Presign download failed:', error);
-                // Fallback: use public R2 URL directly (no server needed)
+            let downloadUrl = data?.presignedUrl;
+
+            if (!success || !downloadUrl) {
+                // Fallback: public R2 URL
                 if (R2_PUBLIC_BASE) {
-                    const publicUrl = `${R2_PUBLIC_BASE}/${r2Key}`;
-                    console.log('[StorageService] Falling back to public R2 URL:', publicUrl);
-                    return publicUrl;
+                    downloadUrl = `${R2_PUBLIC_BASE}/${r2Key}`;
+                } else {
+                    return r2Key.startsWith('http') ? r2Key : null;
                 }
-                const fallback = r2Key.startsWith('http') ? r2Key : null;
-                console.log(`[StorageService] No R2_PUBLIC_BASE. Final fallback: ${fallback}`);
-                return fallback;
             }
 
-            const { presignedUrl } = data;
-            console.log(`[StorageService] Got presigned URL (truncated): ${presignedUrl.substring(0, 50)}...`);
-
-            // 3. Download the file locally
-            const ext = r2Key.split('.').pop() || 'tmp';
-            // Sanitize filename from key
-            const safeName = r2Key.replace(/[^a-zA-Z0-9.-]/g, '_');
-            const localUri = `${FileSystem.documentDirectory}cached_media_${Date.now()}_${safeName}`;
-
-            console.log(`[StorageService] Downloading to: ${localUri}`);
-            const downloadRes = await FileSystem.downloadAsync(presignedUrl, localUri);
-            
-            if (downloadRes.status !== 200) {
-                throw new Error(`Download failed with status: ${downloadRes.status}`);
+            // 4. Download organizesly if we have a messageId
+            if (messageId) {
+                const result = await mediaDownloadService.downloadMedia(
+                    messageId, 
+                    downloadUrl, 
+                    undefined, 
+                    inferredType
+                );
+                if (result.success && result.localUri) {
+                    return result.localUri;
+                }
             }
 
-            console.log(`[StorageService] Download complete. Size: ${downloadRes.headers['Content-Length'] || 'unknown'}`);
+            // 5. If no messageId, do a temporary non-tracked download (fallback)
+            const tempPath = `${FileSystem.cacheDirectory}preview_${Date.now()}.${ext}`;
+            const downloadRes = await FileSystem.downloadAsync(downloadUrl, tempPath);
+            return downloadRes.uri;
 
-            // 4. Save to Cache tracking
-            await offlineService.saveMediaDownload(r2Key, presignedUrl, localUri, downloadRes.headers['Content-Length'] ? parseInt(downloadRes.headers['Content-Length']) : undefined);
-
-            return localUri;
         } catch (error) {
-            console.warn(`[StorageService] Critical failure for ${r2Key}:`, error);
-            // Fallback: use public R2 URL so images still load even when server is down
-            if (R2_PUBLIC_BASE) {
-                const publicUrl = `${R2_PUBLIC_BASE}/${r2Key}`;
-                console.log('[StorageService] Emergency fallback to public R2 URL:', publicUrl);
-                return publicUrl;
-            }
+            console.warn(`[StorageService] Resolver failure for ${r2Key}:`, error);
+            if (R2_PUBLIC_BASE) return `${R2_PUBLIC_BASE}/${r2Key}`;
             return r2Key.startsWith('http') ? r2Key : null;
+        }
+    },
+
+    /**
+     * For sent media: save it to the organized "Sent/" folder
+     */
+    async saveSentMedia(messageId: string, localUri: string, mediaType: string): Promise<string | null> {
+        try {
+            const result = await mediaDownloadService.saveLocalMediaFromUri(messageId, localUri, mediaType);
+            if (result.success && result.localUri) {
+                // Update DB so we don't try to download what we just sent
+                await offlineService.updateMessageLocalUri(messageId, result.localUri, result.fileSize || 0);
+                return result.localUri;
+            }
+            return null;
+        } catch (e) {
+            console.warn('[StorageService] Failed to save sent media:', e);
+            return null;
         }
     }
 };

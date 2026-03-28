@@ -8,6 +8,8 @@ try { webRTCService = require('../services/WebRTCService').webRTCService; } catc
 import { nativeCallBridge } from '../services/NativeCallBridge';
 import { useAuth } from './AuthContext';
 import { ActiveCall, CallLog } from '../types';
+import { callDbService } from '../services/CallDBService';
+import { normalizeId, getSuperuserName } from '../utils/idNormalization';
 
 interface CallContextType {
     activeCall: ActiveCall | null;
@@ -29,220 +31,150 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
     const [calls, setCalls] = useState<CallLog[]>([]);
     const activeCallRef = useRef(activeCall);
-    // Store the incoming signal for acceptCall to use
+    const callStartTimeRef = useRef<number | null>(null);
     const incomingSignalRef = useRef<CallSignal | null>(null);
 
     useEffect(() => { activeCallRef.current = activeCall; }, [activeCall]);
 
     const fetchCalls = useCallback(async () => {
         if (!currentUser) return;
-        const { data, error } = await supabase
-            .from('call_logs')
-            .select('*')
-            .or(`caller_id.eq.${currentUser.id},callee_id.eq.${currentUser.id}`)
-            .order('created_at', { ascending: false });
 
-        if (!error && data) {
-            const mappedLogs: CallLog[] = data.map(log => ({
-                id: log.id,
-                contactId: log.caller_id === currentUser.id ? log.callee_id : log.caller_id,
-                contactName: 'Unknown',
-                avatar: '',
-                time: log.created_at,
-                type: log.caller_id === currentUser.id ? 'outgoing' : 'incoming',
-                status: log.status || 'completed',
-                callType: log.call_type || 'audio',
-                duration: log.duration
-            }));
-            setCalls(mappedLogs);
+        // 1. Load from local SQLite first
+        const localLogs = await callDbService.getCallLogs();
+        if (localLogs.length > 0) {
+            setCalls(localLogs);
+        }
+
+        // 2. Fetch from Supabase as secondary
+        try {
+            const { data, error } = await supabase
+                .from('call_logs')
+                .select('*')
+                .or(`caller_id.eq.${currentUser.id},callee_id.eq.${currentUser.id}`)
+                .order('created_at', { ascending: false })
+                .limit(50);
+
+            if (!error && data) {
+                const mappedLogs: CallLog[] = data.map(log => ({
+                    id: log.id,
+                    contactId: log.caller_id === currentUser.id ? log.callee_id : log.caller_id,
+                    contactName: getSuperuserName(log.caller_id === currentUser.id ? log.callee_id : log.caller_id) || 'User',
+                    avatar: '',
+                    time: log.created_at,
+                    type: log.caller_id === currentUser.id ? 'outgoing' : 'incoming',
+                    status: log.status || 'completed',
+                    callType: log.call_type || 'audio',
+                    duration: log.duration
+                }));
+
+                for (const log of mappedLogs) {
+                    await callDbService.saveCallLog(log);
+                }
+
+                const finalLogs = await callDbService.getCallLogs();
+                setCalls(finalLogs);
+            }
+        } catch (err) {
+            console.warn('[CallContext] Supabase fetch failed:', err);
         }
     }, [currentUser]);
 
     useEffect(() => {
         if (!currentUser) return;
 
-        // Initialize CallService
-        try {
-            callService.initialize(currentUser.id);
-        } catch (e) {
-            console.warn('[CallContext] callService.initialize failed:', e);
-        }
-
-        // Initialize NativeCallBridge
-        const initTimeout = setTimeout(() => {
-            console.warn('[CallContext] NativeCallBridge init timed out');
-        }, 5000);
+        callService.initialize(currentUser.id);
 
         nativeCallBridge.initialize(currentUser.id, {
-            onCallAnswered: (callId, payload) => {
-                console.log('[CallContext] Native call answered:', callId);
-            },
-            onCallDeclined: (callId) => {
-                console.log('[CallContext] Native call declined:', callId);
-                setActiveCall(null);
-                incomingSignalRef.current = null;
-            },
-            onCallConnected: (callId) => {
-                console.log('[CallContext] Native call connected:', callId);
-            },
-            onCallEnded: (callId) => {
-                console.log('[CallContext] Native call ended:', callId);
-                setActiveCall(null);
-                incomingSignalRef.current = null;
-            },
-            onMuteToggled: (muted) => {
-                console.log('[CallContext] Mute toggled from native:', muted);
-                setActiveCall(prev => prev ? { ...prev, isMuted: muted } : null);
-            }
-        }).then(() => {
-            clearTimeout(initTimeout);
-        }).catch(err => {
-            clearTimeout(initTimeout);
-            console.warn('[CallContext] Failed to initialize NativeCallBridge:', err);
-        });
+            onCallAnswered: () => acceptCall(),
+            onCallDeclined: () => endCall(),
+            onCallConnected: () => {},
+            onCallEnded: () => endCall(),
+            onMuteToggled: (muted) => setActiveCall(prev => prev ? { ...prev, isMuted: muted } : null)
+        }).catch(err => console.warn('[CallContext] NativeCallBridge init failed:', err));
 
-        // ──────────────────────────────────────────────────────────────────
-        // INCOMING SIGNAL HANDLER — wire callService signals to activeCall
-        // ──────────────────────────────────────────────────────────────────
-        const signalHandler = (signal: CallSignal) => {
-            console.log(`[CallContext] 📞 Received signal: ${signal.type} from ${signal.callerId} (My ID: ${currentUser?.id})`);
+        const signalHandler = async (signal: CallSignal) => {
+            console.log(`[CallContext] Received signal: ${signal.type}`);
             
             switch (signal.type) {
                 case 'call-request': {
-                    console.log(`[CallContext] 🚀 Processing call-request. Caller: ${signal.callerId}, Callee: ${signal.calleeId}, Me: ${currentUser?.id}`);
+                    if (signal.callerId === currentUser.id || activeCallRef.current) return;
                     
-                    // Protection: Don't answer calls from yourself (pollution/loopback)
-                    if (signal.callerId === currentUser?.id) {
-                        console.log('[CallContext] ⚠️ Ignoring incoming call-request from self (ID match)');
-                        return;
-                    }
-
-                    // Don't overwrite an existing active call
-                    if (activeCallRef.current) {
-                        console.log('[CallContext] ⚠️ Ignoring incoming call — already in a call with', activeCallRef.current.contactId);
-                        return;
-                    }
-                    
-                    console.log('[CallContext] ✅ Setting activeCall for incoming request');
-                    // Store the raw signal for acceptCall
                     incomingSignalRef.current = signal;
-                    
-                    // Set activeCall → triggers IncomingCallModal
+                    const contactName = getSuperuserName(signal.callerId) || 'User';
                     setActiveCall({
                         callId: signal.callId,
                         contactId: signal.callerId,
+                        contactName: contactName,
                         type: signal.callType,
-                        isMinimized: false,
-                        isMuted: false,
                         isIncoming: true,
                         isAccepted: false,
-                        isRinging: true,
-                        roomId: signal.roomId,
+                        isMuted: false,
+                        isVideoOff: false,
+                        isMinimized: false,
+                        remoteVideoOff: false,
+                        roomId: signal.roomId
                     });
                     
-                    // Notify caller we're ringing
-                    callService.notifyRinging(
-                        signal.roomId!,
-                        signal.callerId,
-                        signal.callType
-                    ).catch(err => console.warn('[CallContext] Failed to send ringing:', err));
+                    callService.notifyRinging(signal.roomId!, signal.callerId, signal.callType)
+                        .catch(err => console.warn('[CallContext] Ringing signal failed:', err));
                     break;
                 }
                 case 'call-accept': {
-                    // The callee accepted — update state
-                    setActiveCall(prev => prev ? { ...prev, isAccepted: true, isRinging: false } : null);
-                    // Notify WebRTCService to create offer (for caller side)
+                    setActiveCall(prev => prev ? { ...prev, isAccepted: true } : null);
+                    callStartTimeRef.current = Date.now();
                     if (webRTCService && !activeCallRef.current?.isIncoming) {
-                        try {
-                            // Ensure WebRTC is initialized before calling onCallAccepted
-                            if (!webRTCService.peerConnection) {
-                                console.log('[CallContext] Initializing WebRTC before onCallAccepted...');
-                                webRTCService.setInitiator(true);
-                                webRTCService.addListener({
-                                    onStateChange: (state: any) => {
-                                        console.log('[CallContext] WebRTC state changed:', state);
-                                    },
-                                    onLocalStream: (stream: any) => {
-                                        console.log('[CallContext] Local stream ready');
-                                    },
-                                    onRemoteStream: (stream: any) => {
-                                        console.log('[CallContext] Remote stream received');
-                                    },
-                                    onError: (error: string) => {
-                                        console.error('[CallContext] WebRTC error:', error);
-                                    },
-                                });
-                            }
-                            webRTCService.onCallAccepted();
-                        } catch (e) {
-                            console.warn('[CallContext] WebRTC onCallAccepted error:', e);
-                        }
+                        try { webRTCService.onCallAccepted(); } catch (e) {}
                     }
                     break;
                 }
-                case 'call-reject': {
-                    console.log('[CallContext] Call rejected by remote');
-                    setActiveCall(null);
-                    incomingSignalRef.current = null;
-                    callService.cleanup('remote-reject');
-                    break;
-                }
+                case 'call-reject':
                 case 'call-end': {
-                    console.log('[CallContext] Call ended by remote');
-                    if (webRTCService) {
-                        try { webRTCService.cleanup(); } catch (_) {}
+                    const wasAccepted = activeCallRef.current?.isAccepted;
+                    const active = activeCallRef.current;
+                    
+                    if (active) {
+                        const duration = callStartTimeRef.current ? Math.floor((Date.now() - callStartTimeRef.current) / 1000) : 0;
+                        await callDbService.saveCallLog({
+                            id: active.callId || active.roomId || 'unknown',
+                            contactId: active.contactId,
+                            contactName: active.contactName || getSuperuserName(active.contactId) || 'User',
+                            avatar: active.avatar || '',
+                            time: callStartTimeRef.current ? new Date(callStartTimeRef.current).toISOString() : new Date().toISOString(),
+                            type: active.isIncoming ? 'incoming' : 'outgoing',
+                            status: wasAccepted ? 'completed' : (active.isIncoming ? 'missed' : 'rejected'),
+                            callType: active.type,
+                            duration
+                        });
+                        fetchCalls();
                     }
+
+                    if (webRTCService) try { webRTCService.cleanup(); } catch (_) {}
                     setActiveCall(null);
                     incomingSignalRef.current = null;
-                    callService.cleanup('remote-end');
+                    callStartTimeRef.current = null;
+                    callService.cleanup('remote-terminated');
                     break;
                 }
-                case 'call-ringing': {
+                case 'call-ringing':
                     setActiveCall(prev => prev ? { ...prev, isRinging: true } : null);
                     break;
-                }
-                case 'video-toggle': {
+                case 'video-toggle':
                     setActiveCall(prev => prev ? { ...prev, remoteVideoOff: signal.payload?.videoOff } : null);
                     break;
-                }
-                case 'audio-toggle': {
+                case 'audio-toggle':
                     setActiveCall(prev => prev ? { ...prev, remoteMuted: signal.payload?.muted } : null);
                     break;
-                }
-                // WebRTC signaling — forward to WebRTCService for connection establishment
                 case 'offer':
                 case 'answer':
-                case 'ice-candidate': {
+                case 'ice-candidate':
                     if (webRTCService) {
                         try {
-                            // For offer, ensure WebRTC is initialized before handling
                             if (signal.type === 'offer' && !webRTCService.peerConnection) {
-                                console.log('[CallContext] Initializing WebRTC before handling offer...');
-                                const isInitiator = signal.callerId === currentUser?.id;
-                                webRTCService.setInitiator(isInitiator);
-                                webRTCService.addListener({
-                                    onStateChange: (state: any) => {
-                                        console.log('[CallContext] WebRTC state changed:', state);
-                                    },
-                                    onLocalStream: (stream: any) => {
-                                        console.log('[CallContext] Local stream ready');
-                                    },
-                                    onRemoteStream: (stream: any) => {
-                                        console.log('[CallContext] Remote stream received');
-                                    },
-                                    onError: (error: string) => {
-                                        console.error('[CallContext] WebRTC error:', error);
-                                    },
-                                });
+                                webRTCService.setInitiator(false);
                             }
                             webRTCService.handleSignal(signal);
-                        } catch (e) {
-                            console.warn('[CallContext] WebRTC signal handling error:', e);
-                        }
+                        } catch (e) {}
                     }
-                    break;
-                }
-                default:
                     break;
             }
         };
@@ -250,168 +182,126 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
         callService.addListener(signalHandler);
         fetchCalls();
         
-        const callSub = supabase
-            .channel('public:call_logs')
-            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_logs' }, (payload: any) => {
-                const newLog = payload.new;
-                if (newLog.caller_id === currentUser.id || newLog.callee_id === currentUser.id) {
-                    fetchCalls();
-                }
-            })
+        const callSub = supabase.channel('public:call_logs')
+            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_logs' }, () => fetchCalls())
             .subscribe();
 
         return () => {
             callService.removeListener(signalHandler);
-            callService.cleanup('context-unmount');
+            callService.cleanup('unmount');
             nativeCallBridge.cleanup();
             supabase.removeChannel(callSub);
         };
     }, [currentUser, fetchCalls]);
 
-
-    // ── startCall: Outgoing call ─────────────────────────────────────────
     const startCall = useCallback(async (contactId: string, type: 'audio' | 'video') => {
-        if (!currentUser) return;
-        
-        console.log(`[CallContext] 📱 Starting ${type} call to ${contactId}`);
-        
-        // 1. Call the service to send the signal
         const roomId = await callService.startCall(contactId, type);
-        if (!roomId) {
-            console.warn('[CallContext] Failed to start call — no roomId returned');
-            return;
+        if (roomId) {
+            const contactName = getSuperuserName(contactId) || 'User';
+            setActiveCall({
+                callId: roomId,
+                contactId,
+                contactName,
+                type,
+                isIncoming: false,
+                isAccepted: false,
+                isMuted: false,
+                isVideoOff: false,
+                isMinimized: false,
+                remoteVideoOff: false,
+                roomId
+            });
+            callStartTimeRef.current = null;
         }
-        
-        // 2. Set activeCall → triggers TrafficController in _layout.tsx → navigates to /call
-        setActiveCall({
-            callId: roomId,
-            contactId,
-            type,
-            isMinimized: false,
-            isMuted: false,
-            isIncoming: false,
-            isAccepted: false,
-            isRinging: false,
-            roomId,
-        });
     }, [currentUser]);
 
-    // ── acceptCall: Accept incoming call ──────────────────────────────────
     const acceptCall = useCallback(async () => {
         const signal = incomingSignalRef.current;
-        if (!signal) {
-            console.warn('[CallContext] acceptCall: no incoming signal stored');
-            return;
-        }
+        if (!signal) return;
         
-        console.log(`[CallContext] ✅ Accepting call from ${signal.callerId}`);
-        
-        // 1. IMMEDIATE STATE UPDATE for UI feel
-        setActiveCall(prev => prev ? { 
-            ...prev, 
-            isAccepted: true, 
-            isRinging: false 
-        } : null);
-
-        // 2. Accept via service (joins room + sends call-accept signal)
-        // We catch here because the signal is already considered accepted logically
-        callService.acceptCall(signal).catch(err => {
-            console.error('[CallContext] callService.acceptCall error:', err);
-        });
-        
+        setActiveCall(prev => prev ? { ...prev, isAccepted: true } : null);
+        callStartTimeRef.current = Date.now();
+        callService.acceptCall(signal).catch(() => {});
         incomingSignalRef.current = null;
     }, []);
 
-    // ── endCall: End active call ─────────────────────────────────────────
     const endCall = useCallback(async () => {
-        console.log('[CallContext] 📴 Ending call');
-        
-        // Clean up WebRTC
-        if (webRTCService) {
-            try { webRTCService.cleanup(); } catch (_) {}
+        const active = activeCallRef.current;
+        if (active) {
+            const duration = callStartTimeRef.current ? Math.floor((Date.now() - callStartTimeRef.current) / 1000) : 0;
+            await callDbService.saveCallLog({
+                id: active.callId || active.roomId || 'unknown',
+                contactId: active.contactId,
+                contactName: active.contactName || getSuperuserName(active.contactId) || 'User',
+                avatar: active.avatar || '',
+                time: callStartTimeRef.current ? new Date(callStartTimeRef.current).toISOString() : new Date().toISOString(),
+                type: active.isIncoming ? 'incoming' : 'outgoing',
+                status: active.isAccepted ? 'completed' : 'rejected',
+                callType: active.type,
+                duration
+            });
+            fetchCalls();
         }
-        
-        // Send end signal + cleanup service state
-        await callService.endCall();
-        
-        setActiveCall(null);
-        incomingSignalRef.current = null;
-    }, []);
 
-    // ── toggleMute ───────────────────────────────────────────────────────
+        if (webRTCService) try { webRTCService.cleanup(); } catch (_) {}
+        await callService.endCall();
+        setActiveCall(null);
+        callStartTimeRef.current = null;
+    }, [fetchCalls]);
+
     const toggleMute = useCallback(() => {
         setActiveCall(prev => {
             if (!prev) return null;
             const newMuted = !prev.isMuted;
+            if (webRTCService) try { webRTCService.toggleMute(); } catch (_) {}
             
-            // Toggle audio track in WebRTC
-            if (webRTCService) {
-                try { webRTCService.toggleMute(); } catch (_) {}
-            }
-            
-            // Notify remote about mute state
-            if (prev.roomId && prev.contactId) {
-                callService.sendSignal({
-                    type: 'audio-toggle',
-                    callId: prev.callId || prev.roomId,
-                    callerId: currentUser?.id || '',
-                    calleeId: prev.contactId,
-                    callType: prev.type,
-                    payload: { muted: newMuted },
-                    timestamp: new Date().toISOString(),
-                    roomId: prev.roomId,
-                }).catch(() => {});
-            }
+            callService.sendSignal({
+                type: 'audio-toggle',
+                callId: prev.callId || prev.roomId || '',
+                callerId: currentUser?.id || '',
+                calleeId: prev.contactId,
+                callType: prev.type,
+                payload: { muted: newMuted },
+                timestamp: new Date().toISOString(),
+                roomId: prev.roomId,
+            }).catch(() => {});
             
             return { ...prev, isMuted: newMuted };
         });
     }, [currentUser]);
 
-    // ── toggleVideo ──────────────────────────────────────────────────────
     const toggleVideo = useCallback(() => {
         setActiveCall(prev => {
             if (!prev) return null;
             const newVideoOff = !prev.isVideoOff;
+            if (webRTCService) try { webRTCService.toggleVideo(); } catch (_) {}
             
-            // Toggle video track in WebRTC
-            if (webRTCService) {
-                try { webRTCService.toggleVideo(); } catch (_) {}
-            }
-            
-            // Notify remote about video state
-            if (prev.roomId && prev.contactId) {
-                callService.sendSignal({
-                    type: 'video-toggle',
-                    callId: prev.callId || prev.roomId,
-                    callerId: currentUser?.id || '',
-                    calleeId: prev.contactId,
-                    callType: prev.type,
-                    payload: { videoOff: newVideoOff },
-                    timestamp: new Date().toISOString(),
-                    roomId: prev.roomId,
-                }).catch(() => {});
-            }
+            callService.sendSignal({
+                type: 'video-toggle',
+                callId: prev.callId || prev.roomId || '',
+                callerId: currentUser?.id || '',
+                calleeId: prev.contactId,
+                callType: prev.type,
+                payload: { videoOff: newVideoOff },
+                timestamp: new Date().toISOString(),
+                roomId: prev.roomId,
+            }).catch(() => {});
             
             return { ...prev, isVideoOff: newVideoOff };
         });
     }, [currentUser]);
 
     const deleteCall = useCallback(async (id: string) => {
-        const { error } = await supabase.from('call_logs').delete().eq('id', id);
-        if (!error) {
-            setCalls(prev => prev.filter(c => c.id !== id));
-        }
+        setCalls(prev => prev.filter(c => c.id !== id));
+        await callDbService.deleteCallLog(id);
+        await supabase.from('call_logs').delete().eq('id', id);
     }, []);
 
     const clearCalls = useCallback(async () => {
         if (!currentUser) return;
-        const { error } = await supabase
-            .from('call_logs')
-            .delete()
-            .or(`caller_id.eq.${currentUser.id},callee_id.eq.${currentUser.id}`);
-        if (!error) {
-            setCalls([]);
-        }
+        setCalls([]);
+        await callDbService.clearCallLogs();
+        await supabase.from('call_logs').delete().or(`caller_id.eq.${currentUser.id},callee_id.eq.${currentUser.id}`);
     }, [currentUser]);
 
     const value = {
@@ -432,8 +322,6 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
 export const useCall = () => {
     const context = useContext(CallContext);
-    if (context === undefined) {
-        throw new Error('useCall must be used within a CallProvider');
-    }
+    if (context === undefined) throw new Error('useCall must be used within a CallProvider');
     return context;
 };

@@ -5,7 +5,9 @@
 
 import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system';
 import { MIGRATE_DB } from '../database/schema';
+import { dbManager } from '../database/DatabaseManager';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC TYPES
@@ -31,6 +33,7 @@ export interface QueuedMessage {
     name?: string;
     caption?: string;
     thumbnail?: string;
+    duration?: number;
   };
   replyTo?: string;
   retryCount: number;
@@ -64,63 +67,45 @@ export interface PendingSyncOperation {
 // DATABASE SINGLETON
 // ─────────────────────────────────────────────────────────────────────────────
 
-let _db: SQLite.SQLiteDatabase | null = null;
-let _dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
+const DB_NAME = 'soul_messages.db';
+const OLD_DB_NAME = 'soulsync.db';
 
-async function getDb(): Promise<SQLite.SQLiteDatabase> {
-  if (_db) return _db;
-  if (_dbPromise) return _dbPromise;
-
-  _dbPromise = (async () => {
-    try {
-      console.log('[SQLite] Opening database...');
-      const db = await SQLite.openDatabaseAsync('soulsync.db');
-
-      await db.execAsync('PRAGMA journal_mode = WAL;');
-      await db.execAsync('PRAGMA foreign_keys = ON;');
-
-      await MIGRATE_DB(db);
-
-      // FIX #6: Run integrity check after migrations to detect corruption
-      await checkDatabaseIntegrity(db);
-
-      // FIX #19: Setup periodic WAL checkpoint to prevent data loss on crash
-      setupWalCheckpoint(db);
-
-      _db = db;
-      return db;
-    } catch (error) {
-      console.error('[SQLite] Initialization error:', error);
-      _dbPromise = null;
-      throw error;
-    }
-  })();
-
-  return _dbPromise;
-}
-
-// FIX #6: Database integrity check to detect corruption
-async function checkDatabaseIntegrity(db: SQLite.SQLiteDatabase): Promise<boolean> {
-  // skip on Android emulator for performance if needed, but here we'll just add a race
-  if (Platform.OS === 'android') {
-      console.log('[SQLite] Android: Skipping long integrity check for faster boot');
-      return true;
-  }
-  
+async function ensureDatabaseMigration(): Promise<void> {
   try {
-    const result = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check;');
-    if (result && result.integrity_check === 'ok') {
-      console.log('[SQLite] Database integrity check passed');
-      return true;
-    } else {
-      console.error('[SQLite] Database integrity check failed:', result?.integrity_check);
-      return false;
+    const dbDir = `${FileSystem.documentDirectory}SQLite/`;
+    const oldPath = `${dbDir}${OLD_DB_NAME}`;
+    const newPath = `${dbDir}${DB_NAME}`;
+
+    const oldInfo = await FileSystem.getInfoAsync(oldPath);
+    const newInfo = await FileSystem.getInfoAsync(newPath);
+
+    if (oldInfo.exists && !newInfo.exists) {
+      console.log(`[SQLite] Migrating ${OLD_DB_NAME} -> ${DB_NAME}`);
+      await FileSystem.makeDirectoryAsync(dbDir, { intermediates: true });
+      await FileSystem.moveAsync({ from: oldPath, to: newPath });
+      console.log('[SQLite] Database migration successful');
     }
   } catch (error) {
-    console.error('[SQLite] Failed to run integrity check:', error);
-    return false;
+    console.warn('[SQLite] Database migration check failed:', error);
   }
 }
+
+async function getDb(): Promise<SQLite.SQLiteDatabase> {
+  await ensureDatabaseMigration();
+
+  return dbManager.getDatabase({
+    name: DB_NAME,
+    migrations: MIGRATE_DB,
+    onOpen: async (db) => {
+      // Removed integrity check: too slow for startup (watchdog violation)
+      // await checkDatabaseIntegrity(db);
+      // FIX #19: Setup periodic WAL checkpoint to prevent data loss on crash
+      setupWalCheckpoint(db);
+    }
+  });
+}
+
+
 
 // FIX #19: Periodic WAL checkpoint to prevent data loss on crash
 let checkpointInterval: NodeJS.Timeout | null = null;
@@ -150,6 +135,7 @@ function rowToQueuedMessage(row: any): QueuedMessage {
       name: row.media_name ?? undefined,
       caption: row.media_caption ?? undefined,
       thumbnail: row.media_thumbnail ?? undefined,
+      duration: row.media_duration ?? undefined,
     };
   }
   return {
@@ -209,56 +195,59 @@ class OfflineService {
 
   async saveMessage(chatId: string, msg: LocalMessage): Promise<void> {
     const db = await getDb();
-    // Ensure receiver is set correctly based on sender
     const receiver = msg.sender === 'me' ? chatId : 'me';
     
-    await db.runAsync(
-      `INSERT INTO messages
-         (id, chat_id, sender, receiver, text,
-          media_type, media_url, media_caption, media_thumbnail,
-          reply_to_id, timestamp, status, local_file_uri, is_unsent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-      ON CONFLICT(id) DO UPDATE SET
-         status = excluded.status,
-         media_url = COALESCE(excluded.media_url, messages.media_url),
-         media_thumbnail = COALESCE(excluded.media_thumbnail, messages.media_thumbnail),
-         local_file_uri = COALESCE(messages.local_file_uri, excluded.local_file_uri);`,
-      [msg.id, chatId, msg.sender, receiver, msg.text ?? '', msg.media?.type ?? null, msg.media?.url ?? null, msg.media?.caption ?? null, msg.media?.thumbnail ?? null, msg.replyTo ?? null, msg.timestamp, msg.status ?? 'delivered', msg.localFileUri ?? null]
-    );
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(
+        `INSERT INTO messages
+           (id, chat_id, sender, receiver, text,
+            media_type, media_url, media_caption, media_thumbnail,
+            reply_to_id, timestamp, status, local_file_uri, is_unsent, media_duration)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        ON CONFLICT(id) DO UPDATE SET
+           status = excluded.status,
+           media_url = COALESCE(excluded.media_url, messages.media_url),
+           media_thumbnail = COALESCE(excluded.media_thumbnail, messages.media_thumbnail),
+           local_file_uri = COALESCE(messages.local_file_uri, excluded.local_file_uri);`,
+        [msg.id, chatId, msg.sender, receiver, msg.text ?? '', msg.media?.type ?? null, msg.media?.url ?? null, msg.media?.caption ?? null, msg.media?.thumbnail ?? null, msg.replyTo ?? null, msg.timestamp, msg.status ?? 'delivered', msg.localFileUri ?? null, msg.media?.duration ?? null]
+      );
 
-    const preview = msg.text?.trim() || (msg.media ? 'Media' : '');
-    await this.upsertChatSummary(chatId, preview, msg.timestamp, msg.sender === 'them' ? 1 : 0);
+      const preview = msg.text?.trim() || (msg.media ? 'Media' : '');
+      await this.upsertChatSummary(chatId, preview, msg.timestamp, msg.sender === 'them' ? 1 : 0);
+    });
   }
 
   async savePendingMessage(chatId: string, msg: QueuedMessage): Promise<void> {
     const db = await getDb();
-    await db.runAsync(
-      `INSERT INTO messages
-         (id, chat_id, sender, receiver, text,
-          media_type, media_url, media_caption, media_thumbnail,
-          reply_to_id, timestamp, status, retry_count, local_file_uri, is_unsent)
-       VALUES (?, ?, 'me', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, 1)
-      ON CONFLICT(id) DO UPDATE SET 
-         status = 'pending', 
-         is_unsent = 1,
-         media_url = COALESCE(excluded.media_url, messages.media_url),
-         media_thumbnail = COALESCE(excluded.media_thumbnail, messages.media_thumbnail),
-         local_file_uri = COALESCE(messages.local_file_uri, excluded.local_file_uri);`,
-      [msg.id, chatId, chatId, msg.text ?? '', msg.media?.type ?? null, msg.media?.url ?? null, msg.media?.caption ?? null, msg.media?.thumbnail ?? null, msg.replyTo ?? null, msg.timestamp, msg.localFileUri ?? null]
-    );
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(
+        `INSERT INTO messages
+           (id, chat_id, sender, receiver, text,
+            media_type, media_url, media_caption, media_thumbnail,
+            reply_to_id, timestamp, status, retry_count, local_file_uri, is_unsent, media_duration)
+         VALUES (?, ?, 'me', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, 1, ?)
+        ON CONFLICT(id) DO UPDATE SET 
+           status = 'pending', 
+           is_unsent = 1,
+           media_url = COALESCE(excluded.media_url, messages.media_url),
+           media_thumbnail = COALESCE(excluded.media_thumbnail, messages.media_thumbnail),
+           local_file_uri = COALESCE(messages.local_file_uri, excluded.local_file_uri);`,
+        [msg.id, chatId, chatId, msg.text ?? '', msg.media?.type ?? null, msg.media?.url ?? null, msg.media?.caption ?? null, msg.media?.thumbnail ?? null, msg.replyTo ?? null, msg.timestamp, msg.localFileUri ?? null, msg.media?.duration ?? null]
+      );
 
-    await this.enqueuePendingSyncOp('message', msg.id, 'insert', {
-      chatId,
-      sender: msg.sender,
-      text: msg.text,
-      timestamp: msg.timestamp,
-      media: msg.media ?? null,
-      replyTo: msg.replyTo ?? null,
-      localFileUri: msg.localFileUri ?? null,
-    }, msg.timestamp);
+      await this.enqueuePendingSyncOp('message', msg.id, 'insert', {
+        chatId,
+        sender: msg.sender,
+        text: msg.text,
+        timestamp: msg.timestamp,
+        media: msg.media ?? null,
+        replyTo: msg.replyTo ?? null,
+        localFileUri: msg.localFileUri ?? null,
+      }, msg.timestamp);
 
-    const preview = msg.text?.trim() || (msg.media ? 'Media' : '');
-    await this.upsertChatSummary(chatId, preview, msg.timestamp, 0);
+      const preview = msg.text?.trim() || (msg.media ? 'Media' : '');
+      await this.upsertChatSummary(chatId, preview, msg.timestamp, 0);
+    });
   }
 
   async getMessages(chatId: string, limit = 100): Promise<QueuedMessage[]> {
@@ -341,42 +330,40 @@ class OfflineService {
     await db.runAsync(`UPDATE messages SET media_url = ? WHERE id = ?;`, [url, messageId]);
   }
 
-  async updateMessageLocalUri(messageId: string, uri: string): Promise<void> {
+  async updateMessageLocalUri(messageId: string, uri: string, fileSize?: number): Promise<void> {
     const db = await getDb();
-    await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [uri, messageId]);
+    await db.runAsync(`UPDATE messages SET local_file_uri = ?, file_size = ?, media_status = 'downloaded' WHERE id = ?;`, [uri, fileSize ?? null, messageId]);
+  }
+
+  async updateMediaStatus(messageId: string, status: 'not_downloaded' | 'downloading' | 'downloaded' | 'failed'): Promise<void> {
+    const db = await getDb();
+    await db.runAsync(`UPDATE messages SET media_status = ? WHERE id = ?;`, [status, messageId]);
   }
 
   async updateMessageId(oldId: string, newId: string): Promise<void> {
     const db = await getDb();
     if (oldId === newId) return;
 
-    try {
-        // Check if newId already exists (race condition with Realtime broadcast)
-        const existing = await db.getFirstAsync(`SELECT id, local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [newId]) as any;
-        
-        if (existing) {
-            console.log(`[LocalDBService] 🔄 Race: serverId ${newId} already exists. Merging metadata...`);
-            // Realtime won the race. We need to merge our local metadata (local_file_uri) into the newId row.
-            const oldRow = await db.getFirstAsync(`SELECT local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [oldId]) as any;
-            if (oldRow?.local_file_uri) {
-                await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [oldRow.local_file_uri, newId]);
-            }
-            // Delete the temp entry since the real one exists
-            await db.runAsync(`DELETE FROM messages WHERE id = ?;`, [oldId]);
-            console.log(`[LocalDBService] ✅ Merge complete for ${newId}`);
-        } else {
-            // Normal case: swap the ID
-            await db.runAsync(`UPDATE messages SET id = ? WHERE id = ?;`, [newId, oldId]);
-            console.log(`[LocalDBService] ✅ Swapped temp ID ${oldId} for server ID ${newId}`);
-        }
-    } catch (err: any) {
-        console.error(`[LocalDBService] ❌ updateMessageId error:`, err);
-        // Best effort cleanup if we hit a unexpected constraint
-        if (err?.message?.includes('UNIQUE constraint failed')) {
-            console.warn(`[LocalDBService] UNIQUE constraint hit for ${newId}, attempting cleanup of old row ${oldId}`);
-            try { await db.runAsync(`DELETE FROM messages WHERE id = ?;`, [oldId]); } catch (_) {}
-        }
-    }
+    await db.withTransactionAsync(async () => {
+      // Check if newId already exists (race condition with Realtime broadcast)
+      const existing = await db.getFirstAsync(`SELECT id, local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [newId]) as any;
+      
+      if (existing) {
+          console.log(`[LocalDBService] 🔄 Race: serverId ${newId} already exists. Merging metadata...`);
+          // Realtime won the race. We need to merge our local metadata (local_file_uri) into the newId row.
+          const oldRow = await db.getFirstAsync(`SELECT local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [oldId]) as any;
+          if (oldRow?.local_file_uri) {
+              await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [oldRow.local_file_uri, newId]);
+          }
+          // Delete the temp entry since the real one exists
+          await db.runAsync(`DELETE FROM messages WHERE id = ?;`, [oldId]);
+          console.log(`[LocalDBService] ✅ Merge complete for ${newId}`);
+      } else {
+          // Normal case: swap the ID
+          await db.runAsync(`UPDATE messages SET id = ? WHERE id = ?;`, [newId, oldId]);
+          console.log(`[LocalDBService] ✅ Swapped temp ID ${oldId} for server ID ${newId}`);
+      }
+    });
   }
 
   async updateMessageRetry(messageId: string, retryCount: number, errorMessage?: string): Promise<void> {
@@ -420,6 +407,11 @@ class OfflineService {
     await db.runAsync(`DELETE FROM messages WHERE chat_id = ?;`, [chatId]);
   }
 
+  async deleteContact(contactId: string): Promise<void> {
+    const db = await getDb();
+    await db.runAsync(`DELETE FROM contacts WHERE id = ?;`, [contactId]);
+  }
+
   async getContacts(): Promise<any[]> {
     const db = await getDb();
     const rows = await db.getAllAsync(`SELECT * FROM contacts ORDER BY name ASC;`);
@@ -433,16 +425,38 @@ class OfflineService {
         lastMessage: r.last_message ?? '', 
         unreadCount: r.unread_count ?? 0, 
         about: r.about ?? r.bio ?? '', 
-        lastSeen: r.last_seen ?? undefined 
+        lastSeen: r.last_seen ?? undefined,
+        updatedAt: r.updated_at ?? undefined,
+        note: r.note ?? undefined,
+        noteTimestamp: r.note_timestamp ?? undefined
     }));
   }
 
   async saveContact(contact: any): Promise<void> {
     const db = await getDb();
+    
+    // SAFEGUARD: Never save the current user to the contacts table!
+    // We try to get the current user ID from AsyncStorage to be sure.
+    try {
+      const cachedUserId = await require('@react-native-async-storage/async-storage').default.getItem('ss_current_user');
+      const myId = cachedUserId;
+      if (myId) {
+        const { LEGACY_TO_UUID } = require('../config/supabase');
+        const cid = LEGACY_TO_UUID[contact.id] || contact.id;
+        const mid = LEGACY_TO_UUID[myId] || myId;
+        if (cid === mid) {
+          console.log('[SQLite] Blocking self-contact save for:', contact.id);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('[SQLite] saveContact self-filter check failed (ignoring):', e);
+    }
+
     await db.runAsync(
         `INSERT OR REPLACE INTO contacts 
-            (id, name, avatar, avatar_type, teddy_variant, status, last_message, unread_count, about, last_seen, last_synced_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, 
+            (id, name, avatar, avatar_type, teddy_variant, status, last_message, unread_count, about, last_seen, last_synced_at, updated_at, note, note_timestamp) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, 
         [
             contact.id, 
             contact.name, 
@@ -455,7 +469,9 @@ class OfflineService {
             contact.about ?? null, 
             contact.lastSeen ?? null, 
             new Date().toISOString(),
-            contact.isArchived ? 1 : 0
+            contact.updatedAt ?? null,
+            contact.note ?? null,
+            contact.noteTimestamp ?? null
         ]
     );
   }
@@ -503,8 +519,10 @@ class OfflineService {
 
   async saveMediaDownload(messageId: string, remoteUrl: string, localUri: string, fileSize?: number): Promise<void> {
     const db = await getDb();
-    await db.runAsync(`INSERT OR REPLACE INTO media_downloads (message_id, remote_url, local_uri, file_size) VALUES (?, ?, ?, ?);`, [messageId, remoteUrl, localUri, fileSize ?? null]);
-    await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [localUri, messageId]);
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(`INSERT OR REPLACE INTO media_downloads (message_id, remote_url, local_uri, file_size) VALUES (?, ?, ?, ?);`, [messageId, remoteUrl, localUri, fileSize ?? null]);
+      await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [localUri, messageId]);
+    });
   }
 
   async getMediaDownload(messageId: string): Promise<string | null> {

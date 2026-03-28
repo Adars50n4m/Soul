@@ -7,10 +7,14 @@
 
 import * as FileSystem from 'expo-file-system';
 import * as Crypto from 'expo-crypto';
-import { offlineService, MediaStatus } from './LocalDBService';
+import { offlineService } from './LocalDBService';
+import { MediaStatus } from '../types';
+import { soulFolderService } from './SoulFolderService';
 
-// Use documentDirectory from the legacy module
-const MEDIA_DIR = `${FileSystem.documentDirectory}media_cache`;
+// OLD flat cache — kept for backward compatibility during migration
+const LEGACY_MEDIA_DIR = `${FileSystem.documentDirectory}media_cache`;
+
+// NEW: Use SoulFolderService for organized paths
 
 export interface DownloadProgress {
   messageId: string;
@@ -27,14 +31,24 @@ export interface DownloadResult {
 }
 
 /**
- * Ensure media cache directory exists
+ * Ensure media directory exists — now uses Soul folder structure
  */
-async function ensureMediaDir(): Promise<string> {
-  const dirInfo = await FileSystem.getInfoAsync(MEDIA_DIR);
-  if (!dirInfo.exists) {
-    await FileSystem.makeDirectoryAsync(MEDIA_DIR, { intermediates: true });
+async function ensureMediaDir(mediaType?: string, isSent?: boolean): Promise<string> {
+  // Initialize Soul folder structure (idempotent)
+  await soulFolderService.init();
+  
+  // If we have type info, return the specific organized folder
+  if (mediaType) {
+    const type = mediaType as 'image' | 'video' | 'audio' | 'document' | 'voice_note';
+    return soulFolderService.getMediaPath(type, isSent ?? false);
   }
-  return MEDIA_DIR;
+  
+  // Fallback: legacy flat cache for unknown types
+  const dirInfo = await FileSystem.getInfoAsync(LEGACY_MEDIA_DIR);
+  if (!dirInfo.exists) {
+    await FileSystem.makeDirectoryAsync(LEGACY_MEDIA_DIR, { intermediates: true });
+  }
+  return LEGACY_MEDIA_DIR;
 }
 
 /**
@@ -53,7 +67,8 @@ async function generateLocalFilename(messageId: string, originalUrl: string): Pr
  * Get the local URI for a message's media file
  */
 export function getLocalMediaUri(messageId: string, filename: string): string {
-  return `${MEDIA_DIR}/${filename}`;
+  // Note: This is a legacy method, we should prefer soulFolderService.getDestinationPath
+  return `${LEGACY_MEDIA_DIR}/${filename}`;
 }
 
 /**
@@ -87,35 +102,53 @@ export async function deleteLocalFile(localUri: string): Promise<boolean> {
 /**
  * Download a media file from remote URL to local storage
  * Updates the message's media status during download
+ * 
+ * Now saves to organized Soul/ folder structure:
+ *   Received images → Soul/Media/Soul Images/IMG-20250328-SOUL0001.jpg
+ *   Received videos → Soul/Media/Soul Videos/VID-20250328-SOUL0001.mp4
  */
 export async function downloadMedia(
   messageId: string,
   remoteUrl: string,
-  onProgress?: (progress: DownloadProgress) => void
+  onProgress?: (progress: DownloadProgress) => void,
+  mediaType?: string,
+  isSent: boolean = false
 ): Promise<DownloadResult> {
   try {
-    // Ensure media directory exists
-    await ensureMediaDir();
+    // Determine the media type from URL if not provided
+    const ext = remoteUrl.split('.').pop()?.split('?')[0] || 'bin';
+    const inferredType = mediaType || soulFolderService.inferMediaType(ext);
     
-    // Generate local filename
-    const filename = await generateLocalFilename(messageId, remoteUrl);
-    const localUri = `${MEDIA_DIR}/${filename}`;
+    // Get organized destination path
+    const destPath = soulFolderService.getDestinationPath(
+      inferredType as any,
+      isSent,
+      remoteUrl
+    );
     
-    // Check if already downloaded
-    if (await localFileExists(localUri)) {
-      console.log('[MediaDownload] File already exists:', localUri);
-      return { success: true, localUri };
+    // Ensure the target folder exists
+    await ensureMediaDir(inferredType, isSent);
+    
+    // Check if we already have this file downloaded (by message ID in DB)
+    const existingUri = await offlineService.getMediaDownload(messageId);
+    if (existingUri) {
+      const exists = await localFileExists(existingUri);
+      if (exists) {
+        console.log('[MediaDownload] Already downloaded:', existingUri);
+        return { success: true, localUri: existingUri };
+      }
     }
     
     // Update status to downloading
     await offlineService.updateMediaStatus(messageId, 'downloading');
     
-    // Download the file
+    // Download the file to organized path
     console.log('[MediaDownload] Starting download:', remoteUrl);
+    console.log('[MediaDownload] Destination:', destPath);
     
     const downloadResult = await FileSystem.downloadAsync(
       remoteUrl,
-      localUri,
+      destPath,
       {
         headers: {
           'Accept': '*/*',
@@ -128,7 +161,7 @@ export async function downloadMedia(
     const fileSize = fileInfo.exists ? fileInfo.size : 0;
     
     // Update local URI in database
-    await offlineService.updateLocalFileUri(messageId, downloadResult.uri, fileSize);
+    await offlineService.updateMessageLocalUri(messageId, downloadResult.uri, fileSize);
     
     console.log('[MediaDownload] Download complete:', downloadResult.uri, 'Size:', fileSize);
     
@@ -141,7 +174,7 @@ export async function downloadMedia(
     console.error('[MediaDownload] Download failed:', error);
     
     // Update status to failed
-    await offlineService.updateMediaStatus(messageId, 'download_failed');
+    await offlineService.updateMediaStatus(messageId, 'download_failed' as any);
     
     return {
       success: false,
@@ -160,7 +193,6 @@ export async function downloadMediaWithProgress(
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<DownloadResult> {
   // For now, use the simple download
-  // In production, you might use a custom native module or XMLHttpRequest for progress
   const result = await downloadMedia(messageId, remoteUrl);
   
   if (onProgress && result.success) {
@@ -177,19 +209,29 @@ export async function downloadMediaWithProgress(
 
 /**
  * Save a local file from a local source (for sending media)
- * Copies the file to our media cache directory
+ * Copies the file to our organized Soul/Media/.../Sent/ folder
  */
 export async function saveLocalMediaFromUri(
   messageId: string,
-  sourceUri: string
+  sourceUri: string,
+  mediaType?: string
 ): Promise<DownloadResult> {
   try {
-    await ensureMediaDir();
+    // Determine media type
+    const ext = sourceUri.split('.').pop()?.split('?')[0] || 'bin';
+    const inferredType = mediaType || soulFolderService.inferMediaType(ext);
     
-    const filename = await generateLocalFilename(messageId, sourceUri);
-    const destUri = `${MEDIA_DIR}/${filename}`;
+    // Get organized destination path — sent = true
+    const destUri = soulFolderService.getDestinationPath(
+      inferredType as any,
+      true, // isSent = true
+      sourceUri
+    );
     
-    // Copy file to media cache
+    // Ensure the Sent/ folder exists
+    await ensureMediaDir(inferredType, true);
+    
+    // Copy file to organized Sent/ folder
     await FileSystem.copyAsync({
       from: sourceUri,
       to: destUri
@@ -198,6 +240,8 @@ export async function saveLocalMediaFromUri(
     // Get file size
     const fileInfo = await FileSystem.getInfoAsync(destUri) as FileSystem.FileInfo;
     const fileSize = fileInfo.exists ? fileInfo.size : 0;
+    
+    console.log('[MediaDownload] Saved sent media:', destUri, 'Size:', fileSize);
     
     return {
       success: true,
@@ -214,69 +258,97 @@ export async function saveLocalMediaFromUri(
 }
 
 /**
- * Clear all cached media files
+ * Clear all cached media files (both old flat cache and new organized structure)
  */
 export async function clearMediaCache(): Promise<{ deletedCount: number; freedBytes: number }> {
+  let totalDeleted = 0;
+  let totalFreed = 0;
+
+  // Clear old flat media_cache/
   try {
-    const dirInfo = await FileSystem.getInfoAsync(MEDIA_DIR);
-    if (!dirInfo.exists) {
-      return { deletedCount: 0, freedBytes: 0 };
+    const dirInfo = await FileSystem.getInfoAsync(LEGACY_MEDIA_DIR);
+    if (dirInfo.exists) {
+      const files = await FileSystem.readDirectoryAsync(LEGACY_MEDIA_DIR);
+      for (const file of files) {
+        const fileUri = `${LEGACY_MEDIA_DIR}/${file}`;
+        const info = await FileSystem.getInfoAsync(fileUri) as FileSystem.FileInfo;
+        if (info.exists && info.size) {
+          totalFreed += info.size;
+          totalDeleted++;
+        }
+      }
+      await FileSystem.deleteAsync(LEGACY_MEDIA_DIR, { idempotent: true });
     }
-    
-    const files = await FileSystem.readDirectoryAsync(MEDIA_DIR);
-    let totalSize = 0;
-    
-    for (const file of files) {
-      const fileUri = `${MEDIA_DIR}/${file}`;
-      const info = await FileSystem.getInfoAsync(fileUri) as FileSystem.FileInfo;
-      if (info.exists && info.size) {
-        totalSize += info.size;
+  } catch (_) {}
+
+  // Clear new organized Soul/ media (received only — keep sent by default)
+  try {
+    const breakdown = await soulFolderService.getStorageBreakdown();
+    for (const type of Object.keys(breakdown)) {
+      const receivedStats = breakdown[type].received;
+      totalDeleted += receivedStats.fileCount;
+      totalFreed += receivedStats.totalBytes;
+    }
+    // Clear received files for all types
+    for (const type of ['images', 'videos', 'audio', 'documents', 'voiceNotes'] as const) {
+      await soulFolderService.clearMediaByType(type, 'received');
+    }
+  } catch (_) {}
+
+  // Clear old StorageService cached_media_* files
+  try {
+    const docDir = FileSystem.documentDirectory;
+    if (docDir) {
+      const files = await FileSystem.readDirectoryAsync(docDir);
+      for (const file of files.filter(f => f.startsWith('cached_media_'))) {
+        const filePath = `${docDir}${file}`;
+        const info = await FileSystem.getInfoAsync(filePath) as FileSystem.FileInfo;
+        if (info.exists && info.size) {
+          totalFreed += info.size;
+          totalDeleted++;
+        }
+        await FileSystem.deleteAsync(filePath, { idempotent: true });
       }
     }
-    
-    await FileSystem.deleteAsync(MEDIA_DIR, { idempotent: true });
-    
-    console.log(`[MediaDownload] Cleared ${files.length} files, freed ${totalSize} bytes`);
-    
-    return {
-      deletedCount: files.length,
-      freedBytes: totalSize
-    };
-  } catch (error) {
-    console.error('[MediaDownload] Clear cache failed:', error);
-    return { deletedCount: 0, freedBytes: 0 };
-  }
+  } catch (_) {}
+
+  console.log(`[MediaDownload] Cleared ${totalDeleted} files, freed ${totalFreed} bytes`);
+  return { deletedCount: totalDeleted, freedBytes: totalFreed };
 }
 
 /**
- * Get storage usage for media cache
+ * Get storage usage for all media (old cache + new organized Soul/ folders)
  */
 export async function getMediaCacheSize(): Promise<{ fileCount: number; totalBytes: number }> {
+  let totalFiles = 0;
+  let totalBytes = 0;
+
+  // Old flat cache
   try {
-    const dirInfo = await FileSystem.getInfoAsync(MEDIA_DIR);
-    if (!dirInfo.exists) {
-      return { fileCount: 0, totalBytes: 0 };
-    }
-    
-    const files = await FileSystem.readDirectoryAsync(MEDIA_DIR);
-    let totalSize = 0;
-    
-    for (const file of files) {
-      const fileUri = `${MEDIA_DIR}/${file}`;
-      const info = await FileSystem.getInfoAsync(fileUri) as FileSystem.FileInfo;
-      if (info.exists && info.size) {
-        totalSize += info.size;
+    const dirInfo = await FileSystem.getInfoAsync(LEGACY_MEDIA_DIR);
+    if (dirInfo.exists) {
+      const files = await FileSystem.readDirectoryAsync(LEGACY_MEDIA_DIR);
+      for (const file of files) {
+        const fileUri = `${LEGACY_MEDIA_DIR}/${file}`;
+        const info = await FileSystem.getInfoAsync(fileUri) as FileSystem.FileInfo;
+        if (info.exists && info.size) {
+          totalBytes += info.size;
+          totalFiles++;
+        }
       }
     }
-    
-    return {
-      fileCount: files.length,
-      totalBytes: totalSize
-    };
-  } catch (error) {
-    console.error('[MediaDownload] Get cache size failed:', error);
-    return { fileCount: 0, totalBytes: 0 };
-  }
+  } catch (_) {}
+
+  // New organized structure
+  try {
+    const breakdown = await soulFolderService.getStorageBreakdown();
+    for (const type of Object.keys(breakdown)) {
+      totalFiles += breakdown[type].received.fileCount + breakdown[type].sent.fileCount;
+      totalBytes += breakdown[type].received.totalBytes + breakdown[type].sent.totalBytes;
+    }
+  } catch (_) {}
+
+  return { fileCount: totalFiles, totalBytes };
 }
 
 /**

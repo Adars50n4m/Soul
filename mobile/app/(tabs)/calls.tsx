@@ -5,6 +5,7 @@ import GlassView from '../../components/ui/GlassView';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useApp } from '../../context/AppContext';
+import { useScrollMotion } from '../../components/navigation/ScrollMotionProvider';
 import { SoulAvatar } from '../../components/SoulAvatar';
 
 const CallItem = React.memo(({ item, contact, onCall, activeTheme, isSelected, toggleSelection, selectionMode }: any) => {
@@ -71,6 +72,7 @@ const CallItem = React.memo(({ item, contact, onCall, activeTheme, isSelected, t
 export default function CallsScreen() {
     const { calls, contacts, startCall, activeTheme, clearCalls, deleteCall } = useApp();
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const { onScroll: handleScrollMotion } = useScrollMotion('calls');
 
     const selectionMode = selectedIds.size > 0;
 
@@ -182,6 +184,8 @@ export default function CallsScreen() {
                     renderItem={renderCallItem}
                     contentContainerStyle={styles.listContent}
                     showsVerticalScrollIndicator={false}
+                    onScroll={handleScrollMotion}
+                    scrollEventThrottle={16}
                     extraData={selectedIds} // Re-render items when selection changes
                 />
             )}

@@ -394,16 +394,16 @@ export default function StorageManagementScreen() {
                     </View>
                 )}
 
-                {/* Section 2: SoulSync App Storage */}
+                {/* Section 2: Soul App Storage */}
                 <View style={styles.section}>
-                    <Text style={styles.sectionHeader}>SoulSync Storage</Text>
+                    <Text style={styles.sectionHeader}>Soul Storage</Text>
                     <GlassView intensity={10} tint="dark" style={styles.glassContainer} >
                         <View style={styles.appStorageHeader}>
                             <View style={[styles.appIconContainer, { backgroundColor: `${activeTheme.primary}20` }]}>
                                 <Ionicons name="infinite" size={24} color={activeTheme.primary} />
                             </View>
                             <View style={{ flex: 1 }}>
-                                <Text style={styles.appStorageTitle}>SoulSync</Text>
+                                <Text style={styles.appStorageTitle}>Soul</Text>
                                 <Text style={styles.appStorageSubtitle}>
                                     {formatBytes((storageInfo?.dbSize || 0) + (storageInfo?.appCacheSize || 0))}
                                 </Text>
