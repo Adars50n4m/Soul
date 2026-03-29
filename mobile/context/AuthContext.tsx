@@ -40,6 +40,8 @@ export interface User {
     lastUsernameChange?: string;
     note?: string;
     noteTimestamp?: string;
+    country?: string;
+    countryCode?: string;
 }
 
 interface AuthContextType {
@@ -107,7 +109,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     birthdate: profile.birthdate || undefined,
                     lastUsernameChange: profile.lastUsernameChange || undefined,
                     note: profile.note,
-                    noteTimestamp: profile.note_timestamp
+                    noteTimestamp: profile.note_timestamp,
+                    country: profile.country || undefined,
+                    countryCode: profile.countryCode || undefined
                 };
                 setCurrentUser(userObj);
                 await AsyncStorage.setItem('ss_current_user', userId);
@@ -186,7 +190,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     teddyVariant: data.teddy_variant || prev.teddyVariant,
                     bio: data.bio || prev.bio,
                     note: data.note || prev.note,
-                    noteTimestamp: data.note_timestamp || prev.noteTimestamp
+                    noteTimestamp: data.note_timestamp || prev.noteTimestamp,
+                    country: data.country || prev.country,
+                    countryCode: data.country_code || prev.countryCode
                 } : null);
             }
         } catch (e) {
@@ -345,6 +351,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     avatar_type: updates.avatarType,
                     teddy_variant: updates.teddyVariant,
                     birthdate: updates.birthdate,
+                    country: updates.country,
+                    country_code: updates.countryCode,
                     note: updates.note,
                     note_timestamp: updates.noteTimestamp
                 })

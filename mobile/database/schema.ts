@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 16;
+const DB_TARGET_VERSION = 17;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -532,6 +532,24 @@ async function migration_v16(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v17 — Add country and country_code to users and contacts
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v17(db: any): Promise<void> {
+    const safeAlter = async (sql: string) => {
+        try { await db.execAsync(sql); } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration helper WARN v17:`, msg);
+            }
+        }
+    };
+    await safeAlter(`ALTER TABLE users ADD COLUMN country TEXT;`);
+    await safeAlter(`ALTER TABLE users ADD COLUMN country_code TEXT;`);
+    await safeAlter(`ALTER TABLE contacts ADD COLUMN country TEXT;`);
+    await safeAlter(`ALTER TABLE contacts ADD COLUMN country_code TEXT;`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
@@ -573,6 +591,7 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
         case 14: await migration_v14(db); break;
         case 15: await migration_v15(db); break;
         case 16: await migration_v16(db); break;
+        case 17: await migration_v17(db); break;
         default:
           console.error(`[SQLite] No migration logic for v${nextVersion}!`);
       }

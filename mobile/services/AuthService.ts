@@ -68,6 +68,8 @@ export interface UserProfile {
   note_timestamp?: string;
   avatarType?: AvatarType;
   teddyVariant?: 'boy' | 'girl';
+  country?: string | null;
+  countryCode?: string | null;
 }
 
 export interface AuthResult {
@@ -598,6 +600,8 @@ class AuthService {
     password?: string;
     displayName: string;
     avatarLocalUri?: string;  // local file URI from image picker
+    country?: string;
+    countryCode?: string;
   }): Promise<AuthResult> {
     try {
       const sessionData = await supabase.auth.getSession();
@@ -629,6 +633,8 @@ class AuthService {
           username:     params.username.trim().toLowerCase(),
           display_name: params.displayName.trim(),
           avatar_url:   avatarUrl,
+          country:      params.country,
+          country_code: params.countryCode,
           updated_at:   new Date().toISOString(),
         }, { onConflict: 'id' });
 
@@ -786,6 +792,8 @@ class AuthService {
         note_timestamp: data.note_timestamp,
         avatarType:  data.avatar_type,
         teddyVariant: data.teddy_variant,
+        country:     data.country,
+        countryCode: data.country_code,
       };
     } catch {
       return null;

@@ -15,6 +15,8 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { useApp } from '../context/AppContext';
 import { SoulAvatar } from '../components/SoulAvatar';
 import { storageService } from '../services/StorageService';
+import { CountryPicker } from '../components/CountryPicker';
+import { COUNTRIES, Country } from '../constants/Countries';
 import Animated, {
     Easing,
     SharedTransition,
@@ -91,6 +93,10 @@ export default function ProfileEditScreen() {
     const [bio, setBio] = useState(currentUser?.bio || '');
     const [avatar, setAvatar] = useState(currentUser?.avatar || '');
     const [birthdate, setBirthdate] = useState(currentUser?.birthdate || '');
+    const [countryModal, setCountryModal] = useState(false);
+    const [country, setCountry] = useState<Country | null>(
+        currentUser?.country ? COUNTRIES.find(c => c.name === currentUser.country) || null : null
+    );
     const [tempBirthdate, setTempBirthdate] = useState(currentUser?.birthdate || '');
     const [pickerDate, setPickerDate] = useState<Date>(new Date());
     const [showImageModal, setShowImageModal] = useState(false);
@@ -512,6 +518,18 @@ export default function ProfileEditScreen() {
                         </View>
                     </Animated.View>
 
+                    <Animated.View style={styles.section}>
+                        <Text style={styles.sectionLabel}>Country</Text>
+                        <View style={styles.settingsGroup}>
+                            <SettingRow
+                                label=""
+                                value={country ? `${country.flag} ${country.name}` : 'Not set'}
+                                icon="public"
+                                onPress={() => setCountryModal(true)}
+                            />
+                        </View>
+                    </Animated.View>
+
                     {/* Smart Birthday Picker Modal */}
                     <Modal
                         visible={showDatePicker}
@@ -639,6 +657,20 @@ export default function ProfileEditScreen() {
                     </RNAnimated.View>
                 </View>
             </Modal>
+            <CountryPicker
+                visible={countryModal}
+                onClose={() => setCountryModal(false)}
+                onSelect={async (c) => {
+                    setCountry(c);
+                    try {
+                        await updateProfile({ country: c.name, countryCode: c.dialCode });
+                    } catch (e) {
+                        console.error('Failed to update country:', e);
+                    }
+                }}
+                selectedCountry={country?.name}
+                themeColor={activeTheme.primary}
+            />
         </Animated.View>
     );
 }

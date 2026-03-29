@@ -18,6 +18,8 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { authService } from '../services/AuthService';
+import { CountryPicker } from '../components/CountryPicker';
+import { Country } from '../constants/Countries';
 
 export default function ProfileSetupScreen() {
   const router = useRouter();
@@ -28,6 +30,8 @@ export default function ProfileSetupScreen() {
   const [loading,      setLoading]      = useState(false);
   const [error,        setError]        = useState('');
   const [pickerModal,  setPickerModal]  = useState(false);
+  const [countryModal, setCountryModal] = useState(false);
+  const [country,      setCountry]      = useState<Country | null>(null);
 
   const openCamera = async () => {
     setPickerModal(false);
@@ -86,6 +90,8 @@ export default function ProfileSetupScreen() {
       password: password ?? '',
       displayName: displayName.trim(),
       avatarLocalUri: avatarUri ?? undefined,
+      country: country?.name,
+      countryCode: country?.dialCode,
     });
 
     setLoading(false);
@@ -172,6 +178,25 @@ export default function ProfileSetupScreen() {
           </Text>
         </View>
 
+        {/* Country Picker */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Country</Text>
+          <TouchableOpacity 
+            style={styles.inputWrapper}
+            onPress={() => setCountryModal(true)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.fieldIcon}>{country ? country.flag : '🌍'}</Text>
+            <Text style={[styles.input, !country && { color: '#555566' }]}>
+              {country ? `${country.name} (${country.dialCode})` : 'Choose your country'}
+            </Text>
+            <Text style={styles.fieldIcon}>⌄</Text>
+          </TouchableOpacity>
+          <Text style={styles.fieldNote}>
+            Used to show your country in your profile and for connectivity
+          </Text>
+        </View>
+
         {/* Preview */}
         <View style={styles.previewCard}>
           <View style={styles.previewAvatar}>
@@ -238,6 +263,17 @@ export default function ProfileSetupScreen() {
           </View>
         </TouchableOpacity>
       </Modal>
+
+      <CountryPicker
+        visible={countryModal}
+        onClose={() => setCountryModal(false)}
+        onSelect={(c) => {
+            setCountry(c);
+            setError('');
+        }}
+        selectedCountry={country?.name}
+        themeColor={AMBER}
+      />
     </KeyboardAvoidingView>
   );
 }

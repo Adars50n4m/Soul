@@ -103,11 +103,10 @@ const styles = StyleSheet.create({
         overflow: 'visible',
     } as ViewStyle,
     bubble: {
-        paddingHorizontal: 20,
+        paddingHorizontal: 16,
         paddingVertical: 10,
-        borderRadius: 30,
-        maxWidth: 165,
-        minWidth: 80,
+        borderRadius: 24,
+        maxWidth: 220, // Increased for better text flow
         alignItems: 'center',
         justifyContent: 'center',
         // Border removed - handled by SVG
@@ -118,11 +117,10 @@ const styles = StyleSheet.create({
         elevation: 12,
     } as ViewStyle,
     bubbleMini: {
-        paddingHorizontal: 12,
+        paddingHorizontal: 10,
         paddingVertical: 6,
-        borderRadius: 20,
-        maxWidth: 110,
-        minWidth: 60,
+        borderRadius: 18,
+        maxWidth: 150, // Increased for responsive mini-rail
     } as ViewStyle,
     svgOverlay: {
         ...StyleSheet.absoluteFillObject,
@@ -163,7 +161,5 @@ const styles = StyleSheet.create({
         backgroundColor: '#151515',
         marginTop: 4, // Space between main tail and tiny dot
         marginLeft: 5, // Shifted slightly right for better alignment
-        borderWidth: 0.5,
-        borderColor: 'rgba(255,255,255,0.1)',
     } as ViewStyle,
 });
