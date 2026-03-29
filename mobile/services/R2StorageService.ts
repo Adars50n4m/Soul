@@ -9,8 +9,9 @@ import { supabase } from '../config/supabase';
 
 interface UploadResponse {
   success: boolean;
-  publicUrl: string;
-  filename: string;
+  publicUrl?: string;
+  filename?: string;
+  key?: string;
   size: number;
   contentType: string;
 }
@@ -26,54 +27,88 @@ class R2StorageService {
   async uploadImage(
     uri: string,
     bucket: string,
-    folder: string = ''
+    folder: string = '',
+    onProgress?: (progress: number) => void
   ): Promise<string | null> {
     let retries = 0;
 
     while (retries < R2_CONFIG.MAX_RETRIES) {
       try {
         // 1. Get authentication token
-        const token = await this.getAuthToken(folder);
+        const token = await this.getAuthToken();
         if (!token) throw new Error('Auth token missing');
 
         // 2. Detect content type & Filename
-        const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
         const contentType = this.getContentType(uri);
-        const filename = `${Date.now()}.${ext}`;
+        const fileName = uri.split('/').pop() || `status-${Date.now()}`;
 
-        // 3. Upload to Worker via FileSystem (more reliable for binary/videos)
+        // 3. Upload to Worker using direct Binary PUT.
         const uploadPath = this.getUploadPath(bucket);
-        const uploadUrl = `${R2_CONFIG.WORKER_URL}${uploadPath}?folder=${folder || ''}`;
+        const uploadUrl = `${R2_CONFIG.WORKER_URL}${uploadPath}`;
 
-        console.log(`[R2Direct] Uploading to ${uploadUrl} (${contentType})`);
+        console.log(`[R2Direct] Uploading via PUT to ${uploadUrl} (${contentType})`);
 
         const uploadTask = FileSystem.createUploadTask(
           uploadUrl,
-          uri,
+          this.normalizeFileUri(uri),
           {
-            httpMethod: 'POST',
-            uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-            fieldName: 'file',
+            httpMethod: 'PUT',
+            uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
             mimeType: contentType,
             headers: {
-              'Authorization': `Bearer ${token}`
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': contentType,
+              'x-filename': fileName,
+              'x-folder': folder || '',
             },
-            parameters: {
-              'folder': folder || ''
+          },
+          (p) => {
+            if (onProgress && p.totalBytesExpectedToSend > 0) {
+              const progress = Math.round((p.totalBytesSent / p.totalBytesExpectedToSend) * 100);
+              onProgress(progress);
             }
           }
         );
 
-        const result = await uploadTask.uploadAsync();
+        // 4. Implement 60s timeout
+        const UPLOAD_TIMEOUT = 60000;
+        const uploadPromise = uploadTask.uploadAsync();
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Upload timed out after 60s')), UPLOAD_TIMEOUT)
+        );
+
+        const result = await Promise.race([uploadPromise, timeoutPromise]) as FileSystem.FileSystemUploadResult;
 
         if (result && result.status >= 200 && result.status < 300) {
-          const data: UploadResponse = JSON.parse(result.body);
-          if (data.success && data.publicUrl) {
-            console.log(`✅ Direct R2 Success: ${data.filename}`);
-            return data.publicUrl;
+          try {
+            const data: UploadResponse = JSON.parse(result.body);
+            const normalizedKey = data.key
+              ? data.key
+              : data.filename
+                ? (data.filename.startsWith(`${bucket}/`) ? data.filename : `${bucket}/${data.filename}`)
+                : null;
+
+            if (data.success && normalizedKey) {
+              console.log(`[R2Direct] ✅ Success: ${normalizedKey}`);
+              return normalizedKey;
+            }
+
+            if (data.success && data.publicUrl) {
+              console.log(`[R2Direct] ✅ Success via public URL: ${data.publicUrl}`);
+              return data.publicUrl;
+            }
+
+            if (!data.success) {
+              console.error('[R2Direct] ❌ Worker returned success=false:', data);
+            } else {
+              console.error('[R2Direct] ❌ Worker response missing key/publicUrl:', data);
+            }
+          } catch {
+            console.error('[R2Direct] ❌ Failed to parse worker response:', result.body);
           }
         }
         
+        console.error(`[R2Direct] ❌ Worker error: status=${result?.status}, body=${result?.body}`);
         throw new Error(`Worker returned ${result?.status}: ${result?.body}`);
       } catch (error: any) {
         retries++;
@@ -89,15 +124,11 @@ class R2StorageService {
   /**
    * Get Supabase authentication token
    */
-  private async getAuthToken(folder?: string): Promise<string | null> {
+  private async getAuthToken(): Promise<string | null> {
     try {
       const { data, error } = await supabase.auth.getSession();
 
       if (error || !data.session) {
-        if (folder) {
-          console.warn('No active session, using dev-user token fallback');
-          return `dev-user:${folder}`;
-        }
         return null;
       }
 
@@ -144,14 +175,6 @@ class R2StorageService {
    */
   private getExtension(uri: string): string {
     return uri.split('.').pop()?.toLowerCase() || '';
-  }
-
-  /**
-   * Get filename from URI
-   */
-  private getFilename(uri: string): string {
-    const parts = uri.split('/');
-    return parts[parts.length - 1] || 'upload';
   }
 
   private normalizeFileUri(uri: string): string {

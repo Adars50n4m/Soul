@@ -6,6 +6,7 @@ import { useChat, ChatProvider } from './ChatContext';
 import { useCall, CallProvider } from './CallContext';
 import { useMusic, MusicProvider } from './MusicContext';
 import { useStatus, StatusProvider } from './StatusContext';
+import { UserStatusGroup, CachedStatus, PendingUpload } from '../types';
 
 // We'll define basic types here if they aren't easily importable, 
 // but try to keep it lean.
@@ -54,14 +55,17 @@ interface AppContextType {
     unfriendContact: (partnerId: string) => Promise<void>;
     
     // Status
-    statuses: any[];
-    uploadingStory: { localUri: string; mediaType: 'image' | 'video'; progress: number; caption?: string } | null;
-    addStatus: (params: any) => Promise<boolean | void>;
-    deleteStatus: (id: string) => Promise<void>;
-    toggleStatusLike: (id: string) => Promise<void>;
-    addStatusView: (id: string) => Promise<void>;
-    notes: any[];
-    updateNote: (text: string | null) => Promise<boolean>;
+    statuses: UserStatusGroup[];
+    myStatuses: CachedStatus[];
+    pendingStatusUploads: PendingUpload[];
+    statusUploadProgress: Record<string, number>;
+    isStatusSyncing: boolean;
+    addStatus: (localUri: string, mediaType: 'image' | 'video', caption?: string) => Promise<void>;
+    deleteStatus: (id: string, mediaKey: string) => Promise<void>;
+    addStatusView: (statusId: string, viewerId: string) => Promise<void>;
+    updateSoulNote: (text: string) => Promise<void>;
+    refreshStatuses: () => Promise<void>;
+    retryPendingStatusUploads: () => Promise<void>;
 
     // Call
     activeCall: any;
@@ -162,14 +166,17 @@ const AppProviderInternal: React.FC<{ children: React.ReactNode }> = ({ children
         unfriendContact: chat.unfriendContact,
 
         // Status
-        statuses: status.stories,
-        uploadingStory: status.uploadingStory,
-        addStatus: status.addStory,
-        deleteStatus: status.deleteStory,
-        toggleStatusLike: status.toggleStoryLike,
-        addStatusView: status.viewStory,
-        notes: status.notes,
-        updateNote: status.updateNote,
+        statuses: status.statusGroups,
+        myStatuses: status.myStatuses,
+        pendingStatusUploads: status.pendingUploads,
+        statusUploadProgress: status.statusUploadProgress,
+        isStatusSyncing: status.isStatusSyncing,
+        addStatus: status.addStatus,
+        deleteStatus: status.deleteStatus,
+        addStatusView: status.viewStatus,
+        updateSoulNote: status.updateSoulNote,
+        refreshStatuses: status.refreshStatuses,
+        retryPendingStatusUploads: status.retryPendingUploads,
 
         // Call
         activeCall: call.activeCall,

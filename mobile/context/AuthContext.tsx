@@ -173,6 +173,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
     }, []);
 
+    const synchronizeSessionWithTimeout = useCallback(async (userId: string, timeoutMs = 7000) => {
+        await Promise.race([
+            synchronizeSession(userId),
+            new Promise((resolve) => setTimeout(() => {
+                console.warn(`[AuthContext] synchronizeSession timed out after ${timeoutMs}ms for ${userId}`);
+                resolve(null);
+            }, timeoutMs))
+        ]);
+    }, [synchronizeSession]);
+
     const refreshProfile = useCallback(async (userId: string) => {
         try {
             const { data, error } = await supabase
@@ -259,13 +269,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             if (session) {
                 console.log('[AuthContext] Session found, syncing profile for:', session.user.id);
                 // Race the entire sync process to ensure we don't hang the splash screen
-                Promise.race([
-                    synchronizeSession(session.user.id),
-                    new Promise((resolve) => setTimeout(() => {
-                        console.warn('[AuthContext] synchronizeSession timed out (7s)');
-                        resolve(null);
-                    }, 7000))
-                ]).finally(() => {
+                synchronizeSessionWithTimeout(session.user.id).finally(() => {
                     if (isMounted) {
                         console.log(`[AuthContext] Reached ready state (total init time: ${Date.now() - startInit}ms)`);
                         setIsReady(true);
@@ -277,7 +281,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     if (isMounted) {
                         if (cachedUserId) {
                             console.log('[AuthContext] Found cached user:', cachedUserId);
-                            synchronizeSession(cachedUserId).finally(() => {
+                            synchronizeSessionWithTimeout(cachedUserId).finally(() => {
                                 if (isMounted) {
                                     console.log(`[AuthContext] Cache sync complete (total init time: ${Date.now() - startInit}ms), readying app`);
                                     setIsReady(true);
@@ -304,7 +308,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             isMounted = false;
             if (timeoutId) clearTimeout(timeoutId);
         };
-    }, [synchronizeSession]);
+    }, [synchronizeSession, synchronizeSessionWithTimeout]);
 
     const login = useCallback(async (emailOrUsername: string, password: string): Promise<boolean> => {
         const result = await authService.signInWithPassword(emailOrUsername, password);

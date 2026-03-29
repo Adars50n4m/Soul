@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 17;
+const DB_TARGET_VERSION = 18;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -550,6 +550,56 @@ async function migration_v17(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v18 — Add status caching, uploads, and user metadata
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v18(db: any): Promise<void> {
+    const statements = [
+        // Table: cached_statuses (server statuses mirror with local file support)
+        `CREATE TABLE IF NOT EXISTS cached_statuses (
+          id                TEXT PRIMARY KEY NOT NULL,
+          user_id           TEXT NOT NULL,
+          media_local_path  TEXT,
+          media_type        TEXT CHECK(media_type IN ('image', 'video')),
+          caption           TEXT,
+          duration          INTEGER DEFAULT 5,
+          expires_at        INTEGER NOT NULL, -- unix timestamp
+          is_viewed         INTEGER DEFAULT 0,
+          is_mine           INTEGER DEFAULT 0,
+          created_at        INTEGER NOT NULL,
+          cached_at         INTEGER DEFAULT (strftime('%s', 'now'))
+        );`,
+
+        // Table: pending_uploads (queue for statuses created while offline)
+        `CREATE TABLE IF NOT EXISTS pending_uploads (
+          id             TEXT PRIMARY KEY NOT NULL, -- local UUID
+          local_uri      TEXT NOT NULL,
+          media_type     TEXT NOT NULL,
+          caption        TEXT,
+          created_at     INTEGER NOT NULL,
+          retry_count    INTEGER DEFAULT 0,
+          upload_status  TEXT DEFAULT 'pending' -- pending | uploading | failed
+        );`,
+
+        // Table: cached_users (metadata for status feed display)
+        `CREATE TABLE IF NOT EXISTS cached_users (
+          id             TEXT PRIMARY KEY NOT NULL,
+          username       TEXT,
+          display_name   TEXT,
+          avatar_url     TEXT,
+          soul_note      TEXT,
+          soul_note_at   INTEGER
+        );`,
+
+        `CREATE INDEX IF NOT EXISTS idx_cached_statuses_user ON cached_statuses(user_id);`,
+        `CREATE INDEX IF NOT EXISTS idx_cached_statuses_expires ON cached_statuses(expires_at);`
+    ];
+
+    for (const sql of statements) {
+        await db.execAsync(sql);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
@@ -592,6 +642,7 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
         case 15: await migration_v15(db); break;
         case 16: await migration_v16(db); break;
         case 17: await migration_v17(db); break;
+        case 18: await migration_v18(db); break;
         default:
           console.error(`[SQLite] No migration logic for v${nextVersion}!`);
       }

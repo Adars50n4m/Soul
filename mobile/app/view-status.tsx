@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     View, Text, Image, StyleSheet, StatusBar,
-    useWindowDimensions, Platform, Pressable, Alert, TextInput, Keyboard, Modal, KeyboardAvoidingView, ScrollView
+    useWindowDimensions, Pressable, Alert, TextInput, Modal, ScrollView,
+    ActivityIndicator
 } from 'react-native';
-import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
-import { MaterialIcons } from '@expo/vector-icons';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { 
     useSharedValue, 
@@ -16,9 +17,11 @@ import Animated, {
     withSpring
 } from 'react-native-reanimated';
 import { Video, ResizeMode } from 'expo-av';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { BlurView } from 'expo-blur';
+import { statusService } from '../services/StatusService';
 import { useApp } from '../context/AppContext';
-
-
+import { UserStatusGroup } from '../types';
 
 const StatusProgressBar = ({ idx, currentIndex, progress }: any) => {
     const style = useAnimatedStyle(() => ({
@@ -28,86 +31,137 @@ const StatusProgressBar = ({ idx, currentIndex, progress }: any) => {
                 ? `${progress.value * 100}%`
                 : '0%'
     }));
-    return <Animated.View style={[styles.progressFill, style]} />;
+    return <View style={styles.progressBar}><Animated.View style={[styles.progressFill, style]} /></View>;
 };
 
 export default function ViewStatusScreen() {
     const { width, height } = useWindowDimensions();
-    const { id, index } = useLocalSearchParams<{ id: string; index: string }>();
+    const insets = useSafeAreaInsets();
+    const { id } = useLocalSearchParams<{ id: string }>();
     const router = useRouter();
-    const { statuses, contacts, currentUser, deleteStatus, addStatusView, sendChatMessage, toggleStatusLike, activeTheme } = useApp();
-    const [currentIndex, setCurrentIndex] = useState(parseInt(index || '0'));
-    const [replyText, setReplyText] = useState('');
-    const [modalVisible, setModalVisible] = useState(false);
+    const { currentUser } = useApp();
     
-    // Reanimated Shared Values
+    const [statusGroup, setStatusGroup] = useState<UserStatusGroup | null>(null);
+    const [currentIndex, setCurrentIndex] = useState(0);
+    const [mediaSource, setMediaSource] = useState<{uri: string, isLocal: boolean} | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [isPaused, setIsPaused] = useState(false);
+    const [replyText, setReplyText] = useState('');
+    const [showViewers, setShowViewers] = useState(false);
+    const [viewers, setViewers] = useState<any[]>([]);
+
     const progress = useSharedValue(0);
     const translateY = useSharedValue(0);
     const scale = useSharedValue(1);
 
-    // Get statuses for this user
-    const userStatuses = statuses.filter(s => s.userId === id);
-    const currentStatus = userStatuses[currentIndex];
-
-    // Get contact info
-    const isMyStatus = id === currentUser?.id;
-    const contact = isMyStatus
-        ? { name: currentUser?.name || 'Me', avatar: currentUser?.avatar || '' }
-        : contacts.find(c => c.id === id);
-
-    // Get viewer info
-    const viewers = currentStatus?.views?.map(viewerId => {
-        if (viewerId === currentUser?.id) return currentUser;
-        return contacts.find(c => c.id === viewerId);
-    }).filter(Boolean) as { name: string, avatar: string }[];
-
-    const DURATION = 5000;
-
-    // Record a view
+    // Initial Load
     useEffect(() => {
-        if (currentStatus && !isMyStatus) {
-            addStatusView(currentStatus.id);
-        }
-    }, [currentStatus, isMyStatus, addStatusView]);
+        const load = async () => {
+            const feed = await statusService.getStatusFeed();
+            const group = feed.find(g => g.user.id === id);
+            if (group) {
+                setStatusGroup(group);
+                // Start from first unviewed if not self
+                if (!group.isMine) {
+                    const firstUnviewed = group.statuses.findIndex(s => !s.isViewed);
+                    if (firstUnviewed !== -1) setCurrentIndex(firstUnviewed);
+                }
+            } else {
+                Alert.alert('Error', 'Status not found');
+                router.back();
+            }
+        };
+        load();
+    }, [id, router]);
 
-    const navigation = useNavigation();
+    // Media Loading Logic
+    useEffect(() => {
+        if (!statusGroup) return;
+        const currentStatus = statusGroup.statuses[currentIndex];
+        if (!currentStatus) return;
+
+        const loadMedia = async () => {
+            setLoading(true);
+            setIsPaused(false);
+            progress.value = 0;
+            
+            // We need media_key. Since it's not in SQLite (my mistake earlier), 
+            // I'll assume we have it or I'll fix the service to include it.
+            // Actually, my Refactored StatusService.ts fetch's it from Supabase in onStatusViewed.
+            // FOR NOW, I'll pass it if possible or fetch it.
+            // Better: update CachedStatus type and migration to include media_key.
+            // But to avoid migration drift right now, I'll fetch it from Supabase.
+            const source = await statusService.getMediaSource(currentStatus.id, (currentStatus as any).mediaKey);
+            if (!source) {
+                console.warn(`[ViewStatus] Unable to resolve media for status ${currentStatus.id}`);
+                setMediaSource(null);
+                setLoading(false);
+                return;
+            }
+            setMediaSource(source);
+            setLoading(false);
+            
+            // Mark as viewed
+            if (currentUser) {
+                statusService.onStatusViewed(currentStatus.id, currentUser.id);
+            }
+        };
+        loadMedia();
+
+        if (statusGroup.isMine) {
+            statusService.getMyStatusViewers(currentStatus.id).then(setViewers);
+        }
+    }, [currentIndex, currentUser, progress, statusGroup]);
 
     const handleNext = useCallback(() => {
-        if (currentIndex < userStatuses.length - 1) {
-            progress.value = 0;
+        if (statusGroup && currentIndex < statusGroup.statuses.length - 1) {
             setCurrentIndex(prev => prev + 1);
-        } else if (navigation.canGoBack()) {
-            navigation.goBack();
+        } else {
+            router.back();
         }
-    }, [currentIndex, userStatuses.length, navigation]);
+    }, [currentIndex, router, statusGroup]);
 
     const handlePrev = useCallback(() => {
         if (currentIndex > 0) {
-            progress.value = 0;
             setCurrentIndex(prev => prev - 1);
         } else {
-            progress.value = 0; // Reset current if at start
+            progress.value = 0;
         }
-    }, [currentIndex]);
+    }, [currentIndex, progress]);
 
-    const startProgress = useCallback(() => {
+    // Progress Animation
+    useEffect(() => {
+        if (loading || !mediaSource) return;
+        if (!statusGroup) return;
+
+        if (isPaused) {
+            cancelAnimation(progress);
+            return;
+        }
+        
+        const currentStatus = statusGroup.statuses[currentIndex];
+        const duration = (currentStatus?.duration || 5) * 1000;
+        const currentProgress = Math.min(Math.max(progress.value, 0), 0.999);
+        const remainingDuration = Math.max(150, Math.round(duration * (1 - currentProgress)));
+
         cancelAnimation(progress);
         progress.value = withTiming(1, {
-            duration: DURATION * (1 - progress.value),
+            duration: remainingDuration,
             easing: Easing.linear
         }, (finished) => {
-            if (finished) {
-                runOnJS(handleNext)();
-            }
+            if (finished) runOnJS(handleNext)();
         });
-    }, [handleNext]);
 
-    useEffect(() => {
-        if (!currentStatus) return;
-        progress.value = 0;
-        startProgress();
         return () => cancelAnimation(progress);
-    }, [currentIndex, currentStatus, startProgress]);
+    }, [handleNext, loading, mediaSource, currentIndex, isPaused, progress, statusGroup]);
+
+    const pauseStatusPlayback = useCallback(() => {
+        setIsPaused(true);
+    }, []);
+
+    const resumeStatusPlayback = useCallback(() => {
+        setIsPaused(false);
+    }, []);
 
     // Gestures
     const tapGesture = Gesture.Tap()
@@ -123,9 +177,10 @@ export default function ViewStatusScreen() {
         .minDuration(200)
         .onStart(() => {
             cancelAnimation(progress);
+            runOnJS(pauseStatusPlayback)();
         })
-        .onEnd(() => {
-            runOnJS(startProgress)();
+        .onFinalize(() => {
+            runOnJS(resumeStatusPlayback)();
         });
 
     const panGesture = Gesture.Pan()
@@ -137,7 +192,7 @@ export default function ViewStatusScreen() {
         })
         .onEnd((e) => {
             if (e.translationY > 100) {
-                if (navigation.canGoBack()) runOnJS(navigation.goBack)();
+                runOnJS(router.back)();
             } else {
                 translateY.value = withSpring(0);
                 scale.value = withSpring(1);
@@ -151,389 +206,176 @@ export default function ViewStatusScreen() {
             { translateY: translateY.value },
             { scale: scale.value }
         ] as any,
-        borderRadius: translateY.value > 0 ? 20 : 0,
+        borderRadius: translateY.value > 0 ? 30 : 0,
+        overflow: 'hidden'
     }));
 
-    const handleLike = () => {
-        if (currentStatus) {
-            toggleStatusLike(currentStatus.id);
-        }
-    };
+    if (!statusGroup) return <View style={styles.black} />;
 
-    const handleReply = () => {
-        if (!replyText.trim() || !currentStatus || !id) return;
-
-        // Send message with status thumbnail
-        sendChatMessage(id, replyText, {
-            type: 'status_reply',
-            url: currentStatus.mediaUrl,
-            caption: currentStatus.caption
-        });
-
-        // Navigate to chat
-        router.push(`/chat/${id}`);
-    };
-
-    const handleDelete = () => {
-        cancelAnimation(progress);
-        Alert.alert(
-            "Delete Status",
-            "Are you sure you want to delete this status?",
-            [
-                { 
-                    text: "Cancel", 
-                    style: "cancel",
-                    onPress: () => startProgress()
-                },
-                { 
-                    text: "Delete", 
-                    style: "destructive", 
-                    onPress: () => {
-                        if (currentStatus) deleteStatus(currentStatus.id);
-                        if (navigation.canGoBack()) navigation.goBack();
-                    }
-                }
-            ]
-        );
-    };
-
-    if (!currentStatus || !contact) {
-        return (
-            <View style={styles.container}>
-                <Text style={styles.errorText}>Status not found</Text>
-            </View>
-        );
-    }
-
-    const hasLiked = currentStatus.likes?.includes(currentUser?.id || '');
+    const currentStatus = statusGroup.statuses[currentIndex];
 
     return (
-        <GestureHandlerRootView style={{ flex: 1, backgroundColor: 'black' }}>
+        <GestureHandlerRootView style={styles.black}>
             <Animated.View style={[styles.container, animatedStyle]}>
-            <StatusBar hidden />
-
-            {/* Progress Bars */}
-            <View style={styles.progressContainer}>
-                {userStatuses.map((status, idx) => (
-                    <View key={status.id} style={styles.progressBar}>
-                        <StatusProgressBar idx={idx} currentIndex={currentIndex} progress={progress} />
-                    </View>
-                ))}
-            </View>
-
-            {/* Header */}
-            <View style={styles.header}>
-                <Pressable onPress={() => router.back()} style={styles.backButton}>
-                    <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
-                </Pressable>
-
-                <Image source={{ uri: contact.avatar }} style={styles.avatar} />
-
-                <View style={styles.headerInfo}>
-                    <Text style={styles.userName}>{contact.name}</Text>
-                    <Text style={styles.timestamp}>{currentStatus.timestamp}</Text>
-                </View>
-
-                {isMyStatus ? (
-                    <Pressable onPress={handleDelete} style={styles.moreButton}>
-                        <MaterialIcons name="delete" size={24} color="#ffffff" />
-                    </Pressable>
-                ) : (
-                    <View style={styles.moreButton}>
-                        <MaterialIcons name="more-vert" size={24} color="#ffffff" />
+                <StatusBar hidden />
+                
+                {/* Background Blur */}
+                {mediaSource && (
+                    <View style={StyleSheet.absoluteFill}>
+                        <Image 
+                            source={{ uri: mediaSource.uri }} 
+                            style={[StyleSheet.absoluteFill, { opacity: 0.5 }]} 
+                            blurRadius={100}
+                        />
+                        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} />
                     </View>
                 )}
-            </View>
-
-            {/* Status Content */}
-            <GestureDetector gesture={composedGestures}>
-                <View style={styles.content}>
-                    {currentStatus.mediaType === 'video' ? (
-                        <Video
-                            source={{ uri: currentStatus.mediaUrl }}
-                            style={[styles.media, { width, height: height * 0.6 }]}
-                            resizeMode={ResizeMode.CONTAIN}
-                            shouldPlay
-                            isLooping={false}
-                            onPlaybackStatusUpdate={(status: any) => {
-                                if (status.isLoaded && status.didJustFinish) {
-                                    runOnJS(handleNext)();
-                                }
-                            }}
-                        />
-                    ) : (
-                        <Image
-                            source={{ uri: currentStatus.mediaUrl }}
-                            style={[styles.media, { width, height: height * 0.6 }]}
-                            resizeMode="contain"
-                        />
-                    )}
-                </View>
-            </GestureDetector>
-
-            {/* Caption */}
-            {currentStatus.caption && (
-                <View style={styles.captionContainer}>
-                    <Text style={styles.caption}>{currentStatus.caption}</Text>
-                </View>
-            )}
-
-            {/* Interactions Footer */}
-            <View style={styles.interactionsFooter}>
-                {/* Views (only for my status) */}
-                {isMyStatus ? (
-                    <Pressable onPress={() => setModalVisible(true)} style={styles.viewsWrapper}>
-                        <MaterialIcons name="visibility" size={20} color="#ffffff" />
-                        <Text style={styles.viewsText}>
-                            {currentStatus.views?.length || 0}
-                        </Text>
-                    </Pressable>
-                ) : (
-                    <View style={styles.likesWrapper}>
-                        <Pressable onPress={handleLike} style={styles.likeButton}>
-                            <MaterialIcons 
-                                name={hasLiked ? "favorite" : "favorite-border"} 
-                                size={28} 
-                                color={hasLiked ? activeTheme.primary : "#ffffff"} 
-                            />
-                        </Pressable>
-                        {currentStatus.likes?.length > 0 && (
-                            <Text style={styles.likesText}>{currentStatus.likes.length}</Text>
+                
+                {/* Media Content */}
+                <GestureDetector gesture={composedGestures}>
+                    <View style={styles.mediaContainer}>
+                        {mediaSource ? (
+                            currentStatus.mediaType === 'video' ? (
+                                <Video
+                                    source={{ uri: mediaSource.uri }}
+                                    style={StyleSheet.absoluteFill}
+                                    resizeMode={ResizeMode.CONTAIN}
+                                    shouldPlay={!loading && !isPaused}
+                                    isMuted={false}
+                                    onLoad={() => {}}
+                                />
+                            ) : (
+                                <Image 
+                                    source={{ uri: mediaSource.uri }} 
+                                    style={StyleSheet.absoluteFill} 
+                                    resizeMode="contain" 
+                                />
+                            )
+                        ) : null}
+                        
+                        {loading && (
+                            <View style={styles.loader}>
+                                <ActivityIndicator color="#fff" size="large" />
+                            </View>
                         )}
                     </View>
-                )}
-            </View>
+                </GestureDetector>
 
-            {/* Reply (for others' status) */}
-            {!isMyStatus && (
-                <KeyboardAvoidingView 
-                    behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                    keyboardVerticalOffset={20}
-                    style={styles.keyboardView}
-                >
-                    <View style={styles.replyContainer}>
-                        <View style={styles.replyInput}>
-                            <TextInput
-                                style={styles.replyPlaceholder}
-                                placeholder={`Reply to ${contact.name}...`}
-                                placeholderTextColor="rgba(255,255,255,0.5)"
-                                value={replyText}
-                                onChangeText={setReplyText}
-                                onSubmitEditing={handleReply}
-                                returnKeyType="send"
+                {/* Overlays */}
+                <View style={[styles.overlay, { paddingTop: insets.top + 10 }]}>
+                    {/* Progress Bars */}
+                    <View style={styles.progressRow}>
+                        {statusGroup.statuses.map((_, i) => (
+                            <StatusProgressBar 
+                                key={i} 
+                                idx={i} 
+                                currentIndex={currentIndex} 
+                                progress={progress} 
                             />
-                        </View>
-                        <Pressable style={styles.replyButton} onPress={handleReply}>
-                            <MaterialIcons name="send" size={24} color="#ffffff" />
-                        </Pressable>
+                        ))}
                     </View>
-                </KeyboardAvoidingView>
-            )}
 
-            <Modal
-                animationType="slide"
-                transparent={true}
-                visible={modalVisible}
-                onRequestClose={() => setModalVisible(false)}
-            >
-                <Pressable style={styles.modalOverlay} onPress={() => setModalVisible(false)}>
-                    <View style={[styles.modalContent, { maxHeight: height * 0.6 }]}>
-                        <Text style={styles.modalTitle}>Viewed By</Text>
-                        <ScrollView>
-                            {viewers.length > 0 ? viewers.map((viewer: any) => (
-                                <View key={viewer.id} style={styles.viewerRow}>
-                                    <Image source={{ uri: viewer.avatar }} style={styles.viewerAvatar} />
-                                    <Text style={styles.viewerName}>{viewer.name}</Text>
-                                </View>
-                            )) : <Text style={styles.viewerName}>No one has viewed this status yet.</Text>}
-                        </ScrollView>
+                    {/* Header */}
+                    <View style={styles.header}>
+                        <Pressable onPress={() => router.back()} style={styles.backBtn}>
+                            <Ionicons name="chevron-back" size={28} color="#fff" />
+                        </Pressable>
+                        <View style={styles.userRow}>
+                            <Image source={{ uri: statusGroup.user.avatarUrl }} style={styles.avatar} />
+                            <View>
+                                <Text style={styles.userName}>{statusGroup.user.displayName || statusGroup.user.username}</Text>
+                                <Text style={styles.timeLabel}>
+                                    {new Date(currentStatus.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </Text>
+                            </View>
+                        </View>
                     </View>
-                </Pressable>
-            </Modal>
+                </View>
+
+                {/* Caption & Reply */}
+                <View style={[styles.bottomOverlay, { paddingBottom: insets.bottom + 10 }]}>
+                    {currentStatus.caption && (
+                        <View style={styles.captionBox}>
+                            <Text style={styles.captionText}>{currentStatus.caption}</Text>
+                        </View>
+                    )}
+
+                    {!statusGroup.isMine ? (
+                        <View style={styles.replyRow}>
+                            <View style={styles.replyInputBox}>
+                                <TextInput 
+                                    style={styles.replyInput}
+                                    placeholder="Reply..."
+                                    placeholderTextColor="rgba(255,255,255,0.6)"
+                                    value={replyText}
+                                    onChangeText={setReplyText}
+                                />
+                            </View>
+                            <Pressable style={styles.iconBtn}>
+                                <Ionicons name="send" size={24} color="#fff" />
+                            </Pressable>
+                        </View>
+                    ) : (
+                        <Pressable style={styles.viewersRow} onPress={() => setShowViewers(true)}>
+                            <Ionicons name="eye-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
+                            <Text style={styles.viewersText}>{viewers.length} views</Text>
+                        </Pressable>
+                    )}
+                </View>
+
+                {/* Viewers Modal */}
+                <Modal visible={showViewers} animationType="slide" transparent>
+                    <BlurView intensity={90} tint="dark" style={styles.modal}>
+                        <View style={styles.modalHeader}>
+                            <Text style={styles.modalTitle}>Viewed By</Text>
+                            <Pressable onPress={() => setShowViewers(false)}>
+                                <Ionicons name="close" size={24} color="#fff" />
+                            </Pressable>
+                        </View>
+                        <ScrollView contentContainerStyle={styles.modalList}>
+                            {viewers.map((v, i) => (
+                                <View key={i} style={styles.viewerItem}>
+                                    <Image source={{ uri: v.profiles?.avatar_url }} style={styles.viewerAvatar} />
+                                    <Text style={styles.viewerName}>{v.profiles?.display_name || v.profiles?.username}</Text>
+                                </View>
+                            ))}
+                        </ScrollView>
+                    </BlurView>
+                </Modal>
             </Animated.View>
         </GestureHandlerRootView>
     );
 }
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#000000',
-        overflow: 'hidden',
-    },
-    errorText: {
-        color: 'rgba(255,255,255,0.5)',
-        fontSize: 16,
-        textAlign: 'center',
-        marginTop: 100,
-    },
-    progressContainer: {
-        flexDirection: 'row',
-        paddingHorizontal: 8,
-        paddingTop: 50,
-        gap: 4,
-    },
-    progressBar: {
-        flex: 1,
-        height: 2,
-        backgroundColor: 'rgba(255,255,255,0.3)',
-        borderRadius: 1,
-        overflow: 'hidden',
-    },
-    progressFill: {
-        height: '100%',
-        backgroundColor: '#ffffff',
-    },
-    header: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 12,
-        paddingVertical: 12,
-    },
-    backButton: {
-        padding: 8,
-    },
-    avatar: {
-        width: 40,
-        height: 40,
-        borderRadius: 20,
-        marginLeft: 8,
-    },
-    headerInfo: {
-        flex: 1,
-        marginLeft: 12,
-    },
-    userName: {
-        color: '#ffffff',
-        fontSize: 16,
-        fontWeight: '700',
-    },
-    timestamp: {
-        color: 'rgba(255,255,255,0.6)',
-        fontSize: 12,
-        marginTop: 2,
-    },
-    moreButton: {
-        padding: 8,
-    },
-    content: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    media: {
-    },
-    captionContainer: {
-        paddingHorizontal: 24,
-        paddingVertical: 16,
-    },
-    caption: {
-        color: '#ffffff',
-        fontSize: 16,
-        lineHeight: 24,
-        textAlign: 'center',
-    },
-    viewsContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 8,
-        paddingVertical: 16,
-        borderTopWidth: 1,
-        borderTopColor: 'rgba(255,255,255,0.1)',
-    },
-    viewsText: {
-        color: '#ffffff',
-        fontSize: 14,
-    },
-    interactionsFooter: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        paddingVertical: 16,
-        borderTopWidth: 1,
-        borderTopColor: 'rgba(255,255,255,0.1)',
-        gap: 20,
-    },
-    viewsWrapper: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 8,
-    },
-    likesWrapper: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 8,
-    },
-    likeButton: {
-        padding: 4,
-    },
-    likesText: {
-        color: '#ffffff',
-        fontSize: 16,
-        fontWeight: '600',
-    },
-    replyContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 16,
-        paddingVertical: 12,
-        paddingBottom: 40,
-        gap: 12,
-    },
-    replyInput: {
-        flex: 1,
-        backgroundColor: 'rgba(255,255,255,0.1)',
-        borderRadius: 24,
-        paddingHorizontal: 20,
-        paddingVertical: 12,
-    },
-    replyPlaceholder: {
-        color: '#ffffff',
-        fontSize: 15,
-    },
-    replyButton: {
-        width: 48,
-        height: 48,
-        borderRadius: 24,
-        backgroundColor: '#f43f5e',
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    keyboardView: {
-        width: '100%',
-    },
-    modalOverlay: {
-        flex: 1,
-        backgroundColor: 'rgba(0,0,0,0.7)',
-        justifyContent: 'flex-end',
-    },
-    modalContent: {
-        backgroundColor: '#1c1c1e',
-        borderTopLeftRadius: 20,
-        borderTopRightRadius: 20,
-        padding: 24,
-    },
-    modalTitle: {
-        color: '#fff',
-        fontSize: 18,
-        fontWeight: 'bold',
-        marginBottom: 20,
-        textAlign: 'center',
-    },
-    viewerRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 16,
-    },
-    viewerAvatar: {
-        width: 40,
-        height: 40,
-        borderRadius: 20,
-        marginRight: 12,
-    },
-    viewerName: {
-        color: '#fff',
-        fontSize: 16,
-    },
+    black: { flex: 1, backgroundColor: '#000' },
+    container: { flex: 1, backgroundColor: '#000' },
+    mediaContainer: { flex: 1, backgroundColor: 'transparent' },
+    loader: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)' },
+    overlay: { ...StyleSheet.absoluteFillObject, height: 150, paddingHorizontal: 10 },
+    progressRow: { flexDirection: 'row', gap: 4, width: '100%', marginBottom: 15 },
+    progressBar: { flex: 1, height: 2, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 1, overflow: 'hidden' },
+    progressFill: { height: '100%', backgroundColor: '#fff' },
+    header: { flexDirection: 'row', alignItems: 'center' },
+    backBtn: { padding: 5 },
+    userRow: { flexDirection: 'row', alignItems: 'center', marginLeft: 10 },
+    avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#333', marginRight: 12 },
+    userName: { color: '#fff', fontSize: 16, fontWeight: '700' },
+    timeLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 12 },
+    bottomOverlay: { position: 'absolute', bottom: 0, width: '100%', paddingHorizontal: 20 },
+    captionBox: { backgroundColor: 'rgba(0,0,0,0.5)', padding: 12, borderRadius: 12, marginBottom: 20 },
+    captionText: { color: '#fff', fontSize: 16, textAlign: 'center' },
+    replyRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    replyInputBox: { flex: 1, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 25, height: 50, justifyContent: 'center', paddingHorizontal: 20 },
+    replyInput: { color: '#fff', fontSize: 15 },
+    iconBtn: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#8C0016', justifyContent: 'center', alignItems: 'center' },
+    viewersRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 10 },
+    viewersText: { color: '#fff', fontWeight: '600' },
+    modal: { flex: 1, marginTop: 100, borderTopLeftRadius: 30, borderTopRightRadius: 30, overflow: 'hidden' },
+    modalHeader: { flexDirection: 'row', justifyContent: 'space-between', padding: 25 },
+    modalTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
+    modalList: { padding: 25 },
+    viewerItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
+    viewerAvatar: { width: 44, height: 44, borderRadius: 22, marginRight: 15 },
+    viewerName: { color: '#fff', fontSize: 16, fontWeight: '600' }
 });

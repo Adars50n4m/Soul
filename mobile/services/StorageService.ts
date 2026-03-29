@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import { SERVER_URL, safeFetchJson } from '../config/api';
 import { R2_CONFIG } from '../config/r2';
+import { USE_R2 } from '../config/env';
 import { r2StorageService } from './R2StorageService';
 import { offlineService } from './LocalDBService';
 import { mediaDownloadService } from './MediaDownloadService';
@@ -55,6 +56,56 @@ export const storageService = {
         return map[ext] || 'application/octet-stream';
     },
 
+    async uploadViaServerProxy(
+        localUri: string,
+        bucket: string,
+        folder: string = '',
+        contentType: string,
+        onProgress?: (progress: number) => void
+    ): Promise<string | null> {
+        console.log(`[StorageService] Uploading via server proxy to ${bucket}/${folder || ''}`);
+
+        const uploadTask = FileSystem.createUploadTask(
+            `${SERVER_URL}/api/media/upload`,
+            localUri,
+            {
+                httpMethod: 'POST',
+                uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+                fieldName: 'file',
+                mimeType: contentType,
+                parameters: {
+                    bucket,
+                    folder: folder || '',
+                },
+            },
+            (progress) => {
+                if (onProgress && progress.totalBytesExpectedToSend > 0) {
+                    onProgress(progress.totalBytesSent / progress.totalBytesExpectedToSend);
+                } else if (onProgress && progress.totalBytesSent > 0) {
+                    onProgress(0.01);
+                }
+            }
+        );
+
+        const result = await uploadTask.uploadAsync();
+        if (!result || result.status < 200 || result.status >= 300) {
+            throw new Error(`Upload proxy failed with status ${result?.status || 'unknown'}`);
+        }
+
+        let payload: { key?: string; error?: string } = {};
+        try {
+            payload = result.body ? JSON.parse(result.body) : {};
+        } catch {
+            throw new Error('Upload proxy returned invalid JSON');
+        }
+
+        if (!payload.key) {
+            throw new Error(payload.error || 'Upload proxy did not return a key');
+        }
+
+        return payload.key;
+    },
+
     /**
      * Upload media (image or video) to storage via Server Presigned URLs
      */
@@ -69,7 +120,33 @@ export const storageService = {
 
             console.log(`[StorageService] Prepared: ${fileName} (${contentType})`);
 
-            // 1. Get Presigned PUT URL from Node Server (with short timeout)
+            // 1. Priority: Direct R2 Worker path if enabled
+            if (USE_R2) {
+                try {
+                    console.log(`[StorageService] Priority: Direct R2 upload to ${bucket}/${folder}`);
+                    const r2Key = await r2StorageService.uploadImage(localUri, bucket, folder, onProgress);
+                    if (r2Key) {
+                        console.log(`[StorageService] Direct R2 success: ${r2Key}`);
+                        return r2Key;
+                    }
+                } catch (r2Err: any) {
+                    console.warn(`[StorageService] Direct R2 failed: ${r2Err.message}. Falling back to Server Presigned.`);
+                }
+            }
+
+            // 2. Preferred fallback on mobile: send multipart to local Node server.
+            // iOS `createUploadTask` is more reliable against our server than direct presigned PUT.
+            try {
+                const proxiedKey = await this.uploadViaServerProxy(localUri, bucket, folder, contentType, onProgress);
+                if (proxiedKey) {
+                    console.log(`[StorageService] Server proxy upload success: ${proxiedKey}`);
+                    return proxiedKey;
+                }
+            } catch (proxyErr: any) {
+                console.warn(`[StorageService] Server proxy upload failed: ${proxyErr.message}. Falling back to presigned PUT.`);
+            }
+
+            // 3. Final fallback: Get Presigned PUT URL from Node Server
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout for presign
 
@@ -96,7 +173,7 @@ export const storageService = {
             
             const { presignedUrl, key } = data;
 
-            // 2. Perform the binary upload to R2 via presigned URL
+            // 4. Perform the binary upload to R2 via presigned URL
             const uploadTask = FileSystem.createUploadTask(
                 presignedUrl,
                 localUri,
@@ -120,6 +197,15 @@ export const storageService = {
                 console.log(`[StorageService] Upload success: ${key}`);
                 return key;
             } else {
+                try {
+                    const proxiedKey = await this.uploadViaServerProxy(localUri, bucket, folder, contentType, onProgress);
+                    if (proxiedKey) {
+                        console.log(`[StorageService] Recovered via server proxy after presigned failure: ${proxiedKey}`);
+                        return proxiedKey;
+                    }
+                } catch (proxyErr: any) {
+                    console.warn(`[StorageService] Recovery via server proxy failed: ${proxyErr.message}`);
+                }
                 throw new Error(`Upload failed with status ${result?.status || 'unknown'}`);
             }
         } catch (e: any) {
@@ -134,6 +220,13 @@ export const storageService = {
             }
             throw e; 
         }
+    },
+
+    /**
+     * Upload status media (image or video) specifically to the statuses/ folder
+     */
+    async uploadStatusMedia(uri: string, userId: string, mediaType: 'image' | 'video', onProgress?: (progress: number) => void): Promise<string | null> {
+        return this.uploadImage(uri, 'status-media', `status-${userId}`, onProgress);
     },
 
     /**
@@ -214,6 +307,90 @@ export const storageService = {
         } catch (e) {
             console.warn('[StorageService] Failed to save sent media:', e);
             return null;
+        }
+    },
+
+    /**
+     * Download media to device local storage specifically for statuses
+     * Returns local file path
+     */
+    async downloadToDevice(signedUrl: string, statusId: string, mediaType: string): Promise<string | null> {
+        try {
+            const ext = mediaType === 'video' ? 'mp4' : 'jpg';
+            const directory = `${FileSystem.documentDirectory}soulsync_status/`;
+            const localPath = `${directory}${statusId}.${ext}`;
+
+            // Ensure directory exists
+            const dirInfo = await FileSystem.getInfoAsync(directory);
+            if (!dirInfo.exists) {
+                await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+            }
+
+            // Check if already exists
+            const fileInfo = await FileSystem.getInfoAsync(localPath);
+            if (fileInfo.exists) return localPath;
+
+            // Perform download from provided signedUrl
+            const downloadRes = await FileSystem.downloadAsync(signedUrl, localPath);
+            console.log(`[StorageService] Downloaded status ${statusId} to ${downloadRes.uri}`);
+            return downloadRes.uri;
+        } catch (e) {
+            console.warn(`[StorageService] Failed to download status media:`, e);
+            return null;
+        }
+    },
+
+    /**
+     * Get signed URL for an R2 key (valid for 25 hours / 90000 seconds)
+     */
+    async getSignedUrl(key: string): Promise<string | null> {
+        try {
+            if (key.startsWith('http')) {
+              console.log('[StorageService] Key is already a URL, returning as is');
+              return key;
+            }
+
+            const { success, data } = await safeFetchJson<{ presignedUrl: string }>(
+                `${SERVER_URL}/api/media/presign-download`, 
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key, expires: 90000 })
+                }
+            );
+
+            if (success && data?.presignedUrl) {
+                return data.presignedUrl;
+            }
+
+            if (R2_PUBLIC_BASE) {
+                return `${R2_PUBLIC_BASE}/${key}`;
+            }
+
+            return null;
+        } catch (e) {
+            console.error('[StorageService] getSignedUrl failed:', e);
+            if (R2_PUBLIC_BASE && !key.startsWith('http')) {
+                return `${R2_PUBLIC_BASE}/${key}`;
+            }
+            return null;
+        }
+    },
+
+    /**
+     * Delete file from R2
+     */
+    async deleteMedia(key: string): Promise<void> {
+        try {
+            if (!key || key.startsWith('http')) return;
+
+            await safeFetchJson(`${SERVER_URL}/api/media/delete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keys: [key] })
+            });
+        } catch (e) {
+            console.error('[StorageService] deleteMedia failed:', e);
         }
     }
 };

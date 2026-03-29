@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
     View, Text, Image, TextInput, Pressable, StyleSheet, useWindowDimensions,
-    StatusBar, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Keyboard, Modal, ScrollView
+    StatusBar, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Keyboard
 } from 'react-native';
 import { useRouter, useNavigation } from 'expo-router';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
@@ -14,173 +14,106 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Video, ResizeMode } from 'expo-av';
 import { useApp } from '../context/AppContext';
-import { storageService } from '../services/StorageService';
+import { statusService } from '../services/StatusService';
 import { CropImageModal } from '../components/CropImageModal';
-
-
 
 export default function AddStatusScreen() {
     const { width, height } = useWindowDimensions();
     const router = useRouter();
     const navigation = useNavigation();
-    const { addStatus, activeTheme, currentUser } = useApp();
+    const { activeTheme } = useApp();
+    
     const [media, setMedia] = useState<{ uri: string; type: 'image' | 'video' } | null>(null);
     const [caption, setCaption] = useState('');
-    const [keyboardVisible, setKeyboardVisible] = useState(false);
-    const [initialLaunch, setInitialLaunch] = useState(true);
+    const [loading, setLoading] = useState(false);
     const [isCropModalVisible, setIsCropModalVisible] = useState(false);
+    const [initialPickDone, setInitialPickDone] = useState(false);
 
     const handlePickMedia = async () => {
-        const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.All,
-            allowsEditing: true,
-            quality: 0.8,
-            videoMaxDuration: 60,
-            legacy: true,
-            preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
-        });
-
-        if (!result.canceled && result.assets[0]) {
-            const asset = result.assets[0];
-            setMedia({
-                uri: asset.uri,
-                type: asset.type === 'video' ? 'video' : 'image',
+        try {
+            const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ImagePicker.MediaTypeOptions.All,
+                allowsEditing: true,
+                quality: 0.8,
+                videoMaxDuration: 30,
             });
-        } else if (result.canceled && !media) {
-            // If canceled and no media selected (initial state), go back
-            if (navigation.canGoBack()) navigation.goBack();
+
+            if (!result.canceled && result.assets[0]) {
+                const asset = result.assets[0];
+                setMedia({
+                    uri: asset.uri,
+                    type: asset.type === 'video' ? 'video' : 'image',
+                });
+            } else if (!media) {
+                router.back();
+            }
+        } catch (e) {
+            router.back();
         }
     };
 
     useEffect(() => {
-        const showSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setKeyboardVisible(true));
-        const hideSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKeyboardVisible(false));
-        
-        // Auto-open gallery on first launch
-        if (initialLaunch) {
-            Promise.resolve().then(() => handlePickMedia());
-            setInitialLaunch(false);
+        if (!initialPickDone) {
+            handlePickMedia();
+            setInitialPickDone(true);
         }
+    }, [initialPickDone]);
 
-        return () => {
-            showSub.remove();
-            hideSub.remove();
-        };
-    }, [initialLaunch]);
-
-    const handleTakePhoto = async () => {
-        const permission = await ImagePicker.requestCameraPermissionsAsync();
-        if (!permission.granted) {
-            Alert.alert('Permission needed', 'Camera permission is required');
-            if (navigation.canGoBack()) navigation.goBack();
-            return;
-        }
-
+    const handlePost = async () => {
+        if (!media) return;
+        setLoading(true);
         try {
-            const result = await ImagePicker.launchCameraAsync({
-                allowsEditing: true,
-                quality: 0.8,
-            });
-
-            if (!result.canceled && result.assets[0]) {
-                setMedia({
-                    uri: result.assets[0].uri,
-                    type: 'image',
-                });
-            } else if (result.canceled && !media) {
-                 if (navigation.canGoBack()) navigation.goBack();
-            }
-        } catch (error) {
-            Alert.alert('Camera Error', 'Could not open camera.');
-            if (!media && navigation.canGoBack()) navigation.goBack();
+            await statusService.uploadStory(media.uri, media.type, caption.trim());
+            router.replace('/(tabs)/status');
+        } catch (e) {
+            Alert.alert('Upload Error', 'Failed to share status. It will be retried in background.');
+            router.replace('/(tabs)/status');
+        } finally {
+            setLoading(false);
         }
-    };
-
-    const handlePost = () => {
-        if (!media) {
-            Alert.alert('Error', 'Please select an image or video');
-            return;
-        }
-
-        // Dismiss keyboard first to avoid layout jumps during navigation
-        Keyboard.dismiss();
-
-        // Trigger context in a timeout to avoid blocking the main thread
-        setTimeout(() => {
-            addStatus({
-                mediaUrl: '',
-                localUri: media.uri,
-                mediaType: media.type,
-                caption: caption.trim(),
-            });
-        }, 0);
-
-        // Immediate navigation back in an animation frame for maximum smoothness
-        requestAnimationFrame(() => {
-            if (navigation.canGoBack()) {
-                navigation.goBack();
-            } else {
-                router.replace('/' as any);
-            }
-        });
     };
 
     if (!media) {
         return (
-            <View style={styles.container}>
-                <StatusBar barStyle="light-content" />
-                <View style={{ flex: 1, backgroundColor: 'black', justifyContent: 'center', alignItems: 'center' }}>
-                    <ActivityIndicator size="large" color="#ffffff" />
-                </View>
+            <View style={styles.blackCenter}>
+                <ActivityIndicator color="#8C0016" size="large" />
             </View>
         );
     }
 
     return (
         <View style={styles.container}>
-            <StatusBar barStyle="light-content" hidden />
+            <StatusBar hidden />
 
-            {/* Full Screen Media Preview */}
-            {media.type === 'video' ? (
-                <Video 
-                    source={{ uri: media.uri }}
-                    style={[styles.fullScreenImage, { width, height }]}
-                    resizeMode={ResizeMode.CONTAIN}
-                    shouldPlay
-                    isLooping
-                    isMuted={false}
-                />
-            ) : (
-                <Image source={{ uri: media.uri }} style={[styles.fullScreenImage, { width, height }]} resizeMode="contain" />
-            )}
+            {/* Preview */}
+            <View style={StyleSheet.absoluteFill}>
+                {media.type === 'video' ? (
+                    <Video 
+                        source={{ uri: media.uri }}
+                        style={styles.fullScreen}
+                        resizeMode={ResizeMode.CONTAIN}
+                        shouldPlay
+                        isLooping
+                    />
+                ) : (
+                    <Image source={{ uri: media.uri }} style={styles.fullScreen} resizeMode="contain" />
+                )}
+            </View>
             
             {/* Top Controls */}
-            <LinearGradient colors={['rgba(0,0,0,0.6)', 'transparent']} style={styles.topGradient}>
+            <LinearGradient colors={['rgba(0,0,0,0.7)', 'transparent']} style={styles.topGradient}>
                 <View style={styles.topBar}>
-                    <Pressable
-                        onPress={() => {
-                            setMedia(null);
-                            setIsCropModalVisible(false);
-                        }}
-                        style={styles.iconButton}
-                    >
-                        <MaterialIcons name="close" size={28} color="white" />
+                    <Pressable onPress={() => router.back()} style={styles.iconButton}>
+                        <Ionicons name="close" size={28} color="white" />
                     </Pressable>
                     <View style={styles.topTools}>
-                        <Pressable
-                            style={styles.iconButton}
-                            onPress={() => {
-                                if (media?.type !== 'image') return;
-                                setIsCropModalVisible(true);
-                            }}
-                        >
-                            <MaterialIcons name="crop" size={24} color="white" />
-                        </Pressable>
+                        {media.type === 'image' && (
+                            <Pressable style={styles.iconButton} onPress={() => setIsCropModalVisible(true)}>
+                                <MaterialIcons name="crop" size={24} color="white" />
+                            </Pressable>
+                        )}
                         <Pressable style={styles.iconButton}>
-                            <MaterialIcons name="title" size={24} color="white" />
-                        </Pressable>
-                        <Pressable style={styles.iconButton}>
-                            <MaterialIcons name="edit" size={24} color="white" />
+                            <MaterialIcons name="text-fields" size={24} color="white" />
                         </Pressable>
                     </View>
                 </View>
@@ -191,19 +124,17 @@ export default function AddStatusScreen() {
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
                 style={styles.bottomContainer}
             >
-                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.8)']} style={styles.bottomGradient} />
+                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.9)']} style={styles.bottomGradient} />
                 
                 <Animated.View 
                     entering={SlideInDown.springify()} 
-                    layout={Layout.springify()}
                     style={styles.inputRow}
                 >
                     <View style={styles.inputWrapper}>
-                        <MaterialIcons name="create" size={20} color="rgba(255,255,255,0.5)" style={{ marginRight: 8 }} />
                         <TextInput
                             style={styles.captionInput}
                             placeholder="Add a caption..."
-                            placeholderTextColor="rgba(255,255,255,0.7)"
+                            placeholderTextColor="rgba(255,255,255,0.6)"
                             value={caption}
                             onChangeText={setCaption}
                             multiline
@@ -213,149 +144,40 @@ export default function AddStatusScreen() {
                     
                     <Pressable 
                         onPress={handlePost}
-                        style={[styles.sendButton, { backgroundColor: activeTheme.primary }]}
+                        disabled={loading}
+                        style={[styles.sendButton, { backgroundColor: '#8C0016' }]}
                     >
-                        <MaterialIcons name="send" size={24} color="white" />
+                        {loading ? (
+                            <ActivityIndicator color="#fff" />
+                        ) : (
+                            <MaterialIcons name="send" size={24} color="white" />
+                        )}
                     </Pressable>
                 </Animated.View>
             </KeyboardAvoidingView>
 
             <CropImageModal
                 visible={isCropModalVisible}
-                imageUri={media?.uri || ''}
+                imageUri={media.uri}
                 onClose={() => setIsCropModalVisible(false)}
-                onCropComplete={(croppedUri) => {
-                    setIsCropModalVisible(false);
-                    setMedia(prev => (prev ? { ...prev, uri: croppedUri } : prev));
-                }}
+                onCropComplete={(uri) => setMedia({ ...media, uri })}
             />
         </View>
     );
 }
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#000000',
-    },
-    emptyStateContainer: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    closeButton: {
-        position: 'absolute',
-        top: 60,
-        left: 20,
-        padding: 8,
-        backgroundColor: 'rgba(255,255,255,0.1)',
-        borderRadius: 20,
-    },
-    actionsContainer: {
-        flexDirection: 'row',
-        gap: 40,
-    },
-    actionButton: {
-        alignItems: 'center',
-        gap: 12,
-    },
-    actionIcon: {
-        width: 80,
-        height: 80,
-        borderRadius: 40,
-        justifyContent: 'center',
-        alignItems: 'center',
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.2)',
-    },
-    actionText: {
-        color: 'white',
-        fontSize: 16,
-        fontWeight: '600',
-    },
-    hintText: {
-        position: 'absolute',
-        bottom: 100,
-        color: 'rgba(255,255,255,0.4)',
-        fontSize: 14,
-    },
-    fullScreenImage: {
-        backgroundColor: '#000',
-    },
-    topGradient: {
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        height: 150,
-    },
-    topBar: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'flex-start',
-        paddingTop: 60,
-        paddingHorizontal: 20,
-    },
-    topTools: {
-        flexDirection: 'row',
-        gap: 20,
-    },
-    iconButton: {
-        padding: 8,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.5,
-        shadowRadius: 4,
-    },
-    bottomContainer: {
-        position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        justifyContent: 'flex-end',
-    },
-    bottomGradient: {
-        position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        height: 200,
-    },
-    inputRow: {
-        flexDirection: 'row',
-        alignItems: 'flex-end',
-        paddingHorizontal: 16,
-        paddingBottom: 40,
-        paddingTop: 20,
-        gap: 12,
-    },
-    inputWrapper: {
-        flex: 1,
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: 'rgba(0,0,0,0.5)',
-        borderRadius: 25,
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.2)',
-        minHeight: 50,
-        paddingHorizontal: 16,
-        paddingVertical: 5,
-    },
-    captionInput: {
-        color: 'white',
-        fontSize: 16,
-        maxHeight: 100,
-    },
-    sendButton: {
-        width: 50,
-        height: 50,
-        borderRadius: 25,
-        justifyContent: 'center',
-        alignItems: 'center',
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.3,
-        shadowRadius: 4,
-        elevation: 5,
-    },
+    container: { flex: 1, backgroundColor: '#000' },
+    blackCenter: { flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' },
+    fullScreen: { width: '100%', height: '100%' },
+    topGradient: { position: 'absolute', top: 0, left: 0, right: 0, height: 120 },
+    topBar: { flexDirection: 'row', justifyContent: 'space-between', paddingTop: 50, paddingHorizontal: 20 },
+    topTools: { flexDirection: 'row', gap: 15 },
+    iconButton: { padding: 8, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 20 },
+    bottomContainer: { position: 'absolute', bottom: 0, width: '100%' },
+    bottomGradient: { position: 'absolute', bottom: 0, width: '100%', height: 200 },
+    inputRow: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 20, paddingBottom: 40, gap: 12 },
+    inputWrapper: { flex: 1, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 25, minHeight: 50, paddingHorizontal: 20, justifyContent: 'center' },
+    captionInput: { color: 'white', fontSize: 16, paddingVertical: 10 },
+    sendButton: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center' }
 });

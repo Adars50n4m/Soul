@@ -85,6 +85,51 @@ export interface StatusUpdate {
     previewImage?: string;
 }
 
+// ─── NEW STATUS SYSTEM TYPES ───
+
+export interface CachedStatus {
+    id: string;
+    userId: string;
+    mediaLocalPath?: string;
+    mediaUrl?: string;
+    mediaKey?: string;
+    mediaType: 'image' | 'video';
+    caption?: string;
+    duration: number;
+    expiresAt: number; // unix timestamp
+    isViewed: boolean;
+    isMine: boolean;
+    createdAt: number; // unix timestamp
+    cachedAt: number; // unix timestamp
+}
+
+export interface PendingUpload {
+    id: string;
+    localUri: string;
+    mediaType: 'image' | 'video';
+    mediaKey?: string;
+    caption?: string;
+    createdAt: number;
+    retryCount: number;
+    uploadStatus: 'pending' | 'uploading' | 'failed';
+}
+
+export interface CachedUser {
+    id: string;
+    username?: string;
+    displayName?: string;
+    avatarUrl?: string;
+    soulNote?: string;
+    soulNoteAt?: number;
+}
+
+export interface UserStatusGroup {
+    user: CachedUser;
+    statuses: CachedStatus[];
+    hasUnviewed: boolean;
+    isMine: boolean;
+}
+
 export interface CallLog {
     id: string;
     contactId: string;

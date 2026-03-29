@@ -1,192 +1,224 @@
 import * as React from 'react';
-import { useState, useEffect, createContext, useContext, useCallback, useMemo } from 'react';
+import { useState, useEffect, createContext, useContext, useCallback, useMemo, useRef } from 'react';
+import { AppState } from 'react-native';
 import { statusService } from '../services/StatusService';
-import { storageService } from '../services/StorageService';
-import { useAuth } from './AuthContext';
-import { type StatusUpdate } from '../types';
-import { Alert } from 'react-native';
+import { UserStatusGroup, CachedStatus, PendingUpload } from '../types';
+import NetInfo from '@react-native-community/netinfo';
 
 interface StatusContextType {
-  stories: StatusUpdate[];
-  notes: any[];
-  uploadingStory: { localUri: string; mediaType: 'image' | 'video'; progress: number; caption?: string } | null;
+  statusGroups: UserStatusGroup[];
+  myStatuses: CachedStatus[];
+  pendingUploads: PendingUpload[];
+  statusUploadProgress: Record<string, number>;
+  isStatusSyncing: boolean;
   refreshStatuses: () => Promise<void>;
-  addStory: (params: { mediaUrl: string; localUri?: string; mediaType: 'image' | 'video'; caption?: string; music?: any }) => Promise<boolean>;
-  updateNote: (text: string | null) => Promise<boolean>;
-  deleteStory: (id: string) => Promise<void>;
-  toggleStoryLike: (id: string) => Promise<void>;
-  viewStory: (id: string) => Promise<void>;
+  addStatus: (localUri: string, mediaType: 'image' | 'video', caption?: string) => Promise<void>;
+  updateSoulNote: (text: string) => Promise<void>;
+  deleteStatus: (id: string, mediaKey: string) => Promise<void>;
+  viewStatus: (id: string, viewerId: string) => Promise<void>;
+  retryPendingUploads: () => Promise<void>;
 }
 
 export const StatusContext = createContext<StatusContextType | undefined>(undefined);
 
 export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { currentUser } = useAuth();
-  const [stories, setStories] = useState<StatusUpdate[]>([]);
-  const [notes, setNotes] = useState<any[]>([]);
-  const [uploadingStory, setUploadingStory] = useState<{ localUri: string; mediaType: 'image' | 'video'; progress: number; caption?: string } | null>(null);
+  const [statusGroups, setStatusGroups] = useState<UserStatusGroup[]>([]);
+  const [myStatuses, setMyStatuses] = useState<CachedStatus[]>([]);
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
+  const [statusUploadProgress, setStatusUploadProgress] = useState<Record<string, number>>({});
+  const [isStatusSyncing, setIsStatusSyncing] = useState(false);
+  const syncInFlightRef = useRef(false);
+  const sortPendingUploads = useCallback(
+    (uploads: PendingUpload[]) => [...uploads].sort((a, b) => a.createdAt - b.createdAt),
+    []
+  );
 
   const refreshStatuses = useCallback(async () => {
-    if (!currentUser) return;
-    
     try {
-      const [fetchedStories, fetchedNotes] = await Promise.all([
-        statusService.fetchActiveStories(currentUser.id),
-        statusService.fetchActiveNotes(currentUser.id)
+      const [groups, mine] = await Promise.all([
+        statusService.getStatusFeed(),
+        statusService.getMyStatuses()
       ]);
-      
-      console.log(`[StatusContext] Fetched ${fetchedStories?.length || 0} stories and ${fetchedNotes?.length || 0} notes`);
-      setStories(fetchedStories || []);
-      setNotes(fetchedNotes || []);
+      setStatusGroups(groups);
+      setMyStatuses(mine);
     } catch (e) {
-      console.error('[StatusContext] Error refreshing statuses:', e);
+      console.error('[StatusContext] Refresh error:', e);
     }
-  }, [currentUser]);
+  }, []);
+
+  const refreshPendingUploads = useCallback(async () => {
+    try {
+      const pending = await statusService.getPendingUploads();
+      const sorted = sortPendingUploads(pending);
+      setPendingUploads(sorted);
+      
+      // Clean up progress for items no longer pending
+      setStatusUploadProgress(prev => {
+        const next = { ...prev };
+        const pendingIds = sorted.map(p => p.id);
+        Object.keys(next).forEach(id => {
+          if (!pendingIds.includes(id)) delete next[id];
+        });
+        return next;
+      });
+    } catch (e) {
+      console.error('[StatusContext] Pending refresh error:', e);
+    }
+  }, [sortPendingUploads]);
+
+  const syncPendingUploads = useCallback(async () => {
+    if (syncInFlightRef.current) {
+      return;
+    }
+
+    const currentPendingUploads = sortPendingUploads(await statusService.getPendingUploads());
+    setPendingUploads(currentPendingUploads);
+
+    if (currentPendingUploads.length === 0) {
+      return;
+    }
+
+    const netState = await NetInfo.fetch();
+    if (!netState.isConnected) {
+      await refreshPendingUploads();
+      return;
+    }
+
+    syncInFlightRef.current = true;
+    setIsStatusSyncing(true);
+
+    try {
+      await statusService.processPendingUploads((id, progress) => {
+        setStatusUploadProgress(prev => ({ ...prev, [id]: progress }));
+      });
+    } catch (e) {
+      console.error('[StatusContext] Pending sync error:', e);
+    } finally {
+      syncInFlightRef.current = false;
+      setIsStatusSyncing(false);
+      await Promise.all([refreshPendingUploads(), refreshStatuses()]);
+    }
+  }, [refreshPendingUploads, refreshStatuses, sortPendingUploads]);
 
   useEffect(() => {
-    refreshStatuses();
-    // Refresh every 5 minutes to catch expiry
-    const interval = setInterval(refreshStatuses, 5 * 60 * 1000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+
+    const init = async () => {
+      try {
+        await statusService.cleanupExpiredLocal();
+        await Promise.all([refreshStatuses(), refreshPendingUploads()]);
+        if (!isMounted) return;
+
+        await syncPendingUploads();
+      } catch (e) {
+        console.error('[StatusContext] Init error:', e);
+      }
+    };
+
+    init();
+
+    const refreshInterval = setInterval(() => {
+      void refreshStatuses();
+    }, 60000); // Every minute
+
+    return () => {
+      isMounted = false;
+      clearInterval(refreshInterval);
+    };
+  }, [refreshPendingUploads, refreshStatuses, syncPendingUploads]);
+
+  useEffect(() => {
+    if (pendingUploads.length === 0) {
+      return;
+    }
+
+    const retryInterval = setInterval(() => {
+      void syncPendingUploads();
+    }, 8000);
+
+    return () => clearInterval(retryInterval);
+  }, [pendingUploads.length, syncPendingUploads]);
+
+  const addStatus = useCallback(async (localUri: string, mediaType: 'image' | 'video', caption?: string) => {
+    await statusService.uploadStory(localUri, mediaType, caption);
+    await Promise.all([refreshStatuses(), refreshPendingUploads()]);
+    void syncPendingUploads();
+  }, [refreshPendingUploads, refreshStatuses, syncPendingUploads]);
+
+  const updateSoulNote = useCallback(async (text: string) => {
+    await statusService.updateSoulNote(text);
+    await refreshStatuses();
   }, [refreshStatuses]);
 
-  const addStory = useCallback(async (params: { mediaUrl: string; localUri?: string; mediaType: 'image' | 'video'; caption?: string; music?: any }) => {
-    if (!currentUser) return false;
-    
-    // If localUri is provided, we handle upload in background
-    if (params.localUri) {
-      console.log(`[StatusContext] Starting background upload for status: ${params.localUri}`);
-      
-      // Immediately set placeholder state for UI
-      setUploadingStory({
-        localUri: params.localUri,
-        mediaType: params.mediaType,
-        progress: 0,
-        caption: params.caption
-      });
+  const deleteStatus = useCallback(async (id: string, mediaKey: string) => {
+    await statusService.deleteMyStatus(id, mediaKey);
+    await Promise.all([refreshStatuses(), refreshPendingUploads()]);
+  }, [refreshPendingUploads, refreshStatuses]);
 
-      // Background logic
-      setTimeout(() => {
-        (async () => {
-          let lastProgress = 0;
-          try {
-            // 1. Upload media with timeout check
-            const uploadPromise = storageService.uploadImage(
-              params.localUri!, 
-              'status-media', 
-              currentUser.id,
-              (p: number) => {
-                setUploadingStory(prev => prev ? { ...prev, progress: p } : null);
-              }
-            );
+  const viewStatus = useCallback(async (id: string, viewerId: string) => {
+    await statusService.onStatusViewed(id, viewerId);
+    // Prefetch logic handled by StatusService inside feed call or screens
+  }, []);
 
-            const timeoutPromise = new Promise<string>((_, reject) => 
-              setTimeout(() => reject(new Error('Upload timed out after 30s')), 30000)
-            );
+  const retryPendingUploads = useCallback(async () => {
+    console.log('[StatusContext] Manually retrying pending uploads...');
+    await syncPendingUploads();
+  }, [syncPendingUploads]);
 
-            const uploadedUrl = await Promise.race([uploadPromise, timeoutPromise]);
-
-            if (!uploadedUrl) {
-              throw new Error('Storage service returned empty URL.');
-            }
-
-            console.log('[StatusContext] Media uploaded, posting to database...');
-            // 2. Post to DB
-            const posted = await statusService.postStory({
-              userId: currentUser.id,
-              userName: currentUser.name || currentUser.username || 'User',
-              userAvatar: currentUser.avatar || '',
-              mediaUrl: uploadedUrl,
-              mediaType: params.mediaType,
-              caption: params.caption,
-              music: params.music
-            });
-
-            if (posted) {
-              console.log('[StatusContext] Background story post successful');
-              await refreshStatuses();
-              setUploadingStory(null);
-            } else {
-               throw new Error('Database rejected the status record.');
-            }
-          } catch (err: any) {
-            console.error('[StatusContext] Background status error:', err);
-            
-            let errorMessage = err.message || 'Unknown upload error';
-            if (errorMessage.includes('Aborted')) errorMessage = 'Upload timed out. Please check your internet connection.';
-            if (errorMessage.includes('Network')) errorMessage = 'Network error. Are you connected to the internet?';
-            
-            Alert.alert(
-              'Upload Failed', 
-              `${errorMessage}`
-            );
-            
-            setUploadingStory(null);
-          }
-        })();
-      }, 0);
-
-      return true; // Success in triggering the background work
-    }
-
-    // Traditional way if mediaUrl is already public
-    const success = await statusService.postStory({
-      userId: currentUser.id,
-      userName: currentUser.name || currentUser.username || 'User',
-      userAvatar: currentUser.avatar || '',
-      mediaUrl: params.mediaUrl,
-      mediaType: params.mediaType,
-      caption: params.caption,
-      music: params.music
+  useEffect(() => {
+    // Listen for connectivity changes to trigger automatic sync
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      if (state.isConnected) {
+        console.log('[StatusContext] Connection restored, triggering sync...');
+        void syncPendingUploads();
+      }
     });
-    
-    if (success) {
-      await refreshStatuses();
-    }
-    return success;
-  }, [currentUser, refreshStatuses]);
 
-  const updateNote = useCallback(async (text: string | null) => {
-    if (!currentUser) return false;
-    
-    const success = await statusService.postNote(currentUser.id, text);
-    if (success) {
-      await refreshStatuses();
-    }
-    return success;
-  }, [currentUser, refreshStatuses]);
+    return () => unsubscribe();
+  }, [syncPendingUploads]);
 
-  const deleteStory = useCallback(async (id: string) => {
-    if (!currentUser) return;
-    const success = await statusService.deleteStory(id, currentUser.id);
-    if (success) {
-      setStories(prev => prev.filter(s => s.id !== id));
-    }
-  }, [currentUser]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') {
+        return;
+      }
 
-  const toggleStoryLike = useCallback(async (id: string) => {
-    if (!currentUser) return;
-    await statusService.likeStory(id, currentUser.id);
-    await refreshStatuses();
-  }, [currentUser, refreshStatuses]);
+      if (pendingUploads.length > 0) {
+        void syncPendingUploads();
+        return;
+      }
 
-  const viewStory = useCallback(async (id: string) => {
-    if (!currentUser) return;
-    await statusService.viewStory(id, currentUser.id);
-    // Silent update locally if needed, or refresh
-  }, [currentUser]);
+      void Promise.all([refreshStatuses(), refreshPendingUploads()]);
+    });
+
+    return () => subscription.remove();
+  }, [pendingUploads.length, refreshPendingUploads, refreshStatuses, syncPendingUploads]);
 
   const value = useMemo(() => ({
-    stories,
-    notes,
-    uploadingStory,
+    statusGroups,
+    myStatuses,
+    pendingUploads,
+    statusUploadProgress,
+    isStatusSyncing,
     refreshStatuses,
-    addStory,
-    updateNote,
-    deleteStory,
-    toggleStoryLike,
-    viewStory
-  }), [stories, notes, uploadingStory, refreshStatuses, addStory, updateNote, deleteStory, toggleStoryLike, viewStory]);
+    addStatus,
+    updateSoulNote,
+    deleteStatus,
+    viewStatus,
+    retryPendingUploads
+  }), [
+    statusGroups,
+    myStatuses,
+    pendingUploads,
+    statusUploadProgress,
+    isStatusSyncing,
+    refreshStatuses,
+    addStatus,
+    updateSoulNote,
+    deleteStatus,
+    viewStatus,
+    retryPendingUploads
+  ]);
 
   return <StatusContext.Provider value={value}>{children}</StatusContext.Provider>;
 };

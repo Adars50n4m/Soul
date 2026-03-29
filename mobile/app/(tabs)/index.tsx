@@ -32,10 +32,9 @@ import { useScrollMotion } from '../../components/navigation/ScrollMotionProvide
 import { normalizeId, getSuperuserName, LEGACY_TO_UUID, UUID_TO_LEGACY } from '../../utils/idNormalization';
 import { SHRI_ID, HARI_ID } from '../../config/supabase';
 import { SoulAvatar } from '../../components/SoulAvatar';
-import { StatusViewerModal } from '../../components/StatusViewerModal';
 import { MediaPreviewModal } from '../../components/MediaPreviewModal';
 import { MediaPickerSheet } from '../../components/MediaPickerSheet';
-import { Contact, Story } from '../../types';
+import { Contact } from '../../types';
 import { NoteBubble } from '../../components/NoteBubble';
 import { NoteCreatorModal } from '../../components/NoteCreatorModal';
 const DEFAULT_AVATAR = '';
@@ -378,23 +377,26 @@ const StatusProgressRing = ({ progress, size = 80, strokeWidth = 3, color = '#3b
 
 export default function HomeScreen() {
   const {
+    currentUser,
     contacts,
     messages,
-    activeTheme,
-    typingUsers,
-    currentUser,
     statuses,
+    myStatuses,
     addStatus,
     deleteStatus,
-    toggleStatusLike,
-    connectivity,
-    refreshLocalCache,
+    addStatusView,
+    pendingStatusUploads,
+    statusUploadProgress,
+    retryPendingStatusUploads,
+    isStatusSyncing,
+    sendChatMessage,
+    clearChatMessages,
     archiveContact,
     unfriendContact,
-    clearChatMessages,
-    addStatusView,
-    sendChatMessage,
-    uploadingStory,
+    activeTheme,
+    refreshLocalCache,
+    typingUsers,
+    connectivity,
   } = useApp();
   const { getPresence } = usePresence();
   const navigation = useNavigation();
@@ -403,14 +405,11 @@ export default function HomeScreen() {
   const { onScroll: handleScrollMotion } = useScrollMotion('index');
 
   // Status Handlers
-  const [selectedStatusContact, setSelectedStatusContact] = useState<Contact | null>(null);
-  const [isViewerVisible, setIsViewerVisible] = useState(false);
   const [isMediaPickerVisible, setIsMediaPickerVisible] = useState(false);
+  const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' } | null>(null);
   const [isNoteModalVisible, setIsNoteModalVisible] = useState(false);
-  const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' } | null>(null);
-  const [statusInitialLayout, setStatusInitialLayout] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
-  const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
   
   const statusRefs = useRef<Record<string, any>>({});
   const statusRailOpacity = useSharedValue(hasRenderedHomeOnce ? 0 : 1);
@@ -429,7 +428,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
   ] as any,
   opacity: Platform.OS === 'android' 
     ? 1 
-    : interpolate(homeMorphProgress.value, [0, 0.6], [1, isViewerVisible ? 0 : 1], Extrapolation.CLAMP),
+    : interpolate(homeMorphProgress.value, [0, 0.6], [1, 1], Extrapolation.CLAMP), // Fixed: was using missing isViewerVisible
 }));
 
   const homeBackdropAnimatedStyle = useAnimatedStyle(() => ({
@@ -444,11 +443,11 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
   // the tab bar is hidden before the first paint, avoiding a flash on Android
   // where the View overlay (not Modal) is used for the status viewer.
   useLayoutEffect(() => {
-    const shouldHideTabBar = isViewerVisible || isMediaPickerVisible || !!statusMediaPreview || isNoteModalVisible;
+    const shouldHideTabBar = isMediaPickerVisible || !!statusMediaPreview || isNoteModalVisible;
     navigation.setOptions({
       tabBarStyle: { display: shouldHideTabBar ? 'none' : 'flex' }
     });
-  }, [isViewerVisible, isMediaPickerVisible, statusMediaPreview, isNoteModalVisible, navigation]);
+  }, [isMediaPickerVisible, statusMediaPreview, isNoteModalVisible, navigation]);
 
   useEffect(() => {
     const unsubscribe = (navigation as any).addListener('focus', () => {
@@ -535,54 +534,33 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     return unsubscribe;
   }, [homeMorphProgress, statusRailOpacity]);
 
-  const contactStoriesMap = useMemo(() => {
-    const map = new Map<string, Story[]>();
-    try {
-      (statuses || []).forEach(s => {
-        const story: Story = {
-          id: s.id,
-          url: proxySupabaseUrl(s.mediaUrl),
-          type: s.mediaType,
-          timestamp: s.timestamp,
-          seen: false,
-          caption: s.caption || '',
-          userId: s.userId,
-          likes: s.likes || [],
-          views: s.views || [],
-          music: s.music,
-        };
-        const primaryUserId = normalizeId(s.userId);
-        if (!map.has(primaryUserId)) map.set(primaryUserId, []);
-        map.get(primaryUserId)!.push(story);
+  const contactStatusGroupsMap = useMemo(() => {
+    const map = new Map<string, any>();
+    if (statuses) {
+      statuses.forEach(group => {
+        if (group.user?.id) {
+          map.set(group.user.id, group);
+        }
       });
-    } catch (e) {
-      console.warn('[HomeScreen] Error building contactStoriesMap:', e);
     }
     return map;
   }, [statuses]);
 
-  const myStories = useMemo(
-    () => currentUser ? (contactStoriesMap.get(normalizeId(currentUser.id)) || []) : [],
-    [contactStoriesMap, currentUser]
-  );
+  const myStories = useMemo(() => myStatuses || [], [myStatuses]);
 
   const visibleContacts = useMemo(() => {
     if (!contacts) return [];
-    const legacyToUuid = LEGACY_TO_UUID;
-    const uuidToLegacy = UUID_TO_LEGACY;
     
     const myNormalizedId = normalizeId(currentUser?.id);
-    const myLegacyId = currentUser?.id ? uuidToLegacy[currentUser.id] : null;
     const legacyIds = new Set(['shri', 'hari']);
+    const legacyToUuid = LEGACY_TO_UUID;
+    const uuidToLegacy = UUID_TO_LEGACY;
     const superUserUuids = Object.values(legacyToUuid);
 
-    // 1. First pass: group by their "Primary ID" (UUID if available) to merge duplicates
     const unified = new Map<string, Contact>();
     
     contacts.forEach(c => {
       const primaryId = normalizeId(c.id);
-      
-      // Filter out self
       if (primaryId === myNormalizedId) return;
 
       const existing = unified.get(primaryId);
@@ -592,30 +570,23 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
       }
     });
 
-    // 2. Filter the unified list based on connections/superusers
     return Array.from(unified.values()).filter(contact => {
       const primaryId = contact.id;
       const altId = uuidToLegacy[primaryId] || primaryId;
 
-      // Special Superuser Logic: Both superusers see each other always.
-      // But they don't see everyone else unless connected.
       const isSuperUser = legacyIds.has(altId) || superUserUuids.includes(primaryId);
       const amISuperUser = legacyIds.has(currentUser?.id || '') || superUserUuids.includes(currentUser?.id || '');
       
       const isSelfSuperUserInteraction = isSuperUser && amISuperUser;
 
-      // Filtering out "Unknown" users (except if they are superusers for some reason)
       if (!isSuperUser && (!contact.name || contact.name.toLowerCase() === 'unknown')) {
           return false;
       }
 
-      // Check for activity or connections
-      const hasMessages = (messages?.[primaryId]?.length || 0) > 0 || (messages?.[altId]?.length || 0) > 0;
+      const chatMsgs = messages?.[primaryId] || messages?.[altId] || [];
+      const hasMessages = chatMsgs.length > 0;
       const hasMeaningfulLastMessage = !!contact.lastMessage && contact.lastMessage !== 'Start a conversation';
 
-      // Final criteria:
-      // Show if they are superusers seeing each other OR if there's connection activity
-      // AND they are not archived
       const isArchived = contact.isArchived === true;
       return (isSelfSuperUserInteraction || hasMessages || hasMeaningfulLastMessage) && !isArchived;
     });
@@ -629,16 +600,8 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
   }, [visibleContacts, searchQuery]);
 
   const contactsWithStories = useMemo(() => {
-     try {
-       return (visibleContacts || []).filter(c => contactStoriesMap.has(c.id)).map(c => ({
-           ...c,
-           stories: contactStoriesMap.get(c.id) || []
-       }));
-     } catch (e) {
-       console.warn('[HomeScreen] Error building contactsWithStories:', e);
-       return [];
-     }
-  }, [visibleContacts, contactStoriesMap]);
+    return visibleContacts.filter(c => contactStatusGroupsMap.has(c.id));
+  }, [visibleContacts, contactStatusGroupsMap]);
 
   const isNoteValid = (timestamp?: string) => {
     if (!timestamp) return false;
@@ -648,72 +611,38 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     return diff < 24 * 60 * 60 * 1000; // 24 hours
   };
 
-  const handleStatusPress = (contact: Contact, layout?: { x: number, y: number, width: number, height: number }) => {
-    console.log('[HomeScreen] 牒 handleStatusPress triggered for:', contact.name);
-    setStatusInitialLayout(layout || null);
-    homeMorphProgress.value = withSpring(1, {
-      damping: 15,
-      stiffness: 100,
-      mass: 1,
-    });
-    setSelectedStatusContact(contact);
-    setIsViewerVisible(true);
+  const handleStatusPress = (contact: Contact) => {
+    router.push({ pathname: '/view-status', params: { id: contact.id } });
   };
 
-  const handleMyStatusPress = (layout?: { x: number, y: number, width: number, height: number }) => {
+  const handleMyStatusPress = () => {
     if (!currentUser) return;
-
-    if (myStories.length > 0) {
-      setStatusInitialLayout(layout || null);
-      homeMorphProgress.value = withSpring(1, {
-        damping: 15,
-        stiffness: 100,
-        mass: 1,
-      });
-      setSelectedStatusContact({
-        id: currentUser.id,
-        name: currentUser.name,
-        avatar: currentUser.avatar || DEFAULT_AVATAR,
-        status: 'online',
-        stories: myStories,
-      });
-      router.push('/my-status');
-      return;
+    
+    // Auto-retry failures
+    if (pendingStatusUploads.some(upload => upload.uploadStatus === 'failed')) {
+      void retryPendingStatusUploads();
     }
 
-    // Always open media picker if no stories exist, even if a note exists
-    setIsMediaPickerVisible(true);
+    if (myStatuses.length > 0 || pendingStatusUploads.length > 0) {
+      router.push('/my-status');
+    } else {
+      setIsMediaPickerVisible(true);
+    }
   };
 
   const closeModalRobustly = useCallback(() => {
-    homeMorphProgress.value = withSpring(0, {
-      damping: 15,
-      stiffness: 100,
-      mass: 1,
-    });
-    setIsViewerVisible(false);
     setIsMediaPickerVisible(false);
     setIsNoteModalVisible(false);
     setStatusMediaPreview(null);
-    setSelectedStatusContact(null);
-  }, [homeMorphProgress]);
+  }, []);
 
   const handleSendStatus = async (mediaList: { uri: string; type: 'image' | 'video' | 'audio' }[], caption?: string) => {
     if (!currentUser || mediaList.length === 0) return;
-
     const item = mediaList[0];
     if (!item) return;
 
     try {
-      // Trigger non-blocking context method with localUri
-      addStatus({
-        mediaUrl: '', 
-        localUri: item.uri,
-        mediaType: item.type === 'video' ? 'video' : 'image',
-        caption: caption || '',
-      });
-      
-      // Reset UI immediately
+      await addStatus(item.uri, item.type === 'video' ? 'video' : 'image', caption || '');
       setStatusMediaPreview(null);
       setIsMediaPickerVisible(false);
     } catch (error) {
@@ -727,7 +656,6 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
   const createStatus = async (result: ImagePicker.ImagePickerResult) => {
       if (!result.canceled && result.assets?.[0] && currentUser) {
           const asset = result.assets[0];
-          // Resolve ph:// URIs to readable file paths before setting preview
           const resolvedUri = await resolveStatusAssetUri(asset);
           setStatusMediaPreview({
             uri: resolvedUri,
@@ -751,7 +679,6 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
   const handleSelectGallery = async (providedAsset?: MediaLibrary.Asset) => {
       if (providedAsset) {
-          // Wrap the MediaLibrary asset into an ImagePicker-like result for createStatus
           const result: ImagePicker.ImagePickerResult = {
               canceled: false,
               assets: [{
@@ -761,7 +688,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
                   type: providedAsset.mediaType === 'video' ? 'video' : 'image',
                   assetId: providedAsset.id,
                   fileName: providedAsset.filename,
-                  fileSize: 0, // Not strictly needed for createStatus
+                  fileSize: 0,
               }]
           };
           await createStatus(result);
@@ -776,7 +703,6 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         allowsEditing: true,
         videoMaxDuration: 60,
         legacy: true,
-        preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
       });
       await createStatus(result);
   };
@@ -800,34 +726,35 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
   const renderStatusItem = useCallback(({ item, index }: { item: any; index: number }) => {
     if (item.id === 'my-status') {
-      const myStoryPreviewUrl = myStories[0]?.url;
-      const hasStory = myStories.length > 0;
-      const isUploading = !!uploadingStory;
-      const showInCorner = hasStory && !isUploading;
+      const myPreviewUrl = myStatuses[0]?.mediaLocalPath || myStatuses[0]?.mediaUrl;
+      const hasStatus = myStatuses.length > 0;
+      const hasPendingUploads = pendingStatusUploads.length > 0;
+      const isUploading = isStatusSyncing || pendingStatusUploads.some(upload => upload.uploadStatus === 'uploading');
+      const hasFailedPendingUpload = pendingStatusUploads.some(upload => upload.uploadStatus === 'failed');
+      const firstPending = pendingStatusUploads[0];
+      const statusLabel = isUploading
+        ? 'Uploading...'
+        : hasFailedPendingUpload
+          ? 'Retrying...'
+          : hasPendingUploads
+            ? 'Queued...'
+            : 'My Status';
       
       return (
         <Pressable 
           ref={ref => statusRefs.current['my-status'] = ref}
           style={styles.statusCard} 
-          onPress={() => {
-            if (isUploading) {
-              Alert.alert('Uploading', 'Your status is currently being uploaded. Please wait.');
-              return;
-            }
-            statusRefs.current['my-status']?.measureInWindow((x: number, y: number, width: number, height: number) => {
-              handleMyStatusPress({ x, y, width, height });
-            });
-          }}
+          onPress={() => handleMyStatusPress()}
         >
           <View style={styles.statusCardSurface}>
-            <View style={[styles.myStatusBackground, (hasStory || isUploading) && { justifyContent: 'center', alignItems: 'center' }]}>
-              {uploadingStory ? (
+            <View style={[styles.myStatusBackground, (hasStatus || hasPendingUploads) && { justifyContent: 'center', alignItems: 'center' }]}>
+              {hasPendingUploads && firstPending ? (
                 <View style={StyleSheet.absoluteFill}>
-                  <Image source={{ uri: uploadingStory.localUri }} style={[styles.myStatusPreviewBgFull, { opacity: 0.6 }]} />
+                  <Image source={{ uri: firstPending.localUri }} style={[styles.myStatusPreviewBgFull, { opacity: 0.6 }]} />
                   <View style={styles.uploadingOverlay}>
                     <View style={{ justifyContent: 'center', alignItems: 'center' }}>
                       <StatusProgressRing 
-                          progress={uploadingStory.progress || 0} 
+                          progress={firstPending ? (statusUploadProgress[firstPending.id] || 0) / 100 : 0}
                           size={78} 
                           color={activeTheme.primary} 
                       />
@@ -835,16 +762,14 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
                           <SoulAvatar 
                               uri={proxySupabaseUrl(currentUser?.avatar)} 
                               size={64} 
-                              avatarType={currentUser?.avatarType as any}
-                              isOnline={false}
                           />
                       </View>
                     </View>
                   </View>
                 </View>
-              ) : hasStory && myStoryPreviewUrl ? (
+              ) : hasStatus && myPreviewUrl ? (
                 <View style={StyleSheet.absoluteFill}>
-                  <Image source={{ uri: myStoryPreviewUrl }} style={styles.myStatusPreviewBgFull} />
+                  <Image source={{ uri: myPreviewUrl }} style={styles.myStatusPreviewBgFull} />
                   <LinearGradient
                     colors={['rgba(0,0,0,0.5)', 'transparent']}
                     style={styles.myStatusTopGradient}
@@ -880,15 +805,11 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
                 </View>
               )}
             </View>
-            
-            {/* Glassy bottom bar */}
             <View style={styles.statusInfoGlassWrapper}>
               <GlassView intensity={45} tint="dark" style={StyleSheet.absoluteFill} />
               <View style={styles.statusInfoContent}>
                 <Text style={styles.statusName} numberOfLines={1}>
-                  {uploadingStory 
-                    ? `Uploading ${Math.round((uploadingStory.progress || 0) * 100)}%` 
-                    : 'My Status'}
+                  {statusLabel}
                 </Text>
               </View>
             </View>
@@ -896,11 +817,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
           {currentUser?.note && isNoteValid(currentUser.noteTimestamp) && !isNoteModalVisible && (
             <View style={styles.notePositioner} pointerEvents="box-none">
               <Pressable onPress={() => setIsNoteModalVisible(true)}>
-                <NoteBubble 
-                  text={currentUser.note} 
-                  isMe 
-                  align="center" 
-                />
+                <NoteBubble text={currentUser.note} isMe align="center" />
               </Pressable>
             </View>
           )}
@@ -909,49 +826,37 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     }
     
     const contact = item as Contact;
-    const stories = contactStoriesMap.get(contact.id) || [];
-    const hasUnseen = stories.some(s => !s.seen);
-    const storyUrl = stories[0]?.url;
+    const group = contactStatusGroupsMap.get(contact.id);
+    const hasStatus = !!group;
+    const hasUnviewed = group?.hasUnviewed || false;
+    const previewUrl = group?.statuses[0]?.mediaLocalPath || group?.statuses[0]?.mediaUrl;
 
     return (
       <Pressable 
         key={contact.id}
         ref={ref => statusRefs.current[contact.id] = ref}
         style={styles.statusCard} 
-        onPress={() => {
-          statusRefs.current[contact.id]?.measureInWindow((x: number, y: number, width: number, height: number) => {
-            handleStatusPress(contact, { x, y, width, height });
-          });
-        }}
+        onPress={() => handleStatusPress(contact)}
       >
         <View style={styles.statusCardSurface}>
-          {storyUrl ? (
-            <Image source={{ uri: storyUrl }} style={styles.statusMediaBackground} />
+          {previewUrl ? (
+            <Image source={{ uri: previewUrl }} style={styles.statusMediaBackground} />
           ) : (
             <View style={[styles.statusMediaBackground, styles.statusPlaceholder]} />
           )}
           
           <View style={styles.statusOverlay} pointerEvents="none">
-            {/* Story Ring - Blue gradient for unseen */}
             <View style={styles.contactAvatarPositioner}>
               <LinearGradient
-                colors={hasUnseen ? ['#3b82f6', '#8b5cf6', '#ec4899'] : ['rgba(255,255,255,0.2)', 'rgba(255,255,255,0.2)']}
+                colors={hasUnviewed ? ['#8C0016', '#B5001E'] : ['rgba(255,255,255,0.2)', 'rgba(255,255,255,0.2)']}
                 style={[styles.storyRing, { padding: 2 }]}
               >
                 <View style={styles.storyRingInner}>
-                  <SoulAvatar 
-                     uri={proxySupabaseUrl(contact.avatar)} 
-                     size={42} 
-                     avatarType={contact.avatarType as any}
-                  />
+                  <SoulAvatar uri={proxySupabaseUrl(contact.avatar)} size={42} avatarType={contact.avatarType as any} />
                 </View>
               </LinearGradient>
             </View>
-
-            <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.85)']}
-              style={styles.statusNameGradient}
-            >
+            <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.statusNameGradient}>
               <Text style={styles.statusNameText}>{contact.name}</Text>
             </LinearGradient>
           </View>
@@ -963,9 +868,16 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         )}
       </Pressable>
     );
-  }, [myStories, currentUser, contactStoriesMap, uploadingStory, handleMyStatusPress, handleStatusPress]);
+  }, [
+    myStatuses,
+    currentUser,
+    contactStatusGroupsMap,
+    pendingStatusUploads,
+    isStatusSyncing,
+    handleMyStatusPress,
+    handleStatusPress
+  ]);
 
-  // Pre-compute last messages map to avoid recalculating in renderItem
   const lastMessagesMap = useMemo(() => {
     const map: Record<string, { text?: string; timestamp?: string }> = {};
     for (const contact of visibleContacts) {
@@ -980,34 +892,18 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
   const renderItem = useCallback(({ item, index }: { item: Contact; index: number }) => {
     const lastMsg = lastMessagesMap[item.id] || { text: item.lastMessage, timestamp: '' };
-    // Inject stories if any
-    const storiesForContact = contactStoriesMap.get(item.id) || [];
-    const itemWithStories = { ...item, stories: storiesForContact };
     const isTyping = typingUsers.includes(item.id);
 
     return (
       <SwipeableRow
         onArchive={() => archiveContact(item.id, true)}
         onDelete={() => {
-          Alert.alert(
-            'Delete Chat',
-            `Are you sure you want to delete your chat with ${item.name}? This cannot be undone.`,
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Delete', style: 'destructive', onPress: () => clearChatMessages(item.id) }
-            ]
-          );
+          Alert.alert('Delete Chat', `Are you sure?`, [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Delete', style: 'destructive', onPress: () => clearChatMessages(item.id) }
+          ]);
         }}
-        onUnfriend={() => {
-          Alert.alert(
-            'Unfriend',
-            `Are you sure you want to unfriend ${item.name}?`,
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Unfriend', style: 'destructive', onPress: () => unfriendContact(item.id) }
-            ]
-          );
-        }}
+        onUnfriend={() => unfriendContact(item.id)}
       >
         <ChatListItem 
             item={item} 
@@ -1023,10 +919,8 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     );
   }, [lastMessagesMap, typingUsers, getPresence, connectivity, handleUserSelect, homeMorphProgress, archiveContact, clearChatMessages, unfriendContact]);
 
-  // Stable keyExtractor for FlashList
   const keyExtractor = useCallback((item: Contact) => item.id, []);
 
-  // Stable header component to prevent remounting and touch loss on Android
   const renderHeader = useCallback(() => (
     <View style={styles.homeHeaderWrapper}>
       <View style={styles.topHeader}>
@@ -1068,18 +962,18 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         )}
       </View>
       <Animated.View style={[styles.statusRail, statusRailAnimStyle]}>
-      <FlatList
-        horizontal
-        data={[{ id: 'my-status' }, ...contactsWithStories]}
-        keyExtractor={item => item.id}
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.statusContent}
-        removeClippedSubviews={false} // Better touch stability on Android
-        renderItem={renderStatusItem}
-      />
+        <FlatList
+          horizontal
+          data={[{ id: 'my-status' }, ...contactsWithStories]}
+          keyExtractor={item => item.id}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.statusContent}
+          removeClippedSubviews={false}
+          renderItem={renderStatusItem}
+        />
       </Animated.View>
     </View>
-  ), [contactsWithStories, myStories, currentUser, renderStatusItem, statusRailAnimStyle, router, isSearching, searchQuery]);
+  ), [contactsWithStories, renderStatusItem, statusRailAnimStyle, router, isSearching, searchQuery]);
 
   return (
     <View style={styles.container}>
@@ -1099,7 +993,6 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
             <RefreshControl
               refreshing={false}
               onRefresh={() => {
-                console.log('[HomeScreen] Manual refresh triggered');
                 refreshLocalCache();
               }}
               tintColor="#BC002A"
@@ -1108,49 +1001,13 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         />
       </Animated.View>
 
-      <StatusViewerModal
-        visible={isViewerVisible}
-        stories={selectedStatusContact?.stories || []}
-        contactName={selectedStatusContact?.name || ''}
-        contactAvatar={proxySupabaseUrl(selectedStatusContact?.avatar) || ''}
-        statusOwnerId={selectedStatusContact?.id}
-        currentUserId={currentUser?.id}
-        onStorySeen={(storyId) => {
-          if (!currentUser || selectedStatusContact?.id === currentUser.id) return;
-          addStatusView(storyId);
-        }}
-        onReact={(storyId) => {
-          toggleStatusLike(storyId);
-        }}
-        onDeleteStory={(storyId) => {
-          deleteStatus(storyId);
-          const remaining = (selectedStatusContact?.stories || []).filter(s => s.id !== storyId);
-          if (remaining.length === 0) {
-            setIsViewerVisible(false);
-          } else {
-            setSelectedStatusContact(prev => prev ? { ...prev, stories: remaining } : prev);
-          }
-        }}
-        onReply={(story, text) => {
-          if (!selectedStatusContact?.id || !currentUser || selectedStatusContact.id === currentUser.id) return;
-          sendChatMessage(selectedStatusContact.id, text, {
-            type: 'status_reply',
-            url: story.url,
-            caption: story.caption,
-          });
-        }}
-        onClose={closeModalRobustly}
-        onComplete={closeModalRobustly}
-        initialLayout={statusInitialLayout}
-      />
-
       <MediaPreviewModal
         visible={!!statusMediaPreview}
         mediaUri={statusMediaPreview?.uri || ''}
         mediaType={statusMediaPreview?.type || 'image'}
         onClose={closeModalRobustly}
         onSend={handleSendStatus}
-        isUploading={!!uploadingStory}
+        isUploading={isStatusSyncing || pendingStatusUploads.length > 0}
         mode="status"
       />
 
@@ -1171,12 +1028,6 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         }}
       />
 
-      <NoteCreatorModal
-        visible={isNoteModalVisible}
-        onClose={closeModalRobustly}
-      />
-
-      {/* Glass Custom Dropdown Menu */}
       <NoteCreatorModal
         visible={isNoteModalVisible}
         onClose={closeModalRobustly}

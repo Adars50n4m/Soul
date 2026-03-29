@@ -91,7 +91,7 @@ export const TURN_USERNAME_2 = getEnvVar('EXPO_PUBLIC_TURN_USERNAME_2', '');
 export const TURN_PASSWORD_2 = getEnvVar('EXPO_PUBLIC_TURN_PASSWORD_2', '');
 
 // 7. Feature Flags
-export const USE_R2 = getEnvVar('EXPO_PUBLIC_USE_R2', 'false') === 'true';
+export const USE_R2 = getEnvVar('EXPO_PUBLIC_USE_R2', 'true') === 'true';
 
 // 7. Connectivity Constants
 export const CONNECTIVITY_TIMEOUT = 10000; // 10s

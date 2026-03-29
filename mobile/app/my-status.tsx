@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,424 +8,314 @@ import {
   FlatList,
   Alert,
   StatusBar,
-  ScrollView,
-  TextInput,
+  ActivityIndicator,
   RefreshControl,
-  Platform,
-  Dimensions,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
-import { useApp } from '../context/AppContext';
-import { StatusViewerModal } from '../components/StatusViewerModal';
-import { MediaPickerSheet } from '../components/MediaPickerSheet';
-import { MediaPreviewModal } from '../components/MediaPreviewModal';
+import { statusService } from '../services/StatusService';
+import { CachedStatus } from '../types';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
-import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
-import { storageService } from '../services/StorageService';
+import { SoulAvatar } from '../components/SoulAvatar';
+import { useApp } from '../context/AppContext';
+import { MediaPickerSheet } from '../components/MediaPickerSheet';
 
-const DEFAULT_AVATAR = '';
+interface StatusWithViewers extends CachedStatus {
+  viewers: any[];
+}
+
+const getRelativeTime = (timestamp: number) => {
+  const now = Date.now();
+  const diff = now - timestamp;
+  if (diff < 60000) return 'Just now';
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return `${mins} min${mins > 1 ? 's' : ''} ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+  return new Date(timestamp).toLocaleDateString();
+};
 
 export default function MyStatusScreen() {
   const router = useRouter();
-  const {
-    currentUser,
-    statuses,
-    addStatus,
-    deleteStatus,
-    activeTheme,
-    toggleStatusLike,
-    addStatusView,
-  } = useApp();
-
-  const [isStatusViewerVisible, setIsStatusViewerVisible] = useState(false);
-  const [selectedStoryIndex, setSelectedStoryIndex] = useState(0);
+  const insets = useSafeAreaInsets();
+  const { currentUser, activeTheme } = useApp();
+  const [myStatuses, setMyStatuses] = useState<StatusWithViewers[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [isMediaPickerVisible, setIsMediaPickerVisible] = useState(false);
-  const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' | 'audio' } | null>(null);
-  const [isUploadingStatus, setIsUploadingStatus] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
 
-  const myStories = useMemo(() => {
-    if (!currentUser) return [];
-    return statuses
-      .filter((s) => s.userId === currentUser.id)
-      .map((s) => ({
-        id: s.id,
-        url: s.mediaUrl,
-        type: s.mediaType,
-        timestamp: s.timestamp,
-        seen: false, // Not used for own stories anyway
-        caption: s.caption,
-        userId: s.userId,
-        likes: s.likes,
-        views: s.views,
-        music: s.music,
-      }));
-  }, [statuses, currentUser]);
-
-  const handleBack = () => router.back();
-
-  const handleStoryPress = (index: number) => {
-    setSelectedStoryIndex(index);
-    setIsStatusViewerVisible(true);
-  };
-
-  const resolveStatusAssetUri = async (asset: ImagePicker.ImagePickerAsset): Promise<string> => {
-    let resolvedUri = asset.uri;
-    if (resolvedUri.startsWith('ph://') && asset.assetId) {
-      try {
-        const info = await MediaLibrary.getAssetInfoAsync(asset.assetId);
-        resolvedUri = info.localUri || info.uri || resolvedUri;
-      } catch {}
-    }
-    if (resolvedUri.startsWith('file://')) {
-      const ext = asset.fileName?.split('.').pop() || (asset.type === 'video' ? 'mp4' : 'jpg');
-      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
-      if (!cacheDir) return resolvedUri;
-      const target = `${cacheDir}status-${Date.now()}.${ext}`;
-      try {
-        await FileSystem.copyAsync({ from: resolvedUri, to: target });
-        resolvedUri = target;
-      } catch {}
-    }
-    return resolvedUri;
-  };
-
-  const handleSendStatus = async (mediaList: { uri: string; type: 'image' | 'video' | 'audio' }[], caption?: string) => {
-    if (!currentUser || mediaList.length === 0) return;
-    setIsUploadingStatus(true);
-    
+  const loadData = useCallback(async () => {
     try {
-      const item = mediaList[0];
-      const safeUri = item.uri;
-
-      const expiresAt = new Date();
-      expiresAt.setHours(expiresAt.getHours() + 24);
-      
-      const mediaType = item.type === 'video' ? 'video' : 'image';
-      const timestamp = new Date().toISOString();
-      const expiresAtString = expiresAt.toISOString();
-      const statusCaption = caption || '';
-
-      // Offline First: pass the local URI! AppContext handles the actual storage/upload
-      addStatus({
-        userId: currentUser.id,
-        mediaUrl: safeUri, // Will be swapped with the remote URL after upload
-        localUri: safeUri,
-        mediaType,
-        timestamp,
-        expiresAt: expiresAtString,
-        caption: statusCaption,
-      });
-      
-      setStatusMediaPreview(null);
-      setIsUploadingStatus(false);
-      setIsMediaPickerVisible(false);
-    } catch (error) {
-      console.error('Failed to create status:', error);
-      Alert.alert('Error', 'Failed to create status. Please try again.');
-      setIsUploadingStatus(false);
-      setIsMediaPickerVisible(false);
+      const data = await statusService.getMyStatuses();
+      const withViewers = await Promise.all(
+        data.map(async (status) => {
+          const viewers = await statusService.getMyStatusViewers(status.id);
+          return { ...status, viewers };
+        })
+      );
+      setMyStatuses(withViewers);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadData();
   };
 
-  const createStatus = async (result: ImagePicker.ImagePickerResult) => {
-    if (!result.canceled && result.assets?.[0] && currentUser) {
-      const asset = result.assets[0];
-      setStatusMediaPreview({
-        uri: asset.uri,
-        type: asset.type === 'video' ? 'video' : 'image'
-      });
-    }
+  const createStatus = async (asset: any) => {
     setIsMediaPickerVisible(false);
+    try {
+      setLoading(true);
+      await statusService.uploadStory(asset.uri, asset.type === 'video' ? 'video' : 'image', '');
+      setTimeout(() => loadData(), 500);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSelectCamera = async () => {
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) return Alert.alert('Permission needed', 'Camera permission required.');
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') return Alert.alert('Permission needed', 'Camera permission required.');
+    
     const result = await ImagePicker.launchCameraAsync({
       quality: 0.8,
       mediaTypes: ImagePicker.MediaTypeOptions.All,
       allowsEditing: true,
       videoMaxDuration: 60,
     });
-    await createStatus(result);
+    
+    if (!result.canceled && result.assets[0]) {
+      await createStatus(result.assets[0]);
+    }
   };
 
-  const handleSelectGallery = async (providedAsset?: MediaLibrary.Asset) => {
+  const handleSelectGallery = async (providedAsset?: any) => {
     if (providedAsset) {
-      const result: ImagePicker.ImagePickerResult = {
-        canceled: false,
-        assets: [{
-          uri: providedAsset.uri,
-          width: providedAsset.width,
-          height: providedAsset.height,
-          type: providedAsset.mediaType === 'video' ? 'video' : 'image',
-          assetId: providedAsset.id,
-          fileName: providedAsset.filename,
-          fileSize: 0,
-        }]
-      };
-      await createStatus(result);
-      return;
-    }
-
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return Alert.alert('Permission needed', 'Gallery permission required.');
-    const result = await ImagePicker.launchImageLibraryAsync({
-      quality: 0.8,
-      mediaTypes: ImagePicker.MediaTypeOptions.All,
-      allowsEditing: true,
-      videoMaxDuration: 60,
-      legacy: true,
-      preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
-    });
-    await createStatus(result);
-  };
-
-  const formatRelativeTime = (timestamp: string) => {
-    try {
-      const date = new Date(timestamp);
-      const now = new Date();
-      const diffMs = now.getTime() - date.getTime();
-      const diffSec = Math.floor(diffMs / 1000);
-      const diffMin = Math.floor(diffSec / 60);
-      const diffHr = Math.floor(diffMin / 60);
-
-      if (diffSec < 60) return 'Just now';
-      if (diffMin < 60) return `${diffMin}m ago`;
-      if (diffHr < 24) return `${diffHr}h ago`;
-      return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-    } catch (e) {
-      return 'Just now';
+      await createStatus(providedAsset);
+    } else {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.All,
+        allowsEditing: true,
+        quality: 0.8,
+      });
+      if (!result.canceled && result.assets[0]) {
+        await createStatus(result.assets[0]);
+      }
     }
   };
 
-  const renderStoryItem = ({ item, index }: { item: any; index: number }) => {
-    const viewCount = item.views?.length || 0;
-    const viewText = viewCount === 0 ? 'No views yet' : `${viewCount} views`;
+  const handleDelete = (status: StatusWithViewers) => {
+    Alert.alert(
+      'Delete status?',
+      'This status update will be permanently removed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Delete', 
+          style: 'destructive', 
+          onPress: async () => {
+             await statusService.deleteMyStatus(status.id, status.mediaKey || '');
+             loadData();
+          }
+        }
+      ]
+    );
+  };
+
+  const renderItem = ({ item, index }: { item: StatusWithViewers, index: number }) => {
+    const timeStr = getRelativeTime(item.createdAt);
+    const hasViewers = item.viewers && item.viewers.length > 0;
     
     return (
-      <View style={styles.storyRow}>
-        <Pressable style={styles.storyInfo} onPress={() => handleStoryPress(index)}>
-          <Image source={{ uri: item.url }} style={styles.storyThumbnail} />
-          <View style={styles.storyDetails}>
-            <Text style={styles.viewCountText}>{viewText}</Text>
-            <Text style={styles.timeText}>{formatRelativeTime(item.timestamp)}</Text>
-          </View>
-        </Pressable>
-        <Pressable 
-          style={styles.moreButton} 
-          onPress={() => {
-            Alert.alert(
-              'Delete status?',
-              'This status update will be permanently deleted.',
-              [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Delete', style: 'destructive', onPress: () => deleteStatus(item.id) },
-              ]
-            );
-          }}
-        >
-          <MaterialIcons name="more-horiz" size={24} color="rgba(255,255,255,0.6)" />
-        </Pressable>
+      <View style={styles.itemWrapper}>
+        <View style={styles.statusItem}>
+          <Pressable 
+            style={styles.itemMain}
+            onPress={() => router.push({ pathname: '/view-status', params: { id: currentUser?.id } })}
+          >
+            <View style={styles.avatarContainer}>
+               <SoulAvatar 
+                 uri={item.mediaLocalPath || item.mediaUrl}
+                 size={48} 
+               />
+            </View>
+            <View style={styles.itemInfo}>
+              <Text style={styles.viewText}>
+                {hasViewers ? `Seen by ${item.viewers.length}` : 'No views yet'}
+              </Text>
+              <Text style={styles.relativeTime}>{timeStr}</Text>
+            </View>
+          </Pressable>
+          
+          <Pressable 
+            style={styles.optionBtn} 
+            onPress={() => isEditing ? handleDelete(item) : null}
+          >
+            {isEditing ? (
+              <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+            ) : (
+              <MaterialIcons name="more-horiz" size={24} color="rgba(255,255,255,0.4)" />
+            )}
+          </Pressable>
+        </View>
+        {index < myStatuses.length - 1 && <View style={styles.separator} />}
       </View>
     );
   };
 
-
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
+      <LinearGradient colors={['#000', '#0a0a0a']} style={StyleSheet.absoluteFill} />
       <StatusBar barStyle="light-content" />
       
       {/* Header */}
-      <View style={styles.header}>
-        <Pressable onPress={handleBack} style={styles.headerIcon}>
-          <MaterialIcons name="chevron-left" size={32} color="#fff" />
+      <View style={[styles.header, { paddingTop: insets.top + 10 }]}>
+        <Pressable onPress={() => router.back()} style={styles.backBtn}>
+          <Ionicons name="chevron-back" size={28} color="#fff" />
         </Pressable>
         <Text style={styles.headerTitle}>My status</Text>
-        <Pressable style={styles.headerIcon}>
-          <Text style={styles.editText}>Edit</Text>
+        <Pressable onPress={() => setIsEditing(!isEditing)} style={styles.editBtn}>
+          <Text style={styles.editText}>{isEditing ? 'Done' : 'Edit'}</Text>
         </Pressable>
       </View>
 
-      <View style={styles.content}>
-        <View style={styles.statusBox}>
-          <FlatList
-            data={myStories}
-            renderItem={renderStoryItem}
-            keyExtractor={(item) => item.id}
-            scrollEnabled={false}
-          />
-          
-          <Pressable style={styles.addStatusRow} onPress={() => setIsMediaPickerVisible(true)}>
-            <View style={styles.addIconContainer}>
-              <MaterialIcons name="add" size={24} color={activeTheme.primary} />
-            </View>
-            <Text style={styles.addStatusText}>Add status</Text>
-          </Pressable>
-        </View>
+      {loading && !refreshing ? (
+        <ActivityIndicator color="#8C0016" style={{ marginTop: 50 }} />
+      ) : (
+        <View style={styles.content}>
+          <View style={styles.card}>
+            <FlatList
+              data={myStatuses}
+              renderItem={renderItem}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.list}
+              scrollEnabled={myStatuses.length > 5}
+              ListEmptyComponent={() => <View style={{ height: 10 }} />}
+              refreshControl={
+                <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
+              }
+            />
+            
+            {/* Add Status Row (Integrated in Card) */}
+            <View style={styles.separator} />
+            <Pressable 
+              style={styles.addStatusRow}
+              onPress={() => setIsMediaPickerVisible(true)}
+            >
+              <View style={[styles.plusContainer, { backgroundColor: activeTheme.primary }]}>
+                <Ionicons name="add" size={24} color="#fff" />
+              </View>
+              <Text style={styles.addStatusText}>Add status</Text>
+            </Pressable>
+          </View>
 
-        <View style={styles.encryptionNotice}>
-          <View style={styles.encryptionIconRow}>
-             <MaterialIcons name="lock" size={12} color="rgba(255,255,255,0.4)" />
-             <Text style={styles.encryptionText}>
-               Your status updates are <Text style={{ color: activeTheme.primary }}>end-to-end encrypted</Text>. They will disappear after 24 hours.
-             </Text>
+          {/* Footer */}
+          <View style={styles.footer}>
+            <View style={styles.privacyRow}>
+              <Ionicons name="lock-closed" size={12} color="rgba(255,255,255,0.4)" style={{ marginRight: 6 }} />
+              <Text style={styles.footerText}>
+                Your status updates are <Text style={[styles.encryptedText, { color: activeTheme.primary }]}>end-to-end encrypted</Text>. They will disappear after 24 hours.
+              </Text>
+            </View>
           </View>
         </View>
-      </View>
-
-      <StatusViewerModal
-        visible={isStatusViewerVisible}
-        stories={myStories}
-        contactName="My status"
-        contactAvatar={currentUser?.avatar || DEFAULT_AVATAR}
-        statusOwnerId={currentUser?.id}
-        currentUserId={currentUser?.id}
-        onDeleteStory={(storyId) => {
-          deleteStatus(storyId);
-          if (myStories.length <= 1) setIsStatusViewerVisible(false);
-        }}
-        onClose={() => setIsStatusViewerVisible(false)}
-        onComplete={() => setIsStatusViewerVisible(false)}
-      />
+      )}
 
       <MediaPickerSheet
         visible={isMediaPickerVisible}
         onClose={() => setIsMediaPickerVisible(false)}
         onSelectCamera={handleSelectCamera}
         onSelectGallery={() => handleSelectGallery()}
-        onSelectAssets={(assets) => handleSelectGallery(assets[0])}
-        onSelectAudio={() => {
-            setIsMediaPickerVisible(false);
-            Alert.alert("Soul Audio", "Audio status coming soon!");
-        }}
-        onSelectNote={() => {
-            setIsMediaPickerVisible(false);
-            Alert.alert("Soul Notes", "Leave a note from the Home screen!");
+        onSelectAudio={() => {}}
+        onSelectNote={() => {}}
+        onSelectAssets={(assets) => {
+          if (assets.length > 0) handleSelectGallery(assets[0]);
         }}
       />
-
-      <MediaPreviewModal
-        visible={!!statusMediaPreview}
-        mediaUri={statusMediaPreview?.uri || ''}
-        mediaType={statusMediaPreview?.type || 'image'}
-        onClose={() => setStatusMediaPreview(null)}
-        onSend={handleSendStatus}
-        isUploading={isUploadingStatus}
-        mode="status"
-      />
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
+  container: { flex: 1, backgroundColor: '#000' },
+  header: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'space-between', 
+    paddingHorizontal: 20, 
+    paddingBottom: 15
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 8,
-    height: 56,
-  },
-  headerIcon: {
-    width: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  editText: {
-    color: '#fff',
-    fontSize: 16,
-  },
-  content: {
-    flex: 1,
-    paddingTop: 20,
-  },
-  statusBox: {
-    backgroundColor: '#1c1c1e',
-    marginHorizontal: 16,
-    borderRadius: 12,
+  backBtn: { padding: 5, marginLeft: -5 },
+  editBtn: { padding: 5 },
+  editText: { color: '#fff', fontSize: 17, fontWeight: '400' },
+  headerTitle: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  content: { flex: 1, paddingHorizontal: 16 },
+  card: { 
+    backgroundColor: 'rgba(255,255,255,0.08)', 
+    borderRadius: 16, 
     overflow: 'hidden',
+    marginTop: 10
   },
-  storyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255,255,255,0.1)',
+  list: { paddingVertical: 5 },
+  itemWrapper: { paddingHorizontal: 16 },
+  statusItem: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    paddingVertical: 12,
   },
-  storyInfo: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
+  itemMain: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  avatarContainer: {
+    marginRight: 15,
   },
-  storyThumbnail: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    marginRight: 12,
-  },
-  storyDetails: {
-    flex: 1,
-  },
-  viewCountText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  timeText: {
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 14,
-    marginTop: 2,
-  },
-  moreButton: {
-    padding: 8,
+  itemInfo: { flex: 1 },
+  viewText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  relativeTime: { color: 'rgba(255,255,255,0.5)', fontSize: 14, marginTop: 2 },
+  optionBtn: { padding: 8, marginRight: -8 },
+  separator: { 
+    height: 0.5, 
+    backgroundColor: 'rgba(255,255,255,0.1)', 
+    marginLeft: 63 // aligns with the info text
   },
   addStatusRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
+    padding: 16,
+    paddingLeft: 16,
   },
-  addIconContainer: {
+  plusContainer: {
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
-  },
-  addStatusText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '500',
-  },
-  encryptionNotice: {
-    marginTop: 30,
-    paddingHorizontal: 30,
     alignItems: 'center',
+    marginRight: 15,
   },
-  encryptionIconRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flexWrap: 'wrap',
-    justifyContent: 'center',
+  addStatusText: { color: '#fff', fontSize: 16, fontWeight: '500' },
+  footer: { 
+    marginTop: 25, 
+    alignItems: 'center', 
+    paddingHorizontal: 30 
   },
-  encryptionText: {
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 12,
-    textAlign: 'center',
+  privacyRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  footerText: { 
+    color: 'rgba(255,255,255,0.4)', 
+    fontSize: 12, 
     lineHeight: 18,
+    textAlign: 'center' 
   },
+  encryptedText: { fontWeight: '500' }
 });

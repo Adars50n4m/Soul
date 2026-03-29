@@ -12,46 +12,49 @@ import {
   KeyboardAvoidingView,
   Platform,
   BackHandler,
+  ActivityIndicator
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import GlassView from './ui/GlassView';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
-import { SoulAvatar } from './SoulAvatar';
-import ProgressiveBlur from './chat/ProgressiveBlur';
+import { BlurView } from 'expo-blur';
 import Animated, { 
   useSharedValue, 
   useAnimatedStyle, 
   withTiming,
   withSpring,
-  withSequence,
   runOnJS,
   Easing,
   cancelAnimation,
   interpolate,
   Extrapolate,
 } from 'react-native-reanimated';
-import { Story } from '../types';
-import { useApp } from '../context/AppContext';
-import { proxySupabaseUrl } from '../config/api';
 
+import { statusService } from '../services/StatusService';
+import { CachedStatus, CachedUser, UserStatusGroup } from '../types';
+import { SoulAvatar } from './SoulAvatar';
+import GlassView from './ui/GlassView';
+import ProgressiveBlur from './chat/ProgressiveBlur';
 
-interface StatusViewerModalProps {
+interface StatusViewerProps {
   visible: boolean;
-  stories: Story[];
-  contactName: string;
-  contactAvatar: string;
-  statusOwnerId?: string;
-  currentUserId?: string;
-  onReact?: (storyId: string) => void;
-  onReply?: (story: Story, text: string) => void;
-  onDeleteStory?: (storyId: string) => void;
-  onStorySeen?: (storyId: string) => void;
+  group: UserStatusGroup;
   onClose: () => void;
-  onComplete: () => void;
-  initialLayout?: { x: number; y: number; width: number; height: number } | null;
+  onComplete?: () => void;
 }
 
-const ProgressBar = ({ index, currentIndex, duration, onComplete, paused }: { index: number, currentIndex: number, duration: number, onComplete: () => void, paused: boolean }) => {
+const ProgressBar = ({ 
+    index, 
+    currentIndex, 
+    duration, 
+    onComplete, 
+    paused 
+}: { 
+    index: number, 
+    currentIndex: number, 
+    duration: number, 
+    onComplete: () => void, 
+    paused: boolean 
+}) => {
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -72,7 +75,7 @@ const ProgressBar = ({ index, currentIndex, duration, onComplete, paused }: { in
       progress.value = 0;
     }
     return () => cancelAnimation(progress);
-  }, [currentIndex, index, paused, duration, onComplete]);
+  }, [currentIndex, index, paused, duration]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     width: `${progress.value * 100}%`,
@@ -87,585 +90,173 @@ const ProgressBar = ({ index, currentIndex, duration, onComplete, paused }: { in
 
 export const StatusViewerModal = ({
   visible,
-  stories,
-  contactName,
-  contactAvatar,
-  statusOwnerId,
-  currentUserId,
-  onReact,
-  onReply,
-  onDeleteStory,
-  onStorySeen,
+  group,
   onClose,
   onComplete,
-  initialLayout,
-}: StatusViewerModalProps) => {
-  const morphSpringConfig = {
-    damping: 15,
-    stiffness: 100,
-    mass: 1,
-  };
+}: StatusViewerProps) => {
   const { width, height } = useWindowDimensions();
-  const { activeTheme, contacts, currentUser } = useApp();
   const insets = useSafeAreaInsets();
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [replyText, setReplyText] = useState('');
-  const [mediaLoadFailed, setMediaLoadFailed] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [isUIVisible, setIsUIVisible] = useState(true);
-  const [isLongPressActive, setIsLongPressActive] = useState(false);
-  const [isLiked, setIsLiked] = useState(false);
-  const [showViewers, setShowViewers] = useState(false);
-  const sessionRef = useRef(0);
-  const [prevVisible, setPrevVisible] = useState(visible);
-  const [isInternalVisible, setIsInternalVisible] = useState(visible);
-  const morphProgress = useSharedValue(0);
+  const [mediaSource, setMediaSource] = useState<{uri: string, isLocal: boolean} | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  // Use render-time state reset to avoid cascading renders in useEffect
-  if (visible !== prevVisible) {
-      if (visible) {
-          sessionRef.current += 1;
-          setCurrentIndex(0);
-          setReplyText('');
-          setMediaLoadFailed(false);
-          setShowViewers(false);
-          setIsInternalVisible(true);
-          morphProgress.value = withSpring(1, morphSpringConfig);
-      }
-      setPrevVisible(visible);
-  }
-  
-  const heartScale = useSharedValue(1);
-  const viewersTranslateY = useSharedValue(0);
-  const backdropOpacity = useSharedValue(0);
+  const currentStatus = group.statuses[currentIndex];
 
-  const containerAnimatedStyle = useAnimatedStyle(() => {
-    if (!initialLayout) {
-      return {
-        opacity: morphProgress.value,
-        transform: [
-          { scale: 0.94 + (morphProgress.value * 0.06) } as any,
-          { translateY: (1 - morphProgress.value) * 20 } as any
-        ],
-      };
+  useEffect(() => {
+    if (visible && currentStatus) {
+      setLoading(true);
+      statusService.getMediaSource(currentStatus.id, (currentStatus as any).mediaKey || '')
+        .then(source => {
+          setMediaSource(source);
+          setLoading(false);
+          // Mark viewed
+          statusService.onStatusViewed(currentStatus.id, 'me'); // 'me' placeholder, StatusService handles actual viewer context
+        });
     }
-
-    const { x, y, width: iWidth, height: iHeight } = initialLayout;
-
-    return {
-      position: 'absolute',
-      top: interpolate(morphProgress.value, [0, 1], [y, 0]),
-      left: interpolate(morphProgress.value, [0, 1], [x, 0]),
-      width: interpolate(morphProgress.value, [0, 1], [iWidth, width]),
-      height: interpolate(morphProgress.value, [0, 1], [iHeight, height], Extrapolate.IDENTITY),
-      borderRadius: interpolate(morphProgress.value, [0, 1], [28, 0], Extrapolate.CLAMP),
-      opacity: interpolate(morphProgress.value, [0, 0.05], [0, 1], Extrapolate.CLAMP),
-      overflow: 'hidden',
-    };
-  });
-  const currentStory = stories[currentIndex] || stories[0] || null;
-  const isOwnStatus = !!currentUserId && !!statusOwnerId && statusOwnerId === currentUserId;
-
-  useEffect(() => {
-    if (visible) {
-      viewersTranslateY.value = height;
-      backdropOpacity.value = 0;
-      // On Android, hiding the status bar inside a modal can cause layout shifts
-      if (Platform.OS === 'android') {
-        RNStatusBar.setTranslucent(true);
-        RNStatusBar.setBackgroundColor('transparent');
-      }
-    }
-  }, [visible, height]);
-
-  useEffect(() => {
-    setMediaLoadFailed(false);
-    // Sync liked state with current story
-    setIsLiked(currentStory?.likes?.includes(currentUserId || '') || false);
-  }, [currentStory?.id, currentUserId]);
-
-  useEffect(() => {
-    if (visible && currentStory?.id && onStorySeen) {
-      onStorySeen(currentStory.id);
-    }
-  }, [visible, currentStory?.id, onStorySeen]);
-
-  // Android: handle hardware back button (Modal does this via onRequestClose, but View overlay needs it explicit)
-  useEffect(() => {
-    if (Platform.OS !== 'android' || !visible) return;
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      handleClose();
-      return true;
-    });
-    return () => sub.remove();
-  }, [visible]);
-
-  useEffect(() => {
-    if (!visible && isInternalVisible) {
-      handleClose();
-    }
-  }, [visible, isInternalVisible]);
-
-  const handleClose = () => {
-    morphProgress.value = withSpring(0, morphSpringConfig, (finished) => {
-      if (finished) {
-        runOnJS(setIsInternalVisible)(false);
-        runOnJS(onClose)();
-      }
-    });
-  };
-
-  const handleComplete = () => {
-    morphProgress.value = withSpring(0, morphSpringConfig, (finished) => {
-      if (finished) {
-        runOnJS(setIsInternalVisible)(false);
-        runOnJS(onComplete)();
-      }
-    });
-  };
-
-  // Capture the session at render time so stale animation callbacks are ignored
-  const activeSession = sessionRef.current;
+  }, [currentStatus?.id, visible]);
 
   const handleNext = () => {
-    if (sessionRef.current !== activeSession) return; // Stale callback from previous open
-    if (currentIndex < stories.length - 1) {
+    if (currentIndex < group.statuses.length - 1) {
       setCurrentIndex(prev => prev + 1);
     } else {
-      handleComplete(); // Finished all stories
+      if (onComplete) {
+        onComplete();
+      } else {
+        onClose();
+      }
     }
   };
 
   const handlePrev = () => {
     if (currentIndex > 0) {
       setCurrentIndex(prev => prev - 1);
-    } else {
-      // Create a restart feel or do nothing
-       setCurrentIndex(0);
     }
   };
 
-  const handleHeartPress = () => {
-    const nextState = !isLiked;
-    setIsLiked(nextState);
-    if (onReact) onReact(currentStory.id);
+  const handleLongPressStart = () => setIsPaused(true);
+  const handleLongPressEnd = () => setIsPaused(false);
 
-    // Bouncy heart pop animation
-    heartScale.value = withSequence(
-      withSpring(1.4, { damping: 10, stiffness: 100 }),
-      withSpring(1, { damping: 12, stiffness: 120 })
-    );
-  };
+  if (!visible || !currentStatus) return null;
 
-  const heartAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: heartScale.value }],
-  }));
-
-  const viewersAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: viewersTranslateY.value }],
-  }));
-
-  const backdropAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: backdropOpacity.value,
-  }));
-
-  const toggleViewers = (show: boolean) => {
-    setShowViewers(show);
-    setIsPaused(show);
-    
-    viewersTranslateY.value = withTiming(show ? 0 : height, {
-      duration: 350,
-      easing: Easing.out(Easing.quad),
-    });
-    
-    backdropOpacity.value = withTiming(show ? 1 : 0, { duration: 300 });
-  };
-
-  const getViewerDetails = (userIds: string[] = []) => {
-    return userIds.map(id => {
-      if (id === currentUser?.id) return { id: currentUser.id, name: currentUser.name, avatar: currentUser.avatar };
-      const contact = contacts.find(u => u.id === id);
-  return contact || { id, name: 'Unknown User', avatar: '' };
-    });
-  };
-
-
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (visible) {
-      setNow(Date.now());
-    }
-  }, [visible]);
-
-  const formatStoryTime = (value?: string) => {
-    if (!value) return '';
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return value;
-    const diffMs = now - parsed.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
-    if (diffMin < 1) return 'now';
-    if (diffMin < 60) return `${diffMin}m`;
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h`;
-    return parsed.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  };
-
-  const handleReplySend = () => {
-    const text = replyText.trim();
-    if (!text || !onReply) return;
-    onReply(currentStory, text);
-    setReplyText('');
-  };
-
-  const handleMediaError = () => {
-    setMediaLoadFailed(true);
-    if (currentIndex < stories.length - 1) {
-      setTimeout(() => {
-        setCurrentIndex(prev => Math.min(prev + 1, stories.length - 1));
-      }, 250);
-    }
-  };
-
-  const handlePause = () => {
-    setIsPaused(true);
-    setIsUIVisible(false);
-  };
-
-  const handleResume = () => {
-    setIsPaused(false);
-    setIsUIVisible(true);
-  };
-
-  if (!isInternalVisible || !currentStory) return null;
-
-  const content = (
-        <Animated.View style={[styles.container, StyleSheet.absoluteFillObject, containerAnimatedStyle]}>
-        <RNStatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+  return (
+    <Modal visible={visible} transparent animationType="fade" statusBarTranslucent>
+      <View style={styles.container}>
+        <RNStatusBar hidden />
         
-        {/* Background Backdrop */}
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: Platform.OS === 'android' ? 'rgba(0,0,0,0.4)' : '#000' }]} />
-        
-        <GlassView intensity={24} tint="dark" style={StyleSheet.absoluteFill} />
-        
-        {isUIVisible && (
-          <>
-            <ProgressiveBlur position="top" height={220} intensity={40} />
-            <ProgressiveBlur position="bottom" height={350} intensity={40} />
-          </>
-        )}
+        {/* Fill Background */}
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000' }]} />
 
-        {/* Main Content */}
-        <View
-          style={[
-            styles.contentContainer,
-            { paddingTop: insets.top, paddingBottom: insets.bottom + 20 },
-            currentStory.type === 'text' && { backgroundColor: currentStory.backgroundColor || '#151515' }
-          ]}
-        >
-          {currentStory.type === 'image' && !mediaLoadFailed && !!currentStory.url && (
-            <Image
-              source={{ uri: proxySupabaseUrl(currentStory.url) }}
-              style={styles.mediaBackdrop}
-              resizeMode="cover"
-              blurRadius={28}
-            />
-          )}
-          {currentStory.type === 'text' ? (
-             <View style={styles.textStatusContainer}>
-               <Text 
-                 style={[
-                   styles.captionText, 
-                   { 
-                     fontSize: Math.max(24, 42 - (currentStory.caption?.length || 0) / 4), 
-                     paddingHorizontal: 20,
-                     fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
-                     lineHeight: 52,
-                     textAlign: 'center'
-                   }
-                 ]}
-                >
-                 {currentStory.caption || currentStory.url} 
-               </Text>
-             </View>
-          ) : currentStory.type === 'image' && !mediaLoadFailed && !!currentStory.url ? (
-            <Image
-              source={{ uri: proxySupabaseUrl(currentStory.url) }}
-              style={[styles.media, { width: width }]}
-              resizeMode="contain"
-              onError={handleMediaError}
-            />
-          ) : (
-            <View style={[styles.media, styles.videoPlaceholder, { width: width }]}>
-              <MaterialIcons
-                name={currentStory.type === 'video' ? 'play-circle-filled' : 'broken-image'}
-                size={58}
-                color="rgba(255,255,255,0.95)"
-              />
-              <Text style={styles.videoPlaceholderText}>
-                {currentStory.type === 'video' ? 'Video playback coming soon' : 'Image unavailable'}
-              </Text>
-            </View>
-          )}
+        {/* Media Display */}
+        <View style={StyleSheet.absoluteFill}>
+            {mediaSource ? (
+                currentStatus.mediaType === 'image' ? (
+                    <Image 
+                        source={{ uri: mediaSource.uri }} 
+                        style={styles.fullMedia} 
+                        resizeMode="contain" 
+                    />
+                ) : (
+                    <View style={styles.placeholderContainer}>
+                        <ActivityIndicator color="#fff" />
+                        <Text style={{color: '#fff', marginTop: 10}}>Video support refactoring...</Text>
+                    </View>
+                )
+            ) : (
+                <View style={styles.placeholderContainer}>
+                    <ActivityIndicator color="#fff" size="large" />
+                </View>
+            )}
         </View>
 
-        {/* Overlay UI */}
-        <View style={[styles.overlay, { paddingTop: Platform.OS === 'android' ? insets.top + 10 : insets.top, opacity: isUIVisible ? 1 : 0 }]} pointerEvents={isUIVisible ? 'auto' : 'none'}>
-             {/* Progress Bars */}
-             <View style={styles.progressContainer}>
-                {stories.map((story, index) => (
+        {/* Top Overlay: Progress Bars & Info */}
+        <View style={[styles.topOverlay, { paddingTop: insets.top + 10 }]}>
+            <View style={styles.progressContainer}>
+                {group.statuses.map((_, i) => (
                     <ProgressBar 
-                        key={story.id} 
-                        index={index} 
+                        key={group.statuses[i].id} 
+                        index={i} 
                         currentIndex={currentIndex} 
-                        duration={story.duration || 10} 
-                        onComplete={handleNext}
-                        paused={isPaused}
+                        duration={currentStatus.duration || 5} 
+                        onComplete={handleNext} 
+                        paused={isPaused} 
                     />
                 ))}
             </View>
 
-            {/* Header */}
             <View style={styles.header}>
                 <View style={styles.userInfo}>
-                    <SoulAvatar uri={contactAvatar} size={44} style={styles.avatar} />
-                    <View style={styles.userTextInfo}>
-                      <Text style={styles.userName}>{contactName}</Text>
-                      <View style={styles.metaRow}>
-                        <Text style={styles.timestamp}>{formatStoryTime(currentStory.timestamp)}</Text>
-                      </View>
+                    <SoulAvatar uri={group.user.avatarUrl || ''} size={40} />
+                    <View style={styles.userNameContainer}>
+                        <Text style={styles.userName}>{group.user.displayName || 'Soulmate'}</Text>
+                        <Text style={styles.timeAgo}>
+                            {new Date(currentStatus.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </Text>
                     </View>
                 </View>
-                <View style={styles.headerActions}>
-                  <Pressable style={styles.iconButton}>
-                    <MaterialIcons name="more-horiz" size={24} color="#fff" />
-                  </Pressable>
-                  <Pressable onPress={handleClose} style={styles.iconButton}>
-                    <MaterialIcons name="close" size={24} color="#fff" />
-                  </Pressable>
-                </View>
-            </View>
-        </View>
-
-        {/* Touch Navigation Overlay */}
-        <View style={[styles.touchOverlay, { bottom: insets.bottom + 188 }]}>
-            <Pressable 
-              style={styles.touchLeft} 
-              onPress={handlePrev} 
-              onLongPress={handlePause}
-              onPressOut={handleResume}
-              delayLongPress={300}
-            />
-            <Pressable 
-              style={styles.touchRight} 
-              onPress={handleNext} 
-              onLongPress={handlePause}
-              onPressOut={handleResume}
-              delayLongPress={300}
-            />
-        </View>
-
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? insets.bottom + 4 : 0}
-          style={[styles.bottomContainer, { paddingBottom: insets.bottom + 12, opacity: isUIVisible ? 1 : 0 }]}
-          pointerEvents={isUIVisible ? 'auto' : 'none'}
-        >
-          {!!currentStory.caption && currentStory.type !== 'text' && (
-            <View style={styles.captionContainer}>
-              <Text style={styles.captionText}>{currentStory.caption}</Text>
-              <View style={styles.captionDivider} />
-            </View>
-          )}
-
-          <View style={styles.bottomActionsRow}>
-            {isOwnStatus ? (
-              <Pressable 
-                style={styles.viewsIndicator}
-                onPress={() => toggleViewers(true)}
-              >
-                <Ionicons name="chevron-up" size={20} color="#fff" />
-                <Text style={styles.viewsCountText}>{currentStory.views?.length || 0} views</Text>
-              </Pressable>
-            ) : (
-              <>
-                <View style={styles.replyInputWrap}>
-                  <TextInput
-                    value={replyText}
-                    onChangeText={setReplyText}
-                    placeholder="Reply"
-                    placeholderTextColor="rgba(255,255,255,0.7)"
-                    style={styles.replyInput}
-                    returnKeyType="send"
-                    onSubmitEditing={handleReplySend}
-                  />
-                </View>
-                <Pressable
-                  style={styles.heartButton}
-                  onPress={handleHeartPress}
-                >
-                  <Animated.View style={heartAnimatedStyle}>
-                    <Ionicons 
-                      name={isLiked ? "heart" : "heart-outline"} 
-                      size={26} 
-                      color={isLiked ? "#FF3B81" : "#fff"} 
-                    />
-                  </Animated.View>
+                <Pressable onPress={onClose} style={styles.closeButton}>
+                    <MaterialIcons name="close" size={28} color="#fff" />
                 </Pressable>
-              </>
-            )}
-          </View>
-        </KeyboardAvoidingView>
+            </View>
+        </View>
 
-        {/* Viewers List Drawer */}
-        {isOwnStatus && (
-          <>
-            <Animated.View 
-              style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 90 }, backdropAnimatedStyle]} 
-              pointerEvents={showViewers ? 'auto' : 'none'}
-            >
-              <Pressable style={{ flex: 1 }} onPress={() => toggleViewers(false)} />
-            </Animated.View>
-            
-            <Animated.View style={[styles.viewersDrawer, { height: height * 0.45 }, viewersAnimatedStyle]}>
-              <View style={styles.drawerHeader}>
-                <View style={styles.drawerHandle} />
-                <View style={styles.drawerTitleRow}>
-                  <Text style={styles.drawerTitle}>Views</Text>
-                  <Pressable onPress={() => toggleViewers(false)}>
-                    <Ionicons name="close" size={24} color="#fff" />
-                  </Pressable>
-                </View>
-              </View>
-              
-              <View style={styles.viewersList}>
-                {currentStory.views && currentStory.views.length > 0 ? (
-                  currentStory.views.map((userId, idx) => {
-                    const user = userId === currentUser?.id ? currentUser : contacts.find(u => u.id === userId);
-                    const liked = currentStory.likes?.includes(userId);
-                    return (
-                      <View key={userId} style={styles.viewerItem}>
-                        <SoulAvatar uri={user?.avatar} size={44} style={styles.viewerAvatar} />
-                        <View style={styles.viewerInfo}>
-                          <Text style={styles.viewerName}>{user?.name || 'Anonymous'}</Text>
-                          <Text style={styles.viewerTime}>Just now</Text>
-                        </View>
-                        {liked && (
-                          <Ionicons name="heart" size={20} color="#FF3B81" />
-                        )}
-                      </View>
-                    );
-                  })
-                ) : (
-                  <View style={styles.emptyViewers}>
-                    <Ionicons name="eye-off-outline" size={48} color="rgba(255,255,255,0.2)" />
-                    <Text style={styles.emptyViewersText}>No views yet</Text>
-                  </View>
-                )}
-              </View>
-            </Animated.View>
-          </>
+        {/* Bottom Overlay: Caption */}
+        {currentStatus.caption && (
+            <View style={[styles.bottomOverlay, { paddingBottom: insets.bottom + 40 }]}>
+                <GlassView intensity={30} tint="dark" style={styles.captionGlass}>
+                    <Text style={styles.captionText}>{currentStatus.caption}</Text>
+                </GlassView>
+            </View>
         )}
 
-      </Animated.View>
-  );
-
-  // Android: use a full-screen View overlay instead of Modal to avoid
-  // Android Dialog bugs where Modal silently fails to re-show after dismiss.
-  if (Platform.OS === 'android') {
-    return (
-      <View 
-        style={styles.androidOverlay} 
-        pointerEvents={visible ? 'auto' : 'none'}
-      >
-        {content}
+        {/* Touch Navigation */}
+        <View style={styles.touchContainer}>
+            <Pressable 
+                style={styles.touchSide} 
+                onPress={handlePrev} 
+                onLongPress={handleLongPressStart}
+                onPressOut={handleLongPressEnd}
+            />
+            <Pressable 
+                style={styles.touchSide} 
+                onPress={handleNext} 
+                onLongPress={handleLongPressStart}
+                onPressOut={handleLongPressEnd}
+            />
+        </View>
       </View>
-    );
-  }
-
-  // iOS: use native Modal for proper window layering
-  return (
-    <Modal visible={isInternalVisible} animationType="none" transparent statusBarTranslucent onRequestClose={handleClose}>
-      {content}
     </Modal>
   );
 };
 
-const captionTextShadow = Platform.select({
-  ios: {
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
-  },
-  default: undefined,
-});
-
 const styles = StyleSheet.create({
-  androidOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 9999,
-    elevation: 50,
-    backgroundColor: '#000',
-  },
   container: {
     flex: 1,
-    backgroundColor: 'black',
-  },
-  contentContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingTop: 60,
-    paddingBottom: 100,
-    paddingHorizontal: 0,
-    overflow: 'hidden',
     backgroundColor: '#000',
   },
-  mediaBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.55,
-    transform: [{ scale: 1.08 }],
-  },
-  media: {
-    height: '100%',
-    borderRadius: 0,
-  },
-  textStatusContainer: {
+  fullMedia: {
     flex: 1,
     width: '100%',
-    alignItems: 'center',
+    height: '100%',
+  },
+  placeholderContainer: {
+    flex: 1,
     justifyContent: 'center',
-    paddingHorizontal: 20,
-  },
-  videoPlaceholder: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
   },
-  videoPlaceholderText: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  overlay: {
+  topOverlay: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    paddingTop: 2,
     zIndex: 10,
+    paddingHorizontal: 10,
   },
   progressContainer: {
     flexDirection: 'row',
-    paddingHorizontal: 10,
-    gap: 4,
     height: 3,
-    marginBottom: 8,
+    gap: 4,
+    marginBottom: 10,
   },
   progressTrack: {
     flex: 1,
@@ -682,273 +273,59 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    zIndex: 20,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
+    paddingHorizontal: 10,
   },
   userInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
   },
-  userTextInfo: {
-    justifyContent: 'center',
-  },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  metaDivider: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 12,
-  },
-  musicText: {
-    color: 'rgba(255,255,255,0.9)',
-    fontSize: 13,
-    fontWeight: '600',
-    marginLeft: 4,
-  },
-  avatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.3)',
+  userNameContainer: {
+    marginLeft: 12,
   },
   userName: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '700',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
-  timestamp: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 13,
+  timeAgo: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 12,
   },
-  floatingMusicContainer: {
-    position: 'absolute',
-    top: 100,
-    right: 20,
-    width: 64,
-    height: 64,
-    zIndex: 20,
+  closeButton: {
+    padding: 8,
   },
-  floatingMusicArt: {
-    width: 54,
-    height: 54,
-    borderRadius: 4,
-    position: 'absolute',
-    top: 0,
-    right: 8,
-    zIndex: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 5,
-  },
-  musicVinyl: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: '#111',
+  bottomOverlay: {
     position: 'absolute',
     bottom: 0,
+    left: 0,
     right: 0,
-    zIndex: 1,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    zIndex: 10,
+    alignItems: 'center',
   },
-  musicVinylCenter: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: '#333',
-    position: 'absolute',
-    top: 17,
-    left: 17,
-  },
-  iconButton: {
-    width: 40,
-    height: 40,
+  captionGlass: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
     borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  touchOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 120,
-    flexDirection: 'row',
-    zIndex: 5,
-  },
-  touchLeft: {
-    flex: 1,
-  },
-  touchRight: {
-    flex: 2, // Larger area for next
-  },
-  bottomContainer: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 16,
-    zIndex: 12,
-  },
-  captionContainer: {
-    marginBottom: 16,
-    alignItems: 'center',
+    maxWidth: '85%',
   },
   captionText: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginBottom: 16,
-    ...captionTextShadow,
-  },
-  captionDivider: {
-    width: '100%',
-    height: 1,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-  },
-  bottomActionsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 12,
-  },
-  replyInputWrap: {
-    flex: 1,
-    borderRadius: 28,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-    height: 54,
-    justifyContent: 'center',
-  },
-  replyInput: {
-    color: '#fff',
     fontSize: 16,
-    paddingHorizontal: 20,
+    textAlign: 'center',
   },
-  heartButton: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  viewsIndicator: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 24,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    alignSelf: 'center',
-  },
-  viewsCountText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  viewersDrawer: {
+  touchContainer: {
     position: 'absolute',
-    bottom: 0,
+    top: 100,
+    bottom: 100,
     left: 0,
     right: 0,
-    backgroundColor: '#1a1a1a',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    zIndex: 100,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    elevation: 20,
-  },
-  drawerHeader: {
-    paddingTop: 12,
-    paddingBottom: 8,
-    alignItems: 'center',
-  },
-  drawerHandle: {
-    width: 36,
-    height: 4,
-    backgroundColor: 'rgba(255,255,255,0.3)',
-    borderRadius: 2,
-    marginBottom: 16,
-  },
-  drawerTitleRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    paddingHorizontal: 20,
-    marginBottom: 12,
+    zIndex: 5,
   },
-  drawerTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  viewersList: {
+  touchSide: {
     flex: 1,
-    paddingHorizontal: 20,
-  },
-  viewerItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    gap: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.05)',
-  },
-  viewerAvatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-  },
-  viewerAvatarSmall: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-  },
-  viewerInfo: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  viewerName: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  viewerTime: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 13,
-    marginTop: 2,
-  },
-  emptyViewers: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingBottom: 40,
-    gap: 12,
-  },
-  emptyViewersText: {
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 16,
-    fontWeight: '500',
-  },
+  }
 });
