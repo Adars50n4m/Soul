@@ -131,8 +131,8 @@ export function proxySupabaseUrl(url: string | null | undefined): string {
     }
 
     // Handle R2 keys (new)
-    // Keys look like 'avatars/uuid-timestamp.jpg'
-    if (url.includes('/') && !url.startsWith('http')) {
+    // Keys like 'user-id-timestamp.jpg' or 'avatars/uuid.jpg'
+    if (!url.includes(':') && !url.startsWith('http')) {
         const publicBase = R2_CONFIG.PUBLIC_URL?.replace(/\/$/, '');
         if (publicBase) {
             return `${publicBase}/${url}`;

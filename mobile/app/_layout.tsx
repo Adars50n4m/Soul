@@ -61,6 +61,7 @@ function RootContent() {
   // Handle Splash Screen hiding separately to keep it outside the context switch if possible,
   // but since we need isReady, we must handle it carefully.
   const { activeCall, currentUser, isReady } = context || { activeCall: null, currentUser: null, isReady: false };
+  const [showSkip, setShowSkip] = useState(false);
 
   // Handle Splash Screen hiding
   useEffect(() => {
@@ -85,7 +86,8 @@ function RootContent() {
     // Safety timeout: if isReady is still false after 15 seconds, log a warning
     const timer = setTimeout(() => {
         if (!isReady) {
-            console.warn('[RootLayout] STILL NOT READY after 15s - check initialization sequence');
+            console.warn('[RootLayout] STILL NOT READY after 15s - offering emergency skip');
+            setShowSkip(true);
         }
     }, 15000);
     return () => clearTimeout(timer);
@@ -141,6 +143,50 @@ function RootContent() {
     return (
       <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
         <ActivityIndicator size="large" color="#BC002A" />
+        <Text style={{ color: '#666', marginTop: 20, fontSize: 12 }}>Initializing Soul...</Text>
+      </View>
+    );
+  }
+
+  // If we are stuck on Splash Screen but want to offer a way out
+  if (!isReady && showSkip) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center', padding: 40 }}>
+        <ActivityIndicator size="large" color="#BC002A" />
+        <Text style={{ color: '#fff', fontSize: 18, fontWeight: '600', marginTop: 30, textAlign: 'center' }}>Taking longer than usual...</Text>
+        <Text style={{ color: '#999', fontSize: 14, marginTop: 10, textAlign: 'center', marginBottom: 40 }}>
+          We're having trouble connecting to the local database or sync server.
+        </Text>
+        
+        <Pressable 
+          onPress={() => {
+            console.log('[RootLayout] User triggered emergency skip');
+            SplashScreen.hideAsync().catch(() => {});
+            // We can't easily force isReady because it's in context, 
+            // but we can try to proceed if most things are loaded.
+          }}
+          style={({ pressed }) => ({
+            backgroundColor: pressed ? '#444' : '#222',
+            paddingVertical: 12,
+            paddingHorizontal: 24,
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: '#333'
+          })}
+        >
+          <Text style={{ color: '#fff', fontWeight: 'bold' }}>Emergency Skip Splash</Text>
+        </Pressable>
+
+        <Pressable 
+          onPress={() => {
+            // Force a reload if possible or just log intent
+            console.log('[RootLayout] User requested retry');
+            setShowSkip(false);
+          }}
+          style={{ marginTop: 20 }}
+        >
+          <Text style={{ color: '#BC002A', fontSize: 14 }}>Try Again</Text>
+        </Pressable>
       </View>
     );
   }

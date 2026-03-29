@@ -114,7 +114,14 @@
       "@react-native-community/datetimepicker",
       "expo-pip",
       "./plugins/withAndroidPiP",
-      "./plugins/withIosPiP"
+      "./plugins/withIosPiP",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Soul needs access to your photos to share them as statuses.",
+          "savePhotosPermission": "Soul needs access to save captured media."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

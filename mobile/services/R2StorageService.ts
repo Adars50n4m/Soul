@@ -32,84 +32,58 @@ class R2StorageService {
 
     while (retries < R2_CONFIG.MAX_RETRIES) {
       try {
-        return await this.attemptUpload(uri, bucket, folder);
-      } catch (error) {
-        retries++;
-        console.warn(`Upload attempt ${retries} failed:`, error);
+        // 1. Get authentication token
+        const token = await this.getAuthToken(folder);
+        if (!token) throw new Error('Auth token missing');
 
-        if (retries >= R2_CONFIG.MAX_RETRIES) {
-          console.warn('Max retries reached for direct R2 worker upload');
-          return null;
+        // 2. Detect content type & Filename
+        const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
+        const contentType = this.getContentType(uri);
+        const filename = `${Date.now()}.${ext}`;
+
+        // 3. Upload to Worker via FileSystem (more reliable for binary/videos)
+        const uploadPath = this.getUploadPath(bucket);
+        const uploadUrl = `${R2_CONFIG.WORKER_URL}${uploadPath}?folder=${folder || ''}`;
+
+        console.log(`[R2Direct] Uploading to ${uploadUrl} (${contentType})`);
+
+        const uploadTask = FileSystem.createUploadTask(
+          uploadUrl,
+          uri,
+          {
+            httpMethod: 'POST',
+            uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+            fieldName: 'file',
+            mimeType: contentType,
+            headers: {
+              'Authorization': `Bearer ${token}`
+            },
+            parameters: {
+              'folder': folder || ''
+            }
+          }
+        );
+
+        const result = await uploadTask.uploadAsync();
+
+        if (result && result.status >= 200 && result.status < 300) {
+          const data: UploadResponse = JSON.parse(result.body);
+          if (data.success && data.publicUrl) {
+            console.log(`✅ Direct R2 Success: ${data.filename}`);
+            return data.publicUrl;
+          }
         }
-
-        // Wait before retrying
+        
+        throw new Error(`Worker returned ${result?.status}: ${result?.body}`);
+      } catch (error: any) {
+        retries++;
+        console.warn(`[R2Direct] Attempt ${retries} failed:`, error.message);
+        if (retries >= R2_CONFIG.MAX_RETRIES) return null;
         await this.delay(R2_CONFIG.RETRY_DELAY * retries);
       }
     }
 
     return null;
-  }
-
-  /**
-   * Attempt to upload file to R2
-   */
-  private async attemptUpload(
-    uri: string,
-    bucket: string,
-    folder: string
-  ): Promise<string> {
-    // 1. Get authentication token
-    const token = await this.getAuthToken(folder);
-    if (!token) {
-      throw new Error('Failed to get authentication token');
-    }
-
-    // 2. Detect content type
-    const contentType = this.getContentType(uri);
-
-    // 3. Create form data
-    const formData = new FormData();
-    const fileUri = this.normalizeFileUri(uri);
-    const fileInfo = await FileSystem.getInfoAsync(fileUri);
-    if (!fileInfo.exists) {
-      throw new Error(`Local file not found: ${fileUri}`);
-    }
-
-    formData.append('file', {
-      uri: fileUri,
-      name: this.getFilename(fileUri),
-      type: contentType,
-    } as any);
-    formData.append('folder', folder);
-
-    // 5. Upload to Worker
-    const uploadPath = this.getUploadPath(bucket);
-    const uploadResponse = await fetch(
-      `${R2_CONFIG.WORKER_URL}${uploadPath}`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-        body: formData,
-      }
-    );
-
-    if (!uploadResponse.ok) {
-      const errorData = await uploadResponse.json().catch(() => ({}));
-      throw new Error(
-        errorData.error || `Upload failed with status ${uploadResponse.status}`
-      );
-    }
-
-    const data: UploadResponse = await uploadResponse.json();
-
-    if (!data.success || !data.publicUrl) {
-      throw new Error('Invalid response from upload server');
-    }
-
-    console.log(`✅ Upload successful: ${data.filename} (${data.size} bytes)`);
-    return data.publicUrl;
   }
 
   /**

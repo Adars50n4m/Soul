@@ -4,6 +4,7 @@ import { statusService } from '../services/StatusService';
 import { storageService } from '../services/StorageService';
 import { useAuth } from './AuthContext';
 import { type StatusUpdate } from '../types';
+import { Alert } from 'react-native';
 
 interface StatusContextType {
   stories: StatusUpdate[];
@@ -64,22 +65,34 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         caption: params.caption
       });
 
-      // Background the processing in the next tick to ensure no blocking
+      // Background logic
       setTimeout(() => {
         (async () => {
+          let lastProgress = 0;
           try {
-            // 1. Upload to storage
-            const uploadedUrl = await storageService.uploadImage(
+            // 1. Upload media with timeout check
+            const uploadPromise = storageService.uploadImage(
               params.localUri!, 
               'status-media', 
               currentUser.id,
-              (p: number) => setUploadingStory(prev => prev ? { ...prev, progress: p } : null)
+              (p: number) => {
+                setUploadingStory(prev => prev ? { ...prev, progress: p } : null);
+              }
             );
 
-            if (!uploadedUrl) throw new Error('Failed to upload status media');
+            const timeoutPromise = new Promise<string>((_, reject) => 
+              setTimeout(() => reject(new Error('Upload timed out after 30s')), 30000)
+            );
 
+            const uploadedUrl = await Promise.race([uploadPromise, timeoutPromise]);
+
+            if (!uploadedUrl) {
+              throw new Error('Storage service returned empty URL.');
+            }
+
+            console.log('[StatusContext] Media uploaded, posting to database...');
             // 2. Post to DB
-            const success = await statusService.postStory({
+            const posted = await statusService.postStory({
               userId: currentUser.id,
               userName: currentUser.name || currentUser.username || 'User',
               userAvatar: currentUser.avatar || '',
@@ -89,15 +102,25 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               music: params.music
             });
 
-            if (success) {
+            if (posted) {
               console.log('[StatusContext] Background story post successful');
               await refreshStatuses();
+              setUploadingStory(null);
             } else {
-               throw new Error('Failed to post story record to database');
+               throw new Error('Database rejected the status record.');
             }
-          } catch (err) {
+          } catch (err: any) {
             console.error('[StatusContext] Background status error:', err);
-          } finally {
+            
+            let errorMessage = err.message || 'Unknown upload error';
+            if (errorMessage.includes('Aborted')) errorMessage = 'Upload timed out. Please check your internet connection.';
+            if (errorMessage.includes('Network')) errorMessage = 'Network error. Are you connected to the internet?';
+            
+            Alert.alert(
+              'Upload Failed', 
+              `${errorMessage}`
+            );
+            
             setUploadingStory(null);
           }
         })();

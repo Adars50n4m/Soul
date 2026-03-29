@@ -1,4 +1,6 @@
 import * as FileSystem from 'expo-file-system';
+import { Platform } from 'react-native';
+import * as MediaLibrary from 'expo-media-library';
 import { SERVER_URL, safeFetchJson } from '../config/api';
 import { R2_CONFIG } from '../config/r2';
 import { r2StorageService } from './R2StorageService';
@@ -13,31 +15,63 @@ const R2_PUBLIC_BASE = R2_CONFIG.PUBLIC_URL && !R2_CONFIG.PUBLIC_URL.includes('X
 
 export const storageService = {
     /**
+     * Resolves a potentially complex URI (like ph:// on iOS) to a local file path.
+     */
+    async resolveUri(uri: string): Promise<string> {
+        if (Platform.OS === 'ios' && uri.startsWith('ph://')) {
+            try {
+                const assetId = uri.substring(5).split('/')[0];
+                const info = await MediaLibrary.getAssetInfoAsync(assetId);
+                if (info && (info.localUri || info.uri)) {
+                    return info.localUri || info.uri || uri;
+                }
+            } catch (e) {
+                console.warn('[StorageService] Failed to resolve ph:// URI:', e);
+            }
+        }
+        return uri;
+    },
+
+    /**
+     * Detects MIME type from URI/Filename
+     */
+    getMimeType(uri: string): string {
+        const ext = uri.split('.').pop()?.toLowerCase() || '';
+        const map: Record<string, string> = {
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'png': 'image/png',
+            'webp': 'image/webp',
+            'gif': 'image/gif',
+            'mp4': 'video/mp4',
+            'mov': 'video/quicktime',
+            'm4v': 'video/mp4',
+            'm4a': 'audio/x-m4a',
+            'mp3': 'audio/mpeg',
+            'wav': 'audio/wav',
+            'aac': 'audio/aac',
+            'caf': 'audio/x-caf'
+        };
+        return map[ext] || 'application/octet-stream';
+    },
+
+    /**
      * Upload media (image or video) to storage via Server Presigned URLs
      */
     async uploadImage(uri: string, bucket: string, folder: string = '', onProgress?: (progress: number) => void): Promise<string | null> {
         console.log(`[StorageService] Starting upload for: ${uri}`);
         try {
-            const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
+            // 0. Resolve URI and Detect Content Type
+            const localUri = await this.resolveUri(uri);
+            const contentType = this.getMimeType(localUri);
+            const ext = localUri.split('.').pop()?.toLowerCase() || 'jpg';
             const fileName = `${folder ? folder + '-' : ''}${Date.now()}.${ext}`;
 
-            // Determine content type
-            let contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-            if (['mp4', 'mov', 'avi', 'mkv'].includes(ext)) {
-                contentType = `video/${ext === 'mov' ? 'quicktime' : ext}`;
-            } else if (['m4a', 'mp3', 'wav', 'aac', 'caf', 'opus'].includes(ext)) {
-                // Precision: iOS uses audio/x-m4a or audio/x-caf usually
-                if (ext === 'm4a') contentType = 'audio/x-m4a';
-                else if (ext === 'caf') contentType = 'audio/x-caf';
-                else if (ext === 'mp3') contentType = 'audio/mpeg';
-                else contentType = `audio/${ext}`;
-            }
-
-            console.log(`[StorageService] Determined contentType: ${contentType}, fileName: ${fileName}`);
+            console.log(`[StorageService] Prepared: ${fileName} (${contentType})`);
 
             // 1. Get Presigned PUT URL from Node Server (with short timeout)
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout for presign
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout for presign
 
             const { success, data, error } = await safeFetchJson<{ presignedUrl: string, key: string }>(
                 `${SERVER_URL}/api/media/presign-upload`, 
@@ -53,7 +87,7 @@ export const storageService = {
                 console.warn(`[StorageService] Presign failed (${error}). Falling back to Direct R2.`);
                 // Fallback to direct R2 worker if server fails
                 try {
-                    return await r2StorageService.uploadImage(uri, bucket, folder);
+                    return await r2StorageService.uploadImage(localUri, bucket, folder);
                 } catch (fallbackErr: any) {
                     console.error('[StorageService] Fallback also failed:', fallbackErr.message);
                     throw new Error(error || 'Failed to get presigned URL from server');
@@ -62,81 +96,57 @@ export const storageService = {
             
             const { presignedUrl, key } = data;
 
-            // Resolve ph:// URIs
-            if (uri.startsWith('ph://')) {
-                try {
-                    const assetId = uri.substring(5).split('/')[0];
-                    const MediaLibrary = require('expo-media-library');
-                    const info = await MediaLibrary.getAssetInfoAsync(assetId);
-                    if (info && (info.localUri || info.uri)) {
-                        uri = info.localUri || info.uri;
-                    }
-                } catch (err) {
-                    console.warn(`[StorageService] Failed to resolve ph:// URI:`, err);
-                }
-            }
-
-            // Verify file exists
-            const fileInfo = await FileSystem.getInfoAsync(uri);
-            if (!fileInfo.exists) {
-                // Try file:// prefix
-                if (!uri.startsWith('file://')) {
-                    const fixedUri = 'file://' + uri;
-                    const secondCheck = await FileSystem.getInfoAsync(fixedUri);
-                    if (secondCheck.exists) uri = fixedUri;
-                    else throw new Error('File not found: ' + uri);
-                } else {
-                    throw new Error('File not found: ' + uri);
-                }
-            }
-
-            // 2. Upload to R2
+            // 2. Perform the binary upload to R2 via presigned URL
             const uploadTask = FileSystem.createUploadTask(
                 presignedUrl,
-                uri,
+                localUri,
                 {
                     httpMethod: 'PUT',
                     uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
                     headers: { 'Content-Type': contentType }
                 },
                 (progress) => {
-                    if (onProgress) {
+                    if (onProgress && progress.totalBytesExpectedToSend > 0) {
                         onProgress(progress.totalBytesSent / progress.totalBytesExpectedToSend);
+                    } else if (onProgress && progress.totalBytesSent > 0) {
+                        onProgress(0.01);
                     }
                 }
             );
 
-            const uploadRes = await uploadTask.uploadAsync();
+            const result = await uploadTask.uploadAsync();
 
-            if (uploadRes?.status !== 200 && uploadRes?.status !== 201 && uploadRes?.status !== 204) {
-                 throw new Error(`R2 Upload failed: ${uploadRes?.status}`);
+            if (result && (result.status === 200 || result.status === 201 || result.status === 204)) {
+                console.log(`[StorageService] Upload success: ${key}`);
+                return key;
+            } else {
+                throw new Error(`Upload failed with status ${result?.status || 'unknown'}`);
             }
-
-            console.log(`[StorageService] Upload successful: ${key}`);
-            return key; 
         } catch (e: any) {
-            console.warn(`[StorageService] Upload error:`, e.message);
-            // Emergency fallback
-            if (bucket === 'chat-media' || bucket === 'status-media' || bucket === 'avatars') {
-                return await r2StorageService.uploadImage(uri, bucket, folder);
+            console.warn(`[StorageService] Upload catch error:`, e.message);
+            // Emergency fallback for network errors or timeouts
+            if (e.name === 'AbortError' || e.message.includes('fetch') || e.message.includes('Network')) {
+               try {
+                 return await r2StorageService.uploadImage(uri, bucket, folder);
+               } catch (finalErr) {
+                 console.error('[StorageService] Emergency fallback failed:', finalErr);
+               }
             }
             throw e; 
         }
     },
 
     /**
-     * Get local playable/viewable URL for an R2 key (with WhatsApp-style organized caching)
+     * Get local playable/viewable URL for an R2 key (with organized caching)
      */
     async getMediaUrl(r2Key: string, messageId?: string, mediaType?: string): Promise<string | null> {
         if (!r2Key) return null;
         
-        // Return as-is if it's already a local file
         if (r2Key.startsWith('file://') || r2Key.startsWith('data:')) {
             return r2Key;
         }
 
         try {
-            // 1. Check local SQLite cache first (if we have a messageId)
             if (messageId) {
                 const cachedPath = await offlineService.getMediaDownload(messageId);
                 if (cachedPath) {
@@ -145,16 +155,9 @@ export const storageService = {
                 }
             }
 
-            // 2. Fallback: Search in the new organized Soul folders
-            // This handles cases where we have the file but lost the DB record
             const ext = r2Key.split('.').pop()?.split('?')[0] || 'jpg';
             const inferredType = mediaType || soulFolderService.inferMediaType(ext);
             
-            // Note: We don't know the exact filename because SoulFolderService 
-            // uses dynamic counters, but we can check if the file exists anyway
-            // if we really need to. For now, we proceed to download if DB hit failed.
-
-            // 3. Fetch Presigned Download URL from Server
             const { success, data } = await safeFetchJson<{ presignedUrl: string }>(
                 `${SERVER_URL}/api/media/presign-download`, 
                 {
@@ -167,7 +170,6 @@ export const storageService = {
             let downloadUrl = data?.presignedUrl;
 
             if (!success || !downloadUrl) {
-                // Fallback: public R2 URL
                 if (R2_PUBLIC_BASE) {
                     downloadUrl = `${R2_PUBLIC_BASE}/${r2Key}`;
                 } else {
@@ -175,7 +177,6 @@ export const storageService = {
                 }
             }
 
-            // 4. Download organizesly if we have a messageId
             if (messageId) {
                 const result = await mediaDownloadService.downloadMedia(
                     messageId, 
@@ -188,7 +189,6 @@ export const storageService = {
                 }
             }
 
-            // 5. If no messageId, do a temporary non-tracked download (fallback)
             const tempPath = `${FileSystem.cacheDirectory}preview_${Date.now()}.${ext}`;
             const downloadRes = await FileSystem.downloadAsync(downloadUrl, tempPath);
             return downloadRes.uri;
@@ -207,7 +207,6 @@ export const storageService = {
         try {
             const result = await mediaDownloadService.saveLocalMediaFromUri(messageId, localUri, mediaType);
             if (result.success && result.localUri) {
-                // Update DB so we don't try to download what we just sent
                 await offlineService.updateMessageLocalUri(messageId, result.localUri, result.fileSize || 0);
                 return result.localUri;
             }

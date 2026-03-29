@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 15;
+const DB_TARGET_VERSION = 16;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -441,99 +441,102 @@ async function migration_v15(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v16 — Schema Self-Healing & Repair
+// Move the previously high-cost "run on every boot" repair logic here.
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v16(db: any): Promise<void> {
+    const repairSteps = [
+        // Ensure chats table and columns exist
+        `CREATE TABLE IF NOT EXISTS chats (
+          id TEXT PRIMARY KEY NOT NULL,
+          last_message_preview TEXT,
+          last_message_at TEXT,
+          unread_count INTEGER DEFAULT 0,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );`,
+        `ALTER TABLE chats ADD COLUMN last_message_preview TEXT;`,
+        `ALTER TABLE chats ADD COLUMN last_message_at TEXT;`,
+        `ALTER TABLE chats ADD COLUMN unread_count INTEGER DEFAULT 0;`,
+        `ALTER TABLE chats ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP;`,
+        
+        // Ensure messages columns exist
+        `ALTER TABLE messages ADD COLUMN last_retry_at TEXT;`,
+        `ALTER TABLE messages ADD COLUMN error_message TEXT;`,
+        `ALTER TABLE messages ADD COLUMN reaction TEXT;`,
+        `ALTER TABLE messages ADD COLUMN media_thumbnail TEXT;`,
+        `ALTER TABLE messages ADD COLUMN delivered_at TEXT;`,
+        `ALTER TABLE messages ADD COLUMN read_at TEXT;`,
+        `ALTER TABLE messages ADD COLUMN idempotency_key TEXT;`,
+        `ALTER TABLE messages ADD COLUMN media_duration INTEGER;`,
+        
+        // Ensure contacts columns exist
+        `ALTER TABLE contacts ADD COLUMN about TEXT DEFAULT '';`,
+        `ALTER TABLE contacts ADD COLUMN last_seen TEXT;`,
+        `ALTER TABLE contacts ADD COLUMN is_archived INTEGER DEFAULT 0;`,
+        `ALTER TABLE contacts ADD COLUMN updated_at TEXT;`,
+        `ALTER TABLE contacts ADD COLUMN note TEXT;`,
+        `ALTER TABLE contacts ADD COLUMN note_timestamp TEXT;`,
+        
+        // Ensure sync queue exists
+        `CREATE TABLE IF NOT EXISTS pending_sync_ops (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_type TEXT NOT NULL,
+          entity_id   TEXT NOT NULL,
+          op_type     TEXT NOT NULL,
+          payload     TEXT NOT NULL,
+          created_at  TEXT NOT NULL,
+          retry_count INTEGER DEFAULT 0
+        );`,
+        // Ensure contacts columns exist
+        `ALTER TABLE contacts ADD COLUMN avatar_type TEXT DEFAULT 'default';`,
+        `ALTER TABLE contacts ADD COLUMN teddy_variant TEXT;`,
+        
+        // Ensure connection tables exist
+        `CREATE TABLE IF NOT EXISTS connection_requests (
+          id TEXT PRIMARY KEY NOT NULL,
+          sender_id TEXT NOT NULL,
+          receiver_id TEXT NOT NULL,
+          status TEXT DEFAULT 'pending',
+          message TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          responded_at TEXT
+        );`,
+        `CREATE TABLE IF NOT EXISTS connections (
+          id TEXT PRIMARY KEY NOT NULL,
+          user_1_id TEXT NOT NULL,
+          user_2_id TEXT NOT NULL,
+          is_favorite INTEGER DEFAULT 0,
+          custom_name TEXT,
+          mute_notifications INTEGER DEFAULT 0,
+          connected_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );`,
+        // Ensure avatar_cache table exists
+        `CREATE TABLE IF NOT EXISTS avatar_cache (
+          user_id      TEXT PRIMARY KEY NOT NULL,
+          remote_url   TEXT NOT NULL,
+          local_uri    TEXT NOT NULL,
+          cached_at    TEXT DEFAULT CURRENT_TIMESTAMP
+        );`
+    ];
+  
+    for (const sql of repairSteps) {
+        try {
+            await db.execAsync(sql);
+        } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration v16 repair check warning for "${sql}":`, msg);
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
-  // --- REPAIR BLOCK (Self-Healing Schema) ---
-  // We run this BEFORE the version check to ensure that even if a migration 
-  // failed in the past, or a table was created partially, we patch it up.
-  console.log('[SQLite] Running schema repair check...');
-  const repairSteps = [
-      // Ensure chats table and columns exist
-      `CREATE TABLE IF NOT EXISTS chats (
-        id TEXT PRIMARY KEY NOT NULL,
-        last_message_preview TEXT,
-        last_message_at TEXT,
-        unread_count INTEGER DEFAULT 0,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );`,
-      `ALTER TABLE chats ADD COLUMN last_message_preview TEXT;`,
-      `ALTER TABLE chats ADD COLUMN last_message_at TEXT;`,
-      `ALTER TABLE chats ADD COLUMN unread_count INTEGER DEFAULT 0;`,
-      `ALTER TABLE chats ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP;`,
-      
-      // Ensure messages columns exist
-      `ALTER TABLE messages ADD COLUMN last_retry_at TEXT;`,
-      `ALTER TABLE messages ADD COLUMN error_message TEXT;`,
-      `ALTER TABLE messages ADD COLUMN reaction TEXT;`,
-      `ALTER TABLE messages ADD COLUMN media_thumbnail TEXT;`,
-      `ALTER TABLE messages ADD COLUMN delivered_at TEXT;`,
-      `ALTER TABLE messages ADD COLUMN read_at TEXT;`,
-      `ALTER TABLE messages ADD COLUMN idempotency_key TEXT;`,
-      `ALTER TABLE messages ADD COLUMN media_duration INTEGER;`,
-      
-      // Ensure contacts columns exist
-      `ALTER TABLE contacts ADD COLUMN about TEXT DEFAULT '';`,
-      `ALTER TABLE contacts ADD COLUMN last_seen TEXT;`,
-      `ALTER TABLE contacts ADD COLUMN is_archived INTEGER DEFAULT 0;`,
-      `ALTER TABLE contacts ADD COLUMN updated_at TEXT;`,
-      `ALTER TABLE contacts ADD COLUMN note TEXT;`,
-      `ALTER TABLE contacts ADD COLUMN note_timestamp TEXT;`,
-      
-      // Ensure sync queue exists
-      `CREATE TABLE IF NOT EXISTS pending_sync_ops (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        entity_type TEXT NOT NULL,
-        entity_id TEXT NOT NULL,
-        op_type TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        retry_count INTEGER DEFAULT 0
-      );`,
-      // Ensure contacts columns exist
-      `ALTER TABLE contacts ADD COLUMN avatar_type TEXT DEFAULT 'default';`,
-      `ALTER TABLE contacts ADD COLUMN teddy_variant TEXT;`,
-      
-      // Ensure connection tables exist
-      `CREATE TABLE IF NOT EXISTS connection_requests (
-        id TEXT PRIMARY KEY NOT NULL,
-        sender_id TEXT NOT NULL,
-        receiver_id TEXT NOT NULL,
-        status TEXT DEFAULT 'pending',
-        message TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        responded_at TEXT
-      );`,
-      `CREATE TABLE IF NOT EXISTS connections (
-        id TEXT PRIMARY KEY NOT NULL,
-        user_1_id TEXT NOT NULL,
-        user_2_id TEXT NOT NULL,
-        is_favorite INTEGER DEFAULT 0,
-        custom_name TEXT,
-        mute_notifications INTEGER DEFAULT 0,
-        connected_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );`,
-      // Ensure avatar_cache table exists
-      `CREATE TABLE IF NOT EXISTS avatar_cache (
-        user_id      TEXT PRIMARY KEY NOT NULL,
-        remote_url   TEXT NOT NULL,
-        local_uri    TEXT NOT NULL,
-        cached_at    TEXT DEFAULT CURRENT_TIMESTAMP
-      );`
-  ];
-
-  for (const sql of repairSteps) {
-      try {
-          await db.execAsync(sql);
-          console.log(`[SQLite] Repair: Executed "${sql.substring(0, 40)}..."`);
-      } catch (e: any) {
-          const msg = e?.message || String(e);
-          // 'duplicate column name' or 'already exists' is expected and means the column/table is there.
-          if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
-              console.warn(`[SQLite] Repair check warning for "${sql}":`, msg);
-          }
-      }
-  }
+  // --- REPAIR BLOCK REMOVED ---
+  // The repair logic is now moved into the version-gated migration_v16 to prevent app boot hangs.
 
   let currentVersion = await getCurrentVersion(db);
   console.log(
@@ -569,6 +572,7 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
         case 13: await migration_v13(db); break;
         case 14: await migration_v14(db); break;
         case 15: await migration_v15(db); break;
+        case 16: await migration_v16(db); break;
         default:
           console.error(`[SQLite] No migration logic for v${nextVersion}!`);
       }

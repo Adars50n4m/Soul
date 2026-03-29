@@ -803,6 +803,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
       const myStoryPreviewUrl = myStories[0]?.url;
       const hasStory = myStories.length > 0;
       const isUploading = !!uploadingStory;
+      const showInCorner = hasStory && !isUploading;
       
       return (
         <Pressable 
@@ -824,18 +825,20 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
                 <View style={StyleSheet.absoluteFill}>
                   <Image source={{ uri: uploadingStory.localUri }} style={[styles.myStatusPreviewBgFull, { opacity: 0.6 }]} />
                   <View style={styles.uploadingOverlay}>
-                    <StatusProgressRing 
-                        progress={uploadingStory.progress} 
-                        size={78} 
-                        color={activeTheme.primary} 
-                    />
-                    <View style={{ position: 'absolute' }}>
-                        <SoulAvatar 
-                            uri={proxySupabaseUrl(currentUser?.avatar)} 
-                            size={64} 
-                            avatarType={currentUser?.avatarType as any}
-                            isOnline={false}
-                        />
+                    <View style={{ justifyContent: 'center', alignItems: 'center' }}>
+                      <StatusProgressRing 
+                          progress={uploadingStory.progress || 0} 
+                          size={78} 
+                          color={activeTheme.primary} 
+                      />
+                      <View style={{ position: 'absolute' }}>
+                          <SoulAvatar 
+                              uri={proxySupabaseUrl(currentUser?.avatar)} 
+                              size={64} 
+                              avatarType={currentUser?.avatarType as any}
+                              isOnline={false}
+                          />
+                      </View>
                     </View>
                   </View>
                 </View>
@@ -884,7 +887,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
               <View style={styles.statusInfoContent}>
                 <Text style={styles.statusName} numberOfLines={1}>
                   {uploadingStory 
-                    ? `Uploading ${Math.round(uploadingStory.progress * 100)}%` 
+                    ? `Uploading ${Math.round((uploadingStory.progress || 0) * 100)}%` 
                     : 'My Status'}
                 </Text>
               </View>
@@ -893,7 +896,11 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
           {currentUser?.note && isNoteValid(currentUser.noteTimestamp) && !isNoteModalVisible && (
             <View style={styles.notePositioner} pointerEvents="box-none">
               <Pressable onPress={() => setIsNoteModalVisible(true)}>
-                <NoteBubble text={currentUser.note} isMe />
+                <NoteBubble 
+                  text={currentUser.note} 
+                  isMe 
+                  align="center" 
+                />
               </Pressable>
             </View>
           )}
@@ -1317,7 +1324,7 @@ const styles = StyleSheet.create({
   statusTime: { color: 'rgba(255,255,255,0.6)', fontSize: 10.5, fontWeight: '500', textAlign: 'center' },
   statusMediaBackground: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0f0f0f', borderRadius: 28 },
   statusPlaceholder: { backgroundColor: 'rgba(255,255,255,0.05)' },
-  myStatusEmptyPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 20 },
+  myStatusEmptyPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 38 },
   statusOverlay: { ...StyleSheet.absoluteFillObject },
   contactAvatarPositioner: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 50, alignItems: 'center', justifyContent: 'center' },
   storyRing: { borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
@@ -1347,7 +1354,7 @@ const styles = StyleSheet.create({
   chatItem: { marginBottom: 8, marginHorizontal: 16, borderRadius: 36, height: 72 },
   notePositioner: {
       position: 'absolute',
-      top: -32, // Adjusted from -38 to be slightly lower
+      top: -34,
       left: 0,
       right: 0,
       alignItems: 'center',
@@ -1388,8 +1395,9 @@ const styles = StyleSheet.create({
   uploadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
+    justifyContent: 'flex-start', // Shift to top
     alignItems: 'center',
+    paddingTop: 36, // Precise margin from top to keep it clear of Note Bubble and Bottom Bar
   },
   uploadingText: {
     color: '#fff',

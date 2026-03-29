@@ -32,25 +32,32 @@ class StatusService {
       return (data || []).map(conn => 
         conn.user_1_id === userId ? conn.user_2_id : conn.user_1_id
       );
-    } catch (error) {
-      console.error('[StatusService] Error fetching mutual friends:', error);
+    } catch (error: any) {
+      console.error('[StatusService] Error fetching mutual friends:', {
+        message: error?.message,
+        details: error?.details,
+        hint: error?.hint,
+        code: error?.code,
+        userId
+      });
       return [];
     }
   }
 
   /**
-   * Fetches active stories from mutual friends.
+   * Fetches active stories from mutual friends AND the user themselves.
    * Filters for expires_at > now.
    */
   async fetchActiveStories(userId: string): Promise<StatusUpdate[]> {
     try {
       const friendIds = await this.getMutualFriendIds(userId);
-      if (friendIds.length === 0) return [];
+      // Always include current user so they can see their own statuses
+      const targetIds = [userId, ...friendIds];
 
       const { data, error } = await supabase
         .from('statuses')
         .select('*')
-        .in('user_id', friendIds)
+        .in('user_id', targetIds)
         .gt('expires_at', new Date().toISOString())
         .order('created_at', { ascending: false });
 
@@ -70,28 +77,34 @@ class StatusService {
         likes: s.likes || [],
         music: s.music
       }));
-    } catch (error) {
-      console.error('[StatusService] Error fetching stories:', error);
+    } catch (error: any) {
+      console.error('[StatusService] Error fetching stories:', {
+        message: error?.message,
+        details: error?.details,
+        hint: error?.hint,
+        code: error?.code,
+        userId
+      });
       return [];
     }
   }
 
   /**
-   * Fetches active "Soul Notes" from mutual friends.
+   * Fetches active "Soul Notes" from mutual friends AND the user.
    * Logic: note_timestamp is within last 24 hours.
    */
   async fetchActiveNotes(userId: string): Promise<any[]> {
     let friendIds: string[] = [];
     try {
       friendIds = await this.getMutualFriendIds(userId);
-      if (friendIds.length === 0) return [];
+      const targetIds = [userId, ...friendIds];
 
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
       const { data, error } = await supabase
         .from('profiles')
         .select('id, name, avatar_url, note, note_timestamp')
-        .in('id', friendIds)
+        .in('id', targetIds)
         .gt('note_timestamp', twentyFourHoursAgo);
 
       if (error) throw error;
@@ -100,13 +113,20 @@ class StatusService {
     } catch (error: any) {
       if (error.code === '42703') {
         console.warn('[StatusService] Profiles table missing note columns. Fetching basic profile data.');
+        const targetIds = friendIds.includes(userId) ? friendIds : [userId, ...friendIds];
         const { data } = await supabase
           .from('profiles')
           .select('id, name, avatar_url')
-          .in('id', friendIds);
+          .in('id', targetIds);
         return data || [];
       }
-      console.error('[StatusService] Error fetching notes:', error);
+      console.error('[StatusService] Error fetching notes:', {
+        message: error?.message,
+        details: error?.details,
+        hint: error?.hint,
+        code: error?.code,
+        userId
+      });
       return [];
     }
   }
@@ -134,8 +154,13 @@ class StatusService {
 
       if (error) throw error;
       return true;
-    } catch (error) {
-      console.error('[StatusService] Error posting story:', error);
+    } catch (error: any) {
+      console.error('[StatusService] Error posting story to Supabase:', {
+        message: error?.message,
+        details: error?.details,
+        hint: error?.hint,
+        code: error?.code
+      });
       return false;
     }
   }
