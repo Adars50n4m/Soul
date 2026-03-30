@@ -82,7 +82,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     useEffect(() => {
         if (!currentUser) return;
 
-        callService.initialize(currentUser.id);
+        callService.initialize(currentUser.id, {
+            name: currentUser.name || currentUser.username || 'User',
+            avatar: currentUser.avatar || ''
+        });
 
         nativeCallBridge.initialize(currentUser.id, {
             onCallAnswered: () => acceptCall(),
@@ -93,7 +96,16 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }).catch(err => console.warn('[CallContext] NativeCallBridge init failed:', err));
 
         const signalHandler = async (signal: CallSignal) => {
-            console.log(`[CallContext] Received signal: ${signal.type}`);
+            const myId = currentUser?.id;
+            const normalizedMyId = (myId || '').toString().toLowerCase();
+            const normalizedSenderId = (signal.callerId || (signal as any).sender_id || '').toString().toLowerCase();
+
+            // [AUTO-CUT FIX] Redundant guard in Context to ignore self-signals
+            if (myId && normalizedMyId === normalizedSenderId) {
+                return;
+            }
+
+            console.log(`[CallContext] 📩 Received signal: ${signal.type} | Room: ${signal.roomId} | Caller: ${signal.callerId}`);
             
             switch (signal.type) {
                 case 'call-request': {
@@ -120,6 +132,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     break;
                 }
                 case 'call-accept': {
+                    // [AUTO-CUT FIX] Clear timeout on caller's side when target accepts
+                    callService.clearCallTimeout();
                     setActiveCall(prev => prev ? { ...prev, isAccepted: true } : null);
                     callStartTimeRef.current = Date.now();
                     if (webRTCService && !activeCallRef.current?.isIncoming) {
@@ -148,7 +162,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
                         fetchCalls();
                     }
 
-                    if (webRTCService) try { webRTCService.cleanup(); } catch (_) {}
+                    if (webRTCService) {
+                        try { 
+                            console.log(`[CallContext] Triggering WebRTC endCall for signal: ${signal.type}`);
+                            webRTCService.endCall(`signal-${signal.type}`); 
+                        } catch (_) {}
+                    }
                     setActiveCall(null);
                     incomingSignalRef.current = null;
                     callStartTimeRef.current = null;
@@ -195,12 +214,13 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, [currentUser, fetchCalls]);
 
     const startCall = useCallback(async (contactId: string, type: 'audio' | 'video') => {
-        const roomId = await callService.startCall(contactId, type);
+        const normalizedContactId = normalizeId(contactId);
+        const roomId = await callService.startCall(normalizedContactId, type);
         if (roomId) {
-            const contactName = getSuperuserName(contactId) || 'User';
+            const contactName = getSuperuserName(normalizedContactId) || 'User';
             setActiveCall({
                 callId: roomId,
-                contactId,
+                contactId: normalizedContactId,
                 contactName,
                 type,
                 isIncoming: false,
@@ -320,8 +340,23 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return <CallContext.Provider value={value}>{children}</CallContext.Provider>;
 };
 
-export const useCall = () => {
+export const useCall = (): CallContextType => {
     const context = useContext(CallContext);
-    if (context === undefined) throw new Error('useCall must be used within a CallProvider');
+    if (context === undefined) {
+        // SAFE FALLBACK: Prevent crashes during Android route transitions
+        console.warn('[CallContext] useCall() called outside of CallProvider. Providing safe fallback.');
+        return {
+            activeCall: null,
+            calls: [],
+            startCall: async () => {},
+            acceptCall: async () => {},
+            endCall: async () => {},
+            toggleMinimizeCall: () => {},
+            toggleMute: () => {},
+            toggleVideo: () => {},
+            deleteCall: async () => {},
+            clearCalls: async () => {},
+        };
+    }
     return context;
 };

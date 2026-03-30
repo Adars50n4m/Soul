@@ -27,6 +27,7 @@ import Animated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useKeepAwake } from 'expo-keep-awake';
 import { SoulAvatar } from '../components/SoulAvatar';
+import { normalizeId } from '../utils/idNormalization';
 
 // Safe require for WebRTC to prevent Expo Go crashes
 const getWebRTCModules = () => {
@@ -75,9 +76,24 @@ export default function CallScreen() {
     const webrtcListenerRef = useRef<any>(null);
 
     const [callState, setCallState] = useState<CallState>(() => {
-        if (activeCall?.isIncoming && activeCall?.isAccepted) return 'connecting';
+        // If the call is already accepted (e.g. we re-entered this screen or 
+        // the acceptor clicked "Accept" already), start in 'connecting'
+        if (activeCall?.isAccepted) return 'connecting';
         return 'ringing';
     });
+    const [isSlowConnection, setIsSlowConnection] = useState(false);
+
+    useEffect(() => {
+        if (callState === 'connecting') {
+            const timer = setTimeout(() => setIsSlowConnection(true), 12000);
+            return () => {
+                clearTimeout(timer);
+                setIsSlowConnection(false);
+            };
+        } else {
+            setIsSlowConnection(false);
+        }
+    }, [callState]);
 
     const hasRemoteTracks = useMemo(() => {
         if (!remoteStream) return false;
@@ -191,10 +207,10 @@ export default function CallScreen() {
     // instead of being stuck on "Ringing..." until WebRTC completes.
     useEffect(() => {
         if (activeCall?.isAccepted && callState === 'ringing') {
-            console.log('[CallScreen] Call accepted by remote — upgrading callState: ringing → connecting');
+            console.log(`[CallScreen] Call accepted (Role=${activeCall.isIncoming?'Rx':'Tx'}) — upgrading callState: ringing → connecting`);
             setCallState('connecting');
         }
-    }, [activeCall?.isAccepted]);
+    }, [activeCall?.isAccepted, callState]);
 
     // Animations
     const pulseScale = useSharedValue(1);
@@ -208,7 +224,8 @@ export default function CallScreen() {
     const screenTranslateY = useSharedValue(0);
 
     const contact = useMemo(() => {
-        const found = contacts.find(c => c.id === activeCall?.contactId);
+        const normalizedId = normalizeId(activeCall?.contactId);
+        const found = contacts.find(c => normalizeId(c.id) === normalizedId);
         if (found) return found;
         // Fallback to activeCall metadata if contact not in list (e.g. recent add)
         return {
@@ -240,13 +257,14 @@ export default function CallScreen() {
         const next = !isSpeaker;
         setIsSpeaker(next);
         try {
+            console.log(`[CallScreen] 🔊 Toggling speaker: ${next ? 'ON' : 'OFF'}`);
             await ExpoAudio.setAudioModeAsync({
                 allowsRecordingIOS: true,
                 playsInSilentModeIOS: true,
                 staysActiveInBackground: true,
-                interruptionModeIOS: 1,
+                interruptionModeIOS: 1, // DoNotMix
                 shouldDuckAndroid: true,
-                interruptionModeAndroid: 1,
+                interruptionModeAndroid: 1, // DoNotMix
                 // Android: false = speaker out, true = earpiece
                 playThroughEarpieceAndroid: !next,
             });
@@ -474,10 +492,11 @@ export default function CallScreen() {
                     await webRTCService.startCall();
                 }
 
-            } catch (e) {
+            } catch (e: any) {
                 console.warn('WebRTC initialization failed:', e);
+                console.warn('Error Stack:', e?.stack);
                 Alert.alert("Call Failed", "Could not initialize WebRTC connection.");
-                handleEndCall();
+                handleEndCall(`init-failed: ${e?.message || 'unknown'}`);
             }
         };
 
@@ -539,6 +558,27 @@ export default function CallScreen() {
     useEffect(() => {
         if (!uiConnected) return;
         
+        // Android Fix: Re-apply communication mode once connected to ensure audio routing is consistent
+        if (Platform.OS === 'android') {
+            // Wait 500ms (increased) to allow hardware to stabilize
+            setTimeout(async () => {
+                console.log('[CallScreen] 🔄 Connected! Refreshing VOIP audio session...');
+                try {
+                    await ExpoAudio.setAudioModeAsync({
+                        allowsRecordingIOS: true,
+                        playsInSilentModeIOS: true,
+                        staysActiveInBackground: true,
+                        interruptionModeIOS: 1, 
+                        shouldDuckAndroid: true,
+                        interruptionModeAndroid: 1, 
+                        playThroughEarpieceAndroid: !isSpeaker // Sync with UI state
+                    });
+                } catch (e) {
+                    console.warn('[CallScreen] Post-connect audio sync failed:', e);
+                }
+            }, 500);
+        }
+
         console.log('[CallScreen] ⏱️ Starting call timer');
         const interval = setInterval(() => {
             setCallDuration(prev => prev + 1);
@@ -592,8 +632,9 @@ export default function CallScreen() {
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     };
 
-    const handleEndCall = useCallback(() => {
-        console.log('[CallScreen] 📴 handleEndCall() called by user');
+    const handleEndCall = useCallback((reason: any = 'manual') => {
+        const reasonStr = (typeof reason === 'string') ? reason : 'user-action';
+        console.log(`[CallScreen] 📴 handleEndCall() called with reason: ${reasonStr}`);
         // 1. Clear streams immediately to prevent black screen/crash on unmount
         setLocalStream(null);
         setRemoteStream(null);
@@ -621,8 +662,21 @@ export default function CallScreen() {
     return (
         <GestureHandlerRootView style={{ flex: 1 }}>
             <GestureDetector gesture={screenPanGesture}>
-                <Animated.View style={[styles.container, { backgroundColor: '#000', width, height }, screenStyle]}>
-                    <StatusBar hidden />
+                <Animated.View style={[
+                    styles.container, 
+                    { 
+                        backgroundColor: '#000', 
+                        width, 
+                        // Fix Android black gap by using 100% height for translucent mode
+                        height: Platform.OS === 'android' ? '100%' : height 
+                    }, 
+                    screenStyle
+                ]}>
+                    <StatusBar 
+                        translucent={Platform.OS === 'android'} 
+                        backgroundColor="transparent" 
+                        barStyle="light-content" 
+                    />
 
                         {/* 1. Background Media Layer */}
                         <View style={[StyleSheet.absoluteFill, { backgroundColor: '#111' }]}>
@@ -694,16 +748,26 @@ export default function CallScreen() {
 
                                     <View style={styles.diagnosticRow}>
                                         <Text style={styles.diagnosticLabel}>Local Audio:</Text>
-                                        <Text style={[styles.diagnosticValue, { color: localStream?.getAudioTracks().length ? '#22c55e' : '#ef4444' }]}>
-                                            {localStream?.getAudioTracks().length || 0} tracks
-                                        </Text>
+                                        <View style={{alignItems: 'flex-end'}}>
+                                            <Text style={styles.diagnosticValue}>{localStream?.getAudioTracks().length || 0} tracks</Text>
+                                            {localStream?.getAudioTracks().map((t: any, i: number) => (
+                                                <Text key={i} style={{fontSize: 10, color: t.enabled ? '#22c55e' : '#ef4444'}}>
+                                                    {t.readyState} {t.enabled ? 'Enabled' : 'Disabled'}
+                                                </Text>
+                                            ))}
+                                        </View>
                                     </View>
 
                                     <View style={styles.diagnosticRow}>
                                         <Text style={styles.diagnosticLabel}>Remote Audio:</Text>
-                                        <Text style={[styles.diagnosticValue, { color: remoteStream?.getAudioTracks().length ? '#22c55e' : '#ef4444' }]}>
-                                            {remoteStream?.getAudioTracks().length || 0} tracks
-                                        </Text>
+                                        <View style={{alignItems: 'flex-end'}}>
+                                            <Text style={styles.diagnosticValue}>{remoteStream?.getAudioTracks().length || 0} tracks</Text>
+                                            {remoteStream?.getAudioTracks().map((t: any, i: number) => (
+                                                <Text key={i} style={{fontSize: 10, color: t.enabled ? '#22c55e' : '#ef4444'}}>
+                                                    {t.readyState} {t.enabled ? 'Enabled' : 'Disabled'}
+                                                </Text>
+                                            ))}
+                                        </View>
                                     </View>
 
                                     <View style={styles.diagnosticRow}>
@@ -752,7 +816,7 @@ export default function CallScreen() {
                                                 callState === 'ended' ? 'Ending...' :
                                                 (activeCall.isIncoming && !activeCall.isAccepted) ? 'Incoming Soul Call...' : 
                                                 (callState === 'ringing' && !activeCall.isIncoming) ? 'Ringing...' : 
-                                                'Connecting...'}
+                                                isSlowConnection ? 'Connection logic delayed...' : 'Connecting...'}
                                             </Text>
                                         </Pressable>
                                     </View>

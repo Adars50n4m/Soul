@@ -1,6 +1,8 @@
 import { supabase } from '../config/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import * as Crypto from 'expo-crypto';
+import { normalizeId } from '../utils/idNormalization';
+import { AppState } from 'react-native';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CALL SERVICE — Supabase Realtime Broadcast signaling
@@ -32,14 +34,28 @@ export interface CallSignal {
     timestamp: string;
     roomId?: string;
     signalId?: string; // Unique ID for cross-path deduplication (Broadcast + DB)
+    callerName?: string;
+    callerAvatar?: string;
+    calleeName?: string;
+    calleeAvatar?: string;
 }
 
 type CallSignalHandler = (signal: CallSignal) => void;
 
+// Singleton references to survive HMR/Reloads
+// These ensure that re-initializing the service doesn't leak old connections
+let _personalChannel: RealtimeChannel | null = null;
+let _roomChannel: RealtimeChannel | null = null;
+let _signalSubscription: RealtimeChannel | null = null;
+let _personalChannelReconnectAttempts = 0;
+
 class CallService {
-    private personalChannel: RealtimeChannel | null = null;
-    private roomChannel: RealtimeChannel | null = null;
     private userId: string | null = null;
+    private currentUser: { name: string; avatar: string } | null = null;
+    
+    getUserId(): string | null {
+        return this.userId;
+    }
     private listeners: Set<CallSignalHandler> = new Set();
     private statusListeners: Set<(connected: boolean) => void> = new Set();
     private currentRoomId: string | null = null;
@@ -48,19 +64,19 @@ class CallService {
     private roomSubscribed: boolean = false;
     private isJoiningRoom: boolean = false;
     private roomSubscribeCallbacks: (() => void)[] = [];
-    // FIX #5: Add call timeout tracking
+    private signalBuffer: CallSignal[] = [];
     private callTimeoutTimer: NodeJS.Timeout | null = null;
     private readonly CALL_TIMEOUT_MS = 45000; // 45 seconds timeout
-    private reconnectAttempts: number = 0;
     private reconnectTimer: NodeJS.Timeout | null = null;
     private personalChannelSubscribed: boolean = false;
     private processedSignalIds: Set<string> = new Set();
-    private signalPollTimer: NodeJS.Timeout | null = null;
+    private signalPollInterval: NodeJS.Timeout | null = null;
+    private _fastPollInterval: NodeJS.Timeout | null = null;
     private lastSignalPollAt: string = new Date().toISOString();
 
     addStatusListener(handler: (connected: boolean) => void): void {
         this.statusListeners.add(handler);
-        handler(this.personalChannel !== null);
+        handler(!!_personalChannel && this.personalChannelSubscribed);
     }
 
     removeStatusListener(handler: (connected: boolean) => void): void {
@@ -75,19 +91,21 @@ class CallService {
     //
     // Subscribe to the user's personal broadcast channel.
     // All incoming call signals (call-request, call-ringing, etc.) arrive here.
-    initialize(userId: string): void {
+    initialize(userId: string, user: { name: string, avatar: string } | null = null): void {
+        const normalizedUserId = normalizeId(userId);
+        this.currentUser = user;
+        
         // If same user AND channel is alive and subscribed, skip
-        if (this.userId === userId && this.personalChannel && this.personalChannelSubscribed) {
-            console.log('[CallService] Already initialized and SUBSCRIBED for', userId);
+        if (this.userId === normalizedUserId && _personalChannel && this.personalChannelSubscribed) {
+            console.log('[CallService] Already initialized and SUBSCRIBED for', normalizedUserId);
             return;
         }
 
-        // If channel exists but is NOT subscribed (dead after CLOSED), tear it down
-        if (this.personalChannel) {
+        // If channel exists but is NOT subscribed or different user, tear it down
+        if (_personalChannel) {
             console.log('[CallService] Tearing down stale personal channel before re-init');
-            this.personalChannel.unsubscribe();
-            supabase.removeChannel(this.personalChannel);
-            this.personalChannel = null;
+            supabase.removeChannel(_personalChannel);
+            _personalChannel = null;
             this.personalChannelSubscribed = false;
         }
 
@@ -97,17 +115,22 @@ class CallService {
             this.reconnectTimer = null;
         }
 
-        this.userId = userId;
-        this.reconnectAttempts = 0;
-        this.processedSignalIds.clear();
+        if (this.userId !== normalizedUserId) {
+            this.userId = normalizedUserId;
+            _personalChannelReconnectAttempts = 0;
+            this.processedSignalIds.clear();
+        }
         this.lastSignalPollAt = new Date().toISOString();
-        this._subscribePersonalChannel(userId);
+        this._subscribePersonalChannel(normalizedUserId);
+        this._subscribePersonalDB(normalizedUserId);
         this.startSignalPolling();
-    }
-
-    private startSignalPolling() {
-        if (this.signalPollTimer) clearInterval(this.signalPollTimer);
-        this.signalPollTimer = setInterval(() => this.pollForSignals(), 3000); 
+        
+        // Listen for foreground to poll immediately
+        AppState.addEventListener('change', (state) => {
+            if (state === 'active') {
+                this.pollForSignals();
+            }
+        });
     }
 
     private async pollForSignals() {
@@ -130,46 +153,113 @@ class CallService {
                         ...(row.payload as any),
                         type: row.type as any,
                         signalId: row.signal_id,
-                        callerId: row.sender_id,
-                        calleeId: row.receiver_id,
-                        timestamp: row.created_at
+                        callerId: normalizeId(row.sender_id),
+                        calleeId: normalizeId(row.receiver_id),
+                        timestamp: row.created_at,
+                        roomId: (row.payload as any).roomId || (row.payload as any).callId
                     };
                     this.handleIncomingSignal(signal);
                 });
             }
         } catch (err) {
             // Non-fatal, just log it
-            console.log('[CallService] Signal polling check:', err);
+            console.log('[CallService] Signal polling check error:', err);
         }
+    }
+
+    private _subscribePersonalDB(userId: string): void {
+        if (_signalSubscription) {
+            supabase.removeChannel(_signalSubscription);
+        }
+
+        console.log(`[CallService] 📡 High-speed DB fallback enabled for ${userId}`);
+        
+        _signalSubscription = supabase.channel(`call_signals_realtime_${userId}`)
+            .on('postgres_changes', 
+                { 
+                    event: 'INSERT', 
+                    schema: 'public', 
+                    table: 'call_signals', 
+                    filter: `receiver_id=eq.${userId}` 
+                },
+                (payload) => {
+                    const row = payload.new;
+                    console.log(`[CallService] 📦 DB-Signal received via Realtime: ${row.type}`);
+                    
+                    const signal: CallSignal = {
+                        ...(row.payload as any),
+                        type: row.type as any,
+                        signalId: row.signal_id,
+                        callerId: normalizeId(row.sender_id),
+                        calleeId: normalizeId(row.receiver_id),
+                        timestamp: row.created_at,
+                        roomId: (row.payload as any).roomId || (row.payload as any).callId
+                    };
+                    this.handleIncomingSignal(signal);
+                }
+            )
+            .subscribe();
+    }
+
+    private startSignalPolling() {
+        if (this.signalPollInterval) clearInterval(this.signalPollInterval);
+        
+        const pollAction = () => {
+            if (this.userId) {
+                this.pollForSignals();
+            }
+        };
+
+        // Standard 10s polling
+        const defaultInterval = 10000;
+        
+        this.signalPollInterval = setInterval(pollAction, defaultInterval);
+        
+        // Accelerated polling during active signaling (When currentRoomId is set)
+        this._fastPollInterval = setInterval(() => {
+            if (this.currentRoomId) {
+                if (!this.personalChannelSubscribed || !this.roomSubscribed) {
+                    console.log(`[CallService] ⚡ High-speed signal sync (WS inactive/restricted)`);
+                    pollAction();
+                }
+            }
+        }, 3000); // 3s polling during connection phase
     }
 
     private _subscribePersonalChannel(userId: string): void {
         const channelName = `call_user_${userId}`;
         console.log(`[CallService] Initializing Supabase Realtime signaling on channel: ${channelName}`);
 
-        this.personalChannel = supabase.channel(channelName, {
+        if (_personalChannel) {
+            supabase.removeChannel(_personalChannel);
+        }
+
+        _personalChannel = supabase.channel(channelName, {
             config: { broadcast: { self: false } },
         });
 
         // Listen for all call signal types on the personal channel
-        this.personalChannel.on('broadcast', { event: 'call_signal' }, ({ payload }) => {
+        _personalChannel.on('broadcast', { event: 'call_signal' }, ({ payload }) => {
             const signal = payload as CallSignal;
             console.log(`📞 [CallService] Received signal [${signal.type}] from ${signal.callerId}`);
             this.handleIncomingSignal(signal);
         });
 
         // Per-subscription guard — prevents Supabase from firing CLOSED multiple times
-        // on the same channel object when the WebSocket drops (which causes the spam).
         let closedHandled = false;
 
-        this.personalChannel.subscribe((status, err) => {
+        _personalChannel.subscribe((status, err) => {
             if (status === 'SUBSCRIBED') {
-                this.reconnectAttempts = 0;
+                _personalChannelReconnectAttempts = 0;
                 this.personalChannelSubscribed = true;
                 closedHandled = false;
                 this.notifyStatus(true);
                 console.log(`[CallService] ✅ Personal channel SUBSCRIBED for ${userId}`);
             } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+                if (status === 'CHANNEL_ERROR') {
+                    console.error('[CallService] 🛑 CHANNEL_ERROR: Potential connection limit reached');
+                }
+                
                 if (closedHandled) return;
                 closedHandled = true;
 
@@ -179,20 +269,14 @@ class CallService {
                 if (this.reconnectTimer) return;
                 
                 // Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 30s
-                // No max attempts — channel must self-heal for incoming calls
-                const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-                this.reconnectAttempts++;
+                const delay = Math.min(1000 * Math.pow(2, _personalChannelReconnectAttempts), 30000);
+                _personalChannelReconnectAttempts++;
                 
-                console.warn(`[CallService] ⚠️ Personal channel ${status} for ${userId}. Retry in ${delay}ms (attempt #${this.reconnectAttempts})`);
+                console.warn(`[CallService] ⚠️ Personal channel ${status} for ${userId}. Retry in ${delay}ms (attempt #${_personalChannelReconnectAttempts})`);
                 
                 this.reconnectTimer = setTimeout(() => {
                     this.reconnectTimer = null;
-                    
                     if (this.userId === userId) {
-                        if (this.personalChannel) {
-                            supabase.removeChannel(this.personalChannel);
-                            this.personalChannel = null;
-                        }
                         this._subscribePersonalChannel(userId);
                     }
                 }, delay);
@@ -201,22 +285,38 @@ class CallService {
     }
 
     private handleIncomingSignal(signal: CallSignal) {
-        // Cross-path deduplication: check if we've already processed this signal
-        // This prevents double-processing when signal arrives via both Broadcast AND DB poll
-        if (signal.signalId) {
-            if (this.processedSignalIds.has(signal.signalId)) {
-                console.log(`[CallService] 🔁 Skipping duplicate signal [${signal.type}] id: ${signal.signalId}`);
-                return;
-            }
-            this.processedSignalIds.add(signal.signalId);
+        if (!this.userId) return;
+        if (!this._shouldProcessSignal(signal)) return;
+
+        const myId = normalizeId(this.userId);
+        const senderId = normalizeId(signal.callerId || (signal as any).sender_id);
+        const rawSenderId = (signal.callerId || (signal as any).sender_id || '').toString().toLowerCase();
+        const rawMyId = (this.userId || '').toString().toLowerCase();
+
+        // [AUTO-CUT FIX] Ignore signals sent by OURSELVES (loopy signaling)
+        // We use both normalized and raw ID comparisons to ensure no leaks
+        if (senderId === myId || rawSenderId === rawMyId) {
+            return;
         }
 
-        // If it's a call request and we are already in a call, check if it's the SAME call
+        // Check for busy state or duplicate call requests
         if (signal.type === 'call-request' && this.currentRoomId) {
+            const signalTime = new Date(signal.timestamp).getTime();
+            const now = Date.now();
+            const ageSeconds = (now - signalTime) / 1000;
+
+            // If age is more than 30s, ignore completely as stale
+            if (ageSeconds > 30) {
+                console.log(`[CallService] 🕰 Ignoring stale call-request from ${ageSeconds.toFixed(1)}s ago.`);
+                return;
+            }
+
+            // If we're already in THIS room, it's a legitimate retry/broadcast duplicate
             if (this.currentRoomId === signal.roomId) {
                 console.log('[CallService] 🔄 Ignoring duplicate call-request for own active room:', signal.roomId);
                 return;
             }
+
             console.log(`[CallService] 🚫 Busy: auto-rejecting request ${signal.roomId} (current: ${this.currentRoomId})`);
             this.rejectCall(signal);
             return;
@@ -225,16 +325,38 @@ class CallService {
         this.notifyListeners(signal);
     }
 
+    private _shouldProcessSignal(signal: CallSignal): boolean {
+        // Cross-path deduplication: check if we've already processed this signal
+        // We include ROOM ID and TYPE to ensure we don't drop different signals from same user
+        const signalKey = signal.signalId || 
+            `${signal.type}_${signal.roomId || signal.callId || 'no-room'}_${signal.callerId || 'no-caller'}`;
+
+        if (this.processedSignalIds.has(signalKey)) {
+            console.log(`[CallService] 🔁 Duplicate signal [${signal.type}] ignored (Key: ${signalKey.substring(0, 30)}...)`);
+            return false;
+        }
+        this.processedSignalIds.add(signalKey);
+        
+        // 30s TTL for each signal to allow future calls with same roomId (e.g. redials)
+        setTimeout(() => {
+            this.processedSignalIds.delete(signalKey);
+        }, 30000);
+
+        return true;
+    }
+
     // ── Room channel (for WebRTC signals after call-accept) ────────────────
 
     private setupRoomListeners(channel: RealtimeChannel, _roomId: string): void {
         channel.on('broadcast', { event: 'signal' }, ({ payload }) => {
             const signal = payload as CallSignal;
+            if (!this._shouldProcessSignal(signal)) return;
+
             console.log(`[CallService] Received room signal [${signal.type}]`);
             this.notifyListeners(signal);
 
             if (signal.type === 'call-end' || signal.type === 'call-reject') {
-                this.cleanup();
+                this.cleanup(signal.type);
             }
         });
     }
@@ -249,22 +371,11 @@ class CallService {
             return;
         }
 
-        const isChannelValid = this.roomChannel && this.currentRoomId === roomId;
-
-        if (isChannelValid && this.roomSubscribed) {
-            console.log(`[CallService] Already joined room ${roomId}. Reusing connection.`);
-            if (onSubscribed) {
-                onSubscribed();
-            }
-            return;
-        }
-
         // Clean up previous room channel completely
-        if (this.roomChannel) {
-            console.log(`[CallService] Cleaning up old room channel: ${this.currentRoomId}`);
-            this.roomChannel.unsubscribe();
-            supabase.removeChannel(this.roomChannel);
-            this.roomChannel = null;
+        if (_roomChannel) {
+            console.log(`[CallService] Cleaning up old room channel before joining new one: ${this.currentRoomId}`);
+            supabase.removeChannel(_roomChannel);
+            _roomChannel = null;
         }
 
         console.log(`[CallService] Joining room ${roomId}...`);
@@ -277,24 +388,24 @@ class CallService {
             this.roomSubscribeCallbacks.push(onSubscribed);
         }
 
-        this.roomChannel = supabase.channel(`call_room_${roomId}`, {
+        _roomChannel = supabase.channel(`call_room_${roomId}`, {
             config: { broadcast: { self: false } },
         });
 
-        this.setupRoomListeners(this.roomChannel, roomId);
+        this.setupRoomListeners(_roomChannel, roomId);
 
         const timeout = setTimeout(() => {
             console.warn(`[CallService] Room ${roomId} subscription timeout - proceeding anyway`);
             this.handleJoinSuccess(roomId);
-        }, 10000);
+        }, 10000); // 10s for establishement
 
-        this.roomChannel.subscribe((status) => {
+        _roomChannel.subscribe((status) => {
             console.log(`[CallService] Room ${roomId} subscription status: ${status}`);
             
             if (status === 'SUBSCRIBED') {
                 clearTimeout(timeout);
                 this.handleJoinSuccess(roomId);
-            } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
                 this.roomSubscribed = false;
                 this.isJoiningRoom = false;
                 
@@ -307,6 +418,11 @@ class CallService {
                         }
                     }, 2000);
                 }
+            } else if (status === 'CLOSED') {
+                // CLOSED is normal when we unsubscribe. No recovery needed unless we didn't mean to.
+                console.log(`[CallService] Room ${roomId} channel closed.`);
+                this.roomSubscribed = false;
+                this.isJoiningRoom = false;
             }
         });
     }
@@ -316,13 +432,22 @@ class CallService {
         
         this.roomSubscribed = true;
         this.isJoiningRoom = false;
+        
+        // 1. Process room callbacks (like starting the call)
         const callbacks = [...this.roomSubscribeCallbacks];
         this.roomSubscribeCallbacks = [];
         console.log(`[CallService] Room ${roomId} joined successfully. Notifying ${callbacks.length} listeners.`);
         callbacks.forEach(cb => cb());
+
+        // 2. Clear out buffered signals immediately upon subscription
+        if (this.signalBuffer.length > 0) {
+            console.log(`[CallService] 📤 Releasing ${this.signalBuffer.length} buffered room signals...`);
+            const signalsToFlush = [...this.signalBuffer];
+            this.signalBuffer = [];
+            signalsToFlush.forEach(sig => this.sendSignal(sig));
+        }
     }
 
-    // FIX #5: Add call timeout methods
     private startCallTimeout(onTimeout: () => void): void {
         this.clearCallTimeout();
         this.callTimeoutTimer = setTimeout(() => {
@@ -331,17 +456,24 @@ class CallService {
         }, this.CALL_TIMEOUT_MS);
     }
 
-    private clearCallTimeout(): void {
+    public clearCallTimeout(): void {
         if (this.callTimeoutTimer) {
+            console.log('[CallService] ⏰ Call timeout CLEARED');
             clearTimeout(this.callTimeoutTimer);
             this.callTimeoutTimer = null;
         }
     }
 
-    // ── PUBLIC: initiateCall() ────────────────────────────────────────────
+    // ── PUBLIC: startCall() ────────────────────────────────────────────
 
     async startCall(partnerId: string, callType: 'audio' | 'video'): Promise<string | null> {
         if (!this.userId) return null;
+
+        // Check for basic network connectivity first
+        const isReachable = await this.checkRealtimeReachable();
+        if (!isReachable) {
+            console.warn('[CallService] ⚠️ Signaling server unreachable. Call might fail.');
+        }
 
         // Self-heal: if our personal channel died, re-subscribe before calling
         if (!this.personalChannelSubscribed && this.userId) {
@@ -356,7 +488,7 @@ class CallService {
         this.currentPartnerId = partnerId;
         this.currentCallType = callType;
 
-        // FIX #12: Persist call state for crash recovery
+        // Persist call state for crash recovery
         this.persistCallState();
 
         console.log(`[CallService] Initiating Supabase call to ${partnerId} in room ${roomId}`);
@@ -368,17 +500,21 @@ class CallService {
             calleeId: partnerId,
             callType,
             roomId,
+            callerName: this.currentUser?.name || '',
+            callerAvatar: this.currentUser?.avatar || '',
             timestamp: new Date().toISOString()
         };
 
         // Join the room first so we're ready for the answer
         this.joinRoom(roomId);
 
+        // Ensure polling is active
+        this.startSignalPolling();
+
         // Send call-request to the callee's personal channel
         await this.sendSignal(signal);
-        console.log('[CallService] 📤 Call request sent via Supabase Broadcast');
 
-        // FIX #5: Start timeout - if no response in 45 seconds, end the call
+        // Start timeout - if no response in 45 seconds, end the call
         this.startCallTimeout(() => {
             this.cleanup('timeout');
         });
@@ -396,24 +532,32 @@ class CallService {
         this.currentPartnerId = signal.callerId;
         this.currentCallType = signal.callType;
 
-        // FIX #5: Clear timeout since call was accepted
+        // Clear timeout since call was accepted
         this.clearCallTimeout();
 
-        // Join room and wait until subscribed BEFORE sending accept.
-        // This ensures we are already listening on the room channel by the time
-        // the caller receives call-accept and fires the WebRTC offer — so we
-        // never miss the offer signal.
-        await new Promise<void>((resolve) => {
-            this.joinRoom(signal.roomId!, resolve);
-        });
+        // Join room only if we are not already in it (or it's a different room)
+        // This prevents the 'CLOSED' state recovery join race condition
+        if (!_roomChannel || this.currentRoomId !== signal.roomId || !this.roomSubscribed) {
+            console.log(`[CallService] Joining room ${signal.roomId} for accepted call...`);
+            await new Promise<void>((resolve) => {
+                this.joinRoom(signal.roomId!, resolve);
+            });
+        } else {
+            console.log(`[CallService] Already in room ${signal.roomId}, skipping rejoin.`);
+        }
+
+        // Ensure polling is active
+        this.startSignalPolling();
 
         // Room is ready. Now send accept to caller's personal channel.
         await this.sendSignal({
             ...signal,
             type: 'call-accept',
             calleeId: this.userId!,
+            calleeName: this.currentUser?.name || '',
+            calleeAvatar: this.currentUser?.avatar || '',
             timestamp: new Date().toISOString(),
-            signalId: Crypto.randomUUID() // FIX: Generate fresh signalId for the response
+            signalId: Crypto.randomUUID() // Generate fresh signalId for the response
         });
     }
 
@@ -424,7 +568,7 @@ class CallService {
 
         console.log(`[CallService] Rejecting call from ${signal.callerId}`);
 
-        // FIX #5: Clear timeout since call was rejected
+        // Clear timeout since call was rejected
         this.clearCallTimeout();
 
         await this.sendSignal({
@@ -432,7 +576,7 @@ class CallService {
             type: 'call-reject',
             calleeId: this.userId,
             timestamp: new Date().toISOString(),
-            signalId: Crypto.randomUUID() // FIX: Generate fresh signalId for the response
+            signalId: Crypto.randomUUID()
         });
 
         this.cleanup('reject');
@@ -475,41 +619,33 @@ class CallService {
         };
 
         // Ensure we are in the room first
-        if (!this.roomChannel || this.currentRoomId !== roomId || !this.roomSubscribed) {
+        if (!_roomChannel || this.currentRoomId !== roomId || !this.roomSubscribed) {
+            console.log(`[CallService] Joining room ${roomId} before notifying ringing...`);
             this.joinRoom(roomId, sendRinging);
         } else {
-            await sendRinging();
+            sendRinging();
         }
     }
 
     // ── PRIVATE: sendToPersonalChannel() ─────────────────────────────────
-    //
-    // Creates a temporary channel to broadcast a signal to a specific user's
-    // personal channel. Properly awaits until the signal is actually sent.
+
     private sendToPersonalChannel(recipientId: string, event: string, signal: CallSignal, signalType: string): Promise<void> {
         return new Promise<void>((resolve) => {
             const channelName = `call_user_${recipientId}`;
             console.log(`[CallService] 🛰️ Sending ${signalType} to ${channelName}...`);
 
-            // NOTE: If this device already has a channel with this name (e.g. own personal channel),
-            // Supabase client will return the EXISTING channel. We handle this by removing it first
-            // only if it's a DIFFERENT user's personal channel (we never send to our own).
             const targetChannel = supabase.channel(channelName, {
                 config: { broadcast: { self: false } },
             });
 
             const timer = setTimeout(() => {
                 console.warn(`[CallService] ⚠️ Send timeout for ${signalType} to ${recipientId}`);
-                try { 
-                    targetChannel.unsubscribe(); 
-                    supabase.removeChannel(targetChannel);
-                } catch (_) {}
-                resolve(); // best-effort
+                try { supabase.removeChannel(targetChannel); } catch (_) {}
+                resolve();
             }, 10000);
 
             targetChannel.subscribe((status, err) => {
                 if (status === 'SUBSCRIBED') {
-                    console.log(`[CallService] 🚀 Channel ${channelName} SUBSCRIBED. Broadcasting...`);
                     targetChannel.send({
                         type: 'broadcast',
                         event,
@@ -517,38 +653,20 @@ class CallService {
                     }).then((resp) => {
                         clearTimeout(timer);
                         console.log(`[CallService] ✅ Sent ${signalType} to ${channelName}. Response:`, resp);
-                        // Clean up after a short delay to ensure broadcast is flushed
+                        // Clean up after a short delay
                         setTimeout(() => { 
-                            try { 
-                                targetChannel.unsubscribe(); 
-                                supabase.removeChannel(targetChannel);
-                            } catch (_) {} 
+                            try { supabase.removeChannel(targetChannel); } catch (_) {} 
                         }, 1000);
                         resolve();
                     }).catch((err) => {
                         clearTimeout(timer);
-                        console.warn(`[CallService] ❌ Failed to broadcast ${signalType} to ${recipientId}:`, err);
-                        try { 
-                            targetChannel.unsubscribe(); 
-                            supabase.removeChannel(targetChannel);
-                        } catch (_) {}
-                        resolve(); // best-effort
+                        console.warn(`[CallService] ❌ Failed to broadcast ${signalType}:`, err);
+                        try { supabase.removeChannel(targetChannel); } catch (_) {}
+                        resolve();
                     });
-                } else if (status === 'CHANNEL_ERROR') {
-                    // ❌ Actual error — warn about it
+                } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
                     clearTimeout(timer);
-                    console.warn(`[CallService] ❌ Channel ERROR for ${recipientId}:`, err?.message || 'No error details');
-                    try { 
-                        targetChannel.unsubscribe(); 
-                        supabase.removeChannel(targetChannel);
-                    } catch (_) {}
-                    resolve();
-                } else if (status === 'CLOSED') {
-                    // ✅ CLOSED is EXPECTED — intentional cleanup after send, no warn needed
-                    clearTimeout(timer);
-                    try { 
-                        supabase.removeChannel(targetChannel);
-                    } catch (_) {}
+                    try { supabase.removeChannel(targetChannel); } catch (_) {}
                     resolve();
                 }
             });
@@ -556,56 +674,91 @@ class CallService {
     }
 
     // ── SEND SIGNAL (Dual-path: DB primary + Broadcast bonus) ─────────────
-    //
-    // DB INSERT is the PRIMARY transport — goes through HTTP proxy, always works.
-    // Broadcast is a BONUS — faster but requires WebSocket (blocked by some ISPs).
+
     async sendSignal(signal: CallSignal) {
-        // Generate unique signalId for cross-path deduplication (prevents double-processing)
         if (!signal.signalId) {
             signal.signalId = Crypto.randomUUID();
         }
 
         const signalType = signal.type;
+        
+        // Normalize IDs
+        if (signal.callerId) signal.callerId = normalizeId(signal.callerId);
+        if (signal.calleeId) signal.calleeId = normalizeId(signal.calleeId);
+        
         const recipientId = this.getRecipientId(signal);
 
-        // 1. PRIMARY: Insert into DB (works through proxies, firewall friendly)
-        try {
-            await supabase.from('call_signals').insert({
-                signal_id: signal.signalId,
-                sender_id: this.userId,
-                receiver_id: recipientId,
-                type: signalType,
-                payload: signal
-            });
-            console.log(`[CallService] ✅ Signal [${signalType}] persisted to DB`);
-        } catch (dbErr) {
-            console.warn('[CallService] ❌ DB signaling failed:', dbErr);
-            // Continue to Broadcast anyway as fallback-of-fallback
+        // ── 1. PRIMARY: Insert into DB (Lifecycle events ONLY) ─────────────
+        // We prune transient WebRTC/UI signals to keep the DB small and fast.
+        const shouldPersist = ['call-request', 'call-accept', 'call-reject', 'call-end'].includes(signalType);
+        
+        if (shouldPersist) {
+            try {
+                await supabase.from('call_signals').insert({
+                    signal_id:   signal.signalId,
+                    sender_id:   this.userId,
+                    receiver_id: normalizeId(recipientId),
+                    type:        signalType,
+                    payload:     signal
+                });
+                console.log(`[CallService] ✅ Lifecycle Signal [${signalType}] persisted to DB`);
+            } catch (dbErr) {
+                console.warn('[CallService] ❌ DB signaling failed:', dbErr);
+            }
         }
 
-        // 2. BONUS: Also try broadcast (faster if WebSocket works)
+        // ── 2. SECONDARY: Broadcast path ───────────────────────────────────
         try {
-            if (signalType === 'call-request' || signalType === 'call-accept' || 
-                signalType === 'call-reject' || signalType === 'call-ringing') {
-                // Personal channel signals
-                this.sendToPersonalChannel(recipientId, 'call_signal', signal, signalType)
-                    .catch(() => {}); // best-effort, don't await
-            } else if (this.roomChannel && this.roomSubscribed) {
-                // Room signals (offer, answer, ice-candidate, etc.)
-                this.roomChannel.send({
-                    type: 'broadcast',
-                    event: 'signal',
-                    payload: signal,
-                }).catch(() => {});
+            const normalizedRecipientId = normalizeId(recipientId);
+            const isLifecycle = ['call-request', 'call-accept', 'call-reject', 'call-ringing'].includes(signalType);
+
+            if (isLifecycle) {
+                // Personal Broadcast Channel
+                this.sendToPersonalChannel(normalizedRecipientId, 'call_signal', signal, signalType)
+                    .catch(() => {});
+
+                // Push notifications
+                if (signalType === 'call-request') {
+                    console.log(`[CallService] 🔔 Triggering call-push for ${normalizedRecipientId}`);
+                    supabase.functions.invoke('send-call-push', {
+                        body: {
+                            calleeId: normalizedRecipientId,
+                            callerId: this.userId,
+                            callId: signal.callId,
+                            callType: signal.callType,
+                            callerName: this.currentUser?.name || 'Someone'
+                        }
+                    }).catch(pushErr => {
+                        console.warn('[CallService] ⚠️ Call push trigger failed:', pushErr.message);
+                    });
+                }
+            } else {
+                // Room Broadcast (SDP, ICE, Track Toggles)
+                if (_roomChannel && this.roomSubscribed) {
+                    _roomChannel.send({
+                        type: 'broadcast',
+                        event: 'signal',
+                        payload: signal,
+                    }).catch(e => {
+                        console.warn(`[CallService] ❌ Failed to broadcast room signal [${signalType}]:`, e);
+                    });
+                } else if (signal.roomId || this.currentRoomId) {
+                    // BUFFERING: If room isn't ready yet, queue the signal
+                    // We only buffer room signals, not lifecycle signals (which have DB fallback)
+                    if (this.signalBuffer.length < 50) {
+                        console.log(`[CallService] 📦 Buffering room signal [${signalType}] (Room not ready)`);
+                        this.signalBuffer.push(signal);
+                    }
+                }
             }
-        } catch (_) {
-            // Broadcast failed — DB already sent or triggered, so we're fine
-        }
+        } catch (_) {}
     }
 
     private getRecipientId(signal: CallSignal): string {
         if (signal.type === 'call-request') return signal.calleeId;
-        if (this.userId === signal.callerId) return signal.calleeId;
+        const myId = normalizeId(this.userId || '');
+        const callerId = normalizeId(signal.callerId);
+        if (myId === callerId) return signal.calleeId;
         return signal.callerId;
     }
 
@@ -649,7 +802,7 @@ class CallService {
                 callerId: this.userId || '',
                 calleeId: this.currentPartnerId || '',
                 callType: this.currentCallType,
-                payload: candidate.toJSON ? candidate.toJSON() : candidate,
+                payload: candidate ? (candidate.toJSON ? candidate.toJSON() : candidate) : null,
                 timestamp: new Date().toISOString(),
                 roomId: this.currentRoomId
             });
@@ -670,17 +823,23 @@ class CallService {
         this.listeners.delete(handler);
     }
 
+    private async checkRealtimeReachable(): Promise<boolean> {
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            return !!session;
+        } catch {
+            return false;
+        }
+    }
+
     // ── PUBLIC: cleanup() ───────────────────────────────────────────────
 
     cleanup(reason: string = 'unknown'): void {
         console.log(`[CallService] 🧹 Cleaning up call state. Reason: ${reason}`);
         
-        // Save these for logging before we null them
         const roomId = this.currentRoomId;
 
         // CRITICAL: Set state to null BEFORE closing channels
-        // This prevents the subscribe callback from seeing 'currentRoomId === roomId'
-        // and attempting a recovery re-join.
         this.currentRoomId = null;
         this.currentPartnerId = null;
         this.roomSubscribed = false;
@@ -694,23 +853,36 @@ class CallService {
             this.reconnectTimer = null;
         }
 
-        if (this.roomChannel) {
+        if (_roomChannel) {
             console.log(`[CallService] Unsubscribing from room ${roomId}`);
-            this.roomChannel.unsubscribe();
-            supabase.removeChannel(this.roomChannel);
-            this.roomChannel = null;
+            try { supabase.removeChannel(_roomChannel); } catch (_) {}
+            _roomChannel = null;
         }
 
-        if (this.signalPollTimer) {
-            clearInterval(this.signalPollTimer);
-            this.signalPollTimer = null;
+        if (this.signalPollInterval) {
+            clearInterval(this.signalPollInterval);
+            this.signalPollInterval = null;
         }
+        
+        if (this._fastPollInterval) {
+            clearInterval(this._fastPollInterval);
+            this._fastPollInterval = null;
+        }
+
+        this.signalBuffer = [];
+
+        if (_signalSubscription) {
+            try { supabase.removeChannel(_signalSubscription); } catch (_) {}
+            _signalSubscription = null;
+        }
+
+        // Clear processed signal IDs
+        this.processedSignalIds.clear();
         
         // Clear persisted state
         this.clearPersistedCallState();
     }
 
-    // FIX #12: Persist call state for crash recovery
     private async persistCallState(): Promise<void> {
         try {
             const AsyncStorage = require('@react-native-async-storage/async-storage').default;
@@ -735,7 +907,6 @@ class CallService {
         }
     }
 
-    // FIX #12: Check for and recover from crashed call state
     async checkAndRecoverCall(): Promise<{ roomId: string; partnerId: string; callType: 'audio' | 'video' } | null> {
         try {
             const AsyncStorage = require('@react-native-async-storage/async-storage').default;
@@ -743,7 +914,6 @@ class CallService {
             if (!stateStr) return null;
 
             const state = JSON.parse(stateStr);
-            // Check if persisted within last 5 minutes (crash recovery window)
             const persistedAt = new Date(state.persistedAt).getTime();
             const now = Date.now();
 
@@ -751,7 +921,6 @@ class CallService {
                 console.log('[CallService] Found persisted call state, attempting recovery:', state);
                 return state;
             } else {
-                // State too old, clear it
                 await this.clearPersistedCallState();
                 return null;
             }

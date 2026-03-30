@@ -220,7 +220,7 @@ class NativeCallBridge {
       case 'call-accept':
         // Remote user accepted our outgoing call
         // Report the call as connected in the native UI
-        nativeCallService.reportCallConnected(signal.callId);
+        nativeCallService.reportCallConnected(signal.callId, signal.callType);
         this.callbacks?.onCallConnected(signal.callId);
         break;
 

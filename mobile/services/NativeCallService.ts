@@ -138,16 +138,36 @@ class NativeCallService {
     };
 
     try {
+      if (!this.RNCallKeep) {
+          console.warn('[NativeCallService] 🛑 RNCallKeep is NULL during setup attempt');
+          return;
+      }
+      
       await this.RNCallKeep.setup(options);
+
+      // Extra safety: Some versions of RNCallKeep might throw if setup fails silently
+      this.isReady = true;
 
       if (Platform.OS === 'android' && this.RNCallKeep) {
         try {
-          if (typeof this.RNCallKeep.setAvailable === 'function') this.RNCallKeep.setAvailable(true);
-          if (typeof this.RNCallKeep.registerPhoneAccount === 'function') this.RNCallKeep.registerPhoneAccount();
-          if (typeof this.RNCallKeep.registerAndroidEvents === 'function') this.RNCallKeep.registerAndroidEvents();
-          if (typeof this.RNCallKeep.canMakeMultipleCalls === 'function') this.RNCallKeep.canMakeMultipleCalls(false);
+          // Check for method existence before calling to prevent 'undefined is not a function' or property access errors
+          if (typeof this.RNCallKeep.setAvailable === 'function') {
+              this.RNCallKeep.setAvailable(true);
+          }
+          
+          if (typeof this.RNCallKeep.registerPhoneAccount === 'function') {
+              this.RNCallKeep.registerPhoneAccount();
+          }
+          
+          if (typeof this.RNCallKeep.registerAndroidEvents === 'function') {
+              this.RNCallKeep.registerAndroidEvents();
+          }
+          
+          if (typeof this.RNCallKeep.canMakeMultipleCalls === 'function') {
+              this.RNCallKeep.canMakeMultipleCalls(false);
+          }
         } catch (e) {
-          console.warn('[NativeCallService] Android-specific setup failed:', e);
+          console.warn('[NativeCallService] ⚠️ Android-specific setup failed (non-fatal):', e);
         }
       }
 
@@ -155,7 +175,7 @@ class NativeCallService {
       
       // Store AppState subscription for precise removal
       if (this.appStateSubscription) {
-          this.appStateSubscription.remove();
+          try { this.appStateSubscription.remove(); } catch (e) {}
       }
       this.appStateSubscription = AppState.addEventListener('change', this.handleAppStateChange);
 
@@ -242,12 +262,17 @@ class NativeCallService {
   /**
    * Report that the call is now connected (media flowing).
    */
-  reportCallConnected(callId?: string): void {
+  reportCallConnected(callId?: string, callType?: 'audio' | 'video'): void {
     if (!this.RNCallKeep) return;
     const uuid = callId || this.activeCallUUID;
     if (uuid) {
       this.RNCallKeep.reportConnectedOutgoingCallWithUUID(uuid);
       this.RNCallKeep.setCurrentCallActive(uuid);
+
+      // FORCE AUDIO ROUTE: ensure speaker is on for video calls, earpiece for audio
+      const route = callType === 'video' ? 'Speaker' : 'Phone';
+      this.RNCallKeep.setAudioRoute(uuid, route);
+      console.log(`[NativeCallService] Audio route set to ${route} for ${uuid}`);
     }
   }
 
@@ -360,6 +385,12 @@ class NativeCallService {
     this.notifyHandlers('answer', callUUID, this.pendingIncomingCall);
     if (this.RNCallKeep) {
       this.RNCallKeep.setCurrentCallActive(callUUID);
+      
+      // AUTO-ROUTE ON ANSWER
+      const callType = this.pendingIncomingCall?.callType || 'audio';
+      const route = callType === 'video' ? 'Speaker' : 'Phone';
+      this.RNCallKeep.setAudioRoute(callUUID, route);
+
       if (Platform.OS === 'android') {
         this.RNCallKeep.backToForeground();
       }

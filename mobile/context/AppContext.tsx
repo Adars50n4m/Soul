@@ -1,4 +1,5 @@
 import * as React from 'react';
+// Force re-bundle: 2026-03-30T00:15:00Z (Android Resilience v2)
 import { useState, useEffect, createContext, useContext, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth, AuthProvider } from './AuthContext';
@@ -42,6 +43,7 @@ interface AppContextType {
     updateMessage: any;
     addReaction: any;
     deleteMessage: any;
+    toggleHeart: any;
     clearChatMessages: any;
     sendTyping: any;
     initializeChatSession: any;
@@ -153,6 +155,7 @@ const AppProviderInternal: React.FC<{ children: React.ReactNode }> = ({ children
         updateMessage: chat.updateMessage,
         addReaction: chat.addReaction,
         deleteMessage: chat.deleteMessage,
+        toggleHeart: chat.toggleHeart,
         clearChatMessages: chat.clearChatMessages,
         sendTyping: chat.sendTyping,
         initializeChatSession: chat.initializeChatSession,
@@ -229,11 +232,78 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 };
 
-export const useAppContext = () => {
+export const useAppContext = (): AppContextType => {
     const context = useContext(AppContext);
+    
     if (context === undefined) {
-        throw new Error('useAppContext must be used within an AppProvider');
+        // SAFE FALLBACK: Return a dummy object to prevent crashes on Android during route transitions
+        console.warn('[AppContext] useApp() called outside of AppProvider. This usually happens during rapid navigation or deep links. Providing safe fallback.');
+        
+        return {
+            currentUser: null,
+            isLoggedIn: false,
+            isReady: false,
+            login: () => Promise.resolve(false),
+            setSession: () => Promise.resolve(),
+            logout: () => Promise.resolve(),
+            updateProfile: () => Promise.resolve(),
+            changeUsername: () => Promise.resolve({ success: false }),
+            contacts: [],
+            messages: {},
+            onlineUsers: [],
+            typingUsers: [],
+            uploadProgressTracker: {},
+            otherUser: null,
+            statuses: [],
+            myStatuses: [],
+            pendingStatusUploads: [],
+            statusUploadProgress: {},
+            isStatusSyncing: false,
+            calls: [],
+            activeCall: null,
+            musicState: { isPlaying: false },
+            theme: 'midnight',
+            activeTheme: THEME_MAP['midnight'],
+            setTheme: () => {},
+            connectivity: { isDeviceOnline: true, isServerReachable: true, isRealtimeConnected: true },
+            isLocked: false,
+            unlockApp: () => {},
+            refreshLocalCache: async () => {},
+            // Default no-ops for functions
+            sendChatMessage: async () => {},
+            updateMessage: async () => {},
+            addReaction: async () => {},
+            deleteMessage: async () => {},
+            toggleHeart: async () => {},
+            clearChatMessages: async () => {},
+            sendTyping: () => {},
+            initializeChatSession: () => {},
+            cleanupChatSession: () => {},
+            fetchOtherUserProfile: async () => {},
+            archiveContact: async () => {},
+            unfriendContact: async () => {},
+            addStatus: async () => {},
+            deleteStatus: async () => {},
+            addStatusView: async () => {},
+            updateSoulNote: async () => {},
+            refreshStatuses: async () => {},
+            retryPendingStatusUploads: async () => {},
+            startCall: async () => {},
+            acceptCall: async () => {},
+            endCall: async () => {},
+            toggleMinimizeCall: () => {},
+            toggleMute: () => {},
+            toggleVideo: () => {},
+            deleteCall: async () => {},
+            clearCalls: async () => {},
+            playSong: async () => {},
+            togglePlayMusic: async () => {},
+            toggleFavoriteSong: async () => {},
+            seekTo: async () => {},
+            getPlaybackPosition: async () => 0,
+        } as any;
     }
+    
     return context;
 };
 

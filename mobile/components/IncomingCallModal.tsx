@@ -12,6 +12,8 @@ import Animated, {
     withSequence
 } from 'react-native-reanimated';
 import { useApp } from '../context/AppContext';
+import { normalizeId } from '../utils/idNormalization';
+import { SoulAvatar } from './SoulAvatar';
 
 
 /**
@@ -30,8 +32,9 @@ export const IncomingCallModal = () => {
         console.log(`[IncomingCallModal] Visibility state changed: ${isVisible}. Call type: ${activeCall?.type}, From: ${activeCall?.contactId}`);
     }, [isVisible, activeCall]);
 
-    const contact = contacts.find(c => c.id === activeCall?.contactId);
-    const displayAvatar = contact?.avatar || activeCall?.callerAvatar || 'https://via.placeholder.com/150';
+    const contactId = activeCall ? normalizeId(activeCall.contactId) : null;
+    const contact = contacts.find(c => normalizeId(c.id) === contactId);
+    const displayAvatar = contact?.avatar || activeCall?.callerAvatar || '';
     const displayName = contact?.name || activeCall?.callerName || activeCall?.contactId || 'Unknown User';
 
     const [timeLeft, setTimeLeft] = useState(60);
@@ -99,11 +102,15 @@ export const IncomingCallModal = () => {
         <View style={[StyleSheet.absoluteFill, { zIndex: 9999, elevation: 10 }]}>
             <View style={styles.container}>
                 <GlassView intensity={90} tint="dark" style={styles.blurContainer} >
-                    <Image
-                        source={{ uri: displayAvatar }}
-                        style={[StyleSheet.absoluteFillObject, { opacity: 0.3 }]}
-                        blurRadius={50}
-                    />
+                    {displayAvatar ? (
+                        <Image
+                            source={{ uri: displayAvatar }}
+                            style={[StyleSheet.absoluteFillObject, { opacity: 0.3 }]}
+                            blurRadius={50}
+                        />
+                    ) : (
+                        <View style={[StyleSheet.absoluteFillObject, { backgroundColor: '#12101A', opacity: 0.5 }]} />
+                    )}
 
                     <View style={[styles.content, { 
                         paddingTop: Math.max(insets.top + 40, 80),
@@ -115,9 +122,9 @@ export const IncomingCallModal = () => {
                                 <Animated.View style={[styles.rippleRing, rippleStyle]} />
                                 <Animated.View style={[styles.rippleRing, rippleStyle]} />
                                 <Animated.View style={[styles.avatarContainer, avatarAnimatedStyle]}>
-                                    <Image
-                                        source={{ uri: displayAvatar }}
-                                        style={styles.avatar}
+                                    <SoulAvatar
+                                        uri={displayAvatar}
+                                        size={140}
                                     />
                                 </Animated.View>
                             </View>
