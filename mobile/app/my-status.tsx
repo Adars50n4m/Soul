@@ -4,12 +4,13 @@ import {
   Text,
   StyleSheet,
   Pressable,
-  Image,
   FlatList,
   Alert,
+  Modal,
   StatusBar,
   ActivityIndicator,
   RefreshControl,
+  TextInput,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -45,7 +46,10 @@ export default function MyStatusScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [isMediaPickerVisible, setIsMediaPickerVisible] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
+  const [isActionBusy, setIsActionBusy] = useState(false);
+  const [isCaptionModalVisible, setIsCaptionModalVisible] = useState(false);
+  const [statusToEdit, setStatusToEdit] = useState<StatusWithViewers | null>(null);
+  const [editedCaption, setEditedCaption] = useState('');
 
   const loadData = useCallback(async () => {
     try {
@@ -128,11 +132,58 @@ export default function MyStatusScreen() {
           text: 'Delete', 
           style: 'destructive', 
           onPress: async () => {
-             await statusService.deleteMyStatus(status.id, status.mediaKey || '');
-             loadData();
+             try {
+               setIsActionBusy(true);
+               await statusService.deleteMyStatus(status.id, status.mediaKey || '');
+               await loadData();
+             } catch (e) {
+               const message = e instanceof Error ? e.message : 'Failed to delete status.';
+               Alert.alert('Delete failed', message);
+             } finally {
+               setIsActionBusy(false);
+             }
           }
         }
       ]
+    );
+  };
+
+  const openEditCaptionModal = (status: StatusWithViewers) => {
+    setStatusToEdit(status);
+    setEditedCaption(status.caption || '');
+    setIsCaptionModalVisible(true);
+  };
+
+  const handleSaveCaption = async () => {
+    if (!statusToEdit) {
+      setIsCaptionModalVisible(false);
+      return;
+    }
+
+    try {
+      setIsActionBusy(true);
+      await statusService.updateMyStatusCaption(statusToEdit.id, editedCaption);
+      setIsCaptionModalVisible(false);
+      setStatusToEdit(null);
+      await loadData();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Failed to update status caption.';
+      Alert.alert('Update failed', message);
+    } finally {
+      setIsActionBusy(false);
+    }
+  };
+
+  const openStatusActions = (status: StatusWithViewers) => {
+    Alert.alert(
+      'Status options',
+      'Choose an action',
+      [
+        { text: 'Edit caption', onPress: () => openEditCaptionModal(status) },
+        { text: 'Delete', style: 'destructive', onPress: () => handleDelete(status) },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      { cancelable: true }
     );
   };
 
@@ -163,13 +214,10 @@ export default function MyStatusScreen() {
           
           <Pressable 
             style={styles.optionBtn} 
-            onPress={() => isEditing ? handleDelete(item) : null}
+            onPress={() => openStatusActions(item)}
+            disabled={isActionBusy}
           >
-            {isEditing ? (
-              <Ionicons name="trash-outline" size={20} color="#FF3B30" />
-            ) : (
-              <MaterialIcons name="more-horiz" size={24} color="rgba(255,255,255,0.4)" />
-            )}
+            <MaterialIcons name="more-horiz" size={24} color="rgba(255,255,255,0.55)" />
           </Pressable>
         </View>
         {index < myStatuses.length - 1 && <View style={styles.separator} />}
@@ -188,8 +236,8 @@ export default function MyStatusScreen() {
           <Ionicons name="chevron-back" size={28} color="#fff" />
         </Pressable>
         <Text style={styles.headerTitle}>My status</Text>
-        <Pressable onPress={() => setIsEditing(!isEditing)} style={styles.editBtn}>
-          <Text style={styles.editText}>{isEditing ? 'Done' : 'Edit'}</Text>
+        <Pressable onPress={() => setIsMediaPickerVisible(true)} style={styles.editBtn}>
+          <Text style={styles.editText}>Add</Text>
         </Pressable>
       </View>
 
@@ -246,6 +294,49 @@ export default function MyStatusScreen() {
           if (assets.length > 0) handleSelectGallery(assets[0]);
         }}
       />
+
+      <Modal
+        transparent
+        animationType="fade"
+        visible={isCaptionModalVisible}
+        onRequestClose={() => setIsCaptionModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Edit caption</Text>
+            <TextInput
+              value={editedCaption}
+              onChangeText={setEditedCaption}
+              placeholder="Write a caption..."
+              placeholderTextColor="rgba(255,255,255,0.45)"
+              maxLength={200}
+              multiline
+              style={styles.modalInput}
+              editable={!isActionBusy}
+            />
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setIsCaptionModalVisible(false)}
+                style={[styles.modalBtn, styles.cancelBtn]}
+                disabled={isActionBusy}
+              >
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={handleSaveCaption}
+                style={[styles.modalBtn, styles.saveBtn, { backgroundColor: activeTheme.primary }]}
+                disabled={isActionBusy}
+              >
+                {isActionBusy ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.saveBtnText}>Save</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -317,5 +408,69 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     textAlign: 'center' 
   },
-  encryptedText: { fontWeight: '500' }
+  encryptedText: { fontWeight: '500' },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  modalCard: {
+    width: '100%',
+    borderRadius: 16,
+    backgroundColor: '#131313',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    padding: 16,
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  modalInput: {
+    minHeight: 90,
+    maxHeight: 150,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    color: '#fff',
+    fontSize: 15,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    textAlignVertical: 'top',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 14,
+  },
+  modalBtn: {
+    minWidth: 88,
+    height: 38,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 10,
+    paddingHorizontal: 12,
+  },
+  cancelBtn: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  saveBtn: {
+    backgroundColor: '#8C0016',
+  },
+  cancelBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  saveBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  }
 });

@@ -7,7 +7,7 @@ export const LEGACY_TO_UUID: Record<string, string> = {
 
 export const UUID_TO_LEGACY: Record<string, string> = Object.entries(LEGACY_TO_UUID).reduce(
   (acc, [legacy, uuid]) => ({ ...acc, [uuid]: legacy }),
-  {}
+  {} as Record<string, string>
 );
 
 /**
@@ -37,6 +37,14 @@ export function getSuperuserName(id: string): string | null {
   if (normalized === LEGACY_TO_UUID['shri']) return 'Shri';
   if (normalized === LEGACY_TO_UUID['hari']) return 'Hari';
   return null;
+}
+
+/**
+ * Resolves a handle (username) for a given ID if it's a superuser.
+ */
+export function getSuperuserHandle(id: string): string | null {
+  const normalized = normalizeId(id);
+  return UUID_TO_LEGACY[normalized] || null;
 }
 
 /**

@@ -3,7 +3,7 @@ import { useState, useEffect, createContext, useContext, useCallback, useRef } f
 import { Platform, AppState, Alert } from 'react-native';
 import { supabase, LEGACY_TO_UUID } from '../config/supabase';
 import { authService, AvatarType } from '../services/AuthService';
-import { offlineService } from '../services/LocalDBService';
+import { offlineService, getDb } from '../services/LocalDBService';
 import { notificationService } from '../services/NotificationService';
 import { proxySupabaseUrl } from '../config/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -62,6 +62,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const [currentUser, setCurrentUser] = useState<User | null>(null);
     const [isReady, setIsReady] = useState(false);
     const [deviceSessionId, setDeviceSessionId] = useState<string | null>(null);
+    const [sessionError, setSessionError] = useState<string | null>(null);
     const currentUserRef = useRef<User | null>(null);
     const deviceSessionIdRef = useRef<string | null>(null);
 
@@ -72,6 +73,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     useEffect(() => {
         currentUserRef.current = currentUser;
     }, [currentUser]);
+
+    const isDeveloperBypassId = useCallback((userId?: string | null): boolean => {
+        if (!userId) return false;
+        return userId === LEGACY_TO_UUID['shri']
+            || userId === LEGACY_TO_UUID['hari']
+            || userId.startsWith('f00f00f0-0000-0000-0000-00000000000');
+    }, []);
 
     const synchronizeSession = useCallback(async (userId: string) => {
         try {
@@ -115,29 +123,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 };
                 setCurrentUser(userObj);
                 await AsyncStorage.setItem('ss_current_user', userId);
+                await AsyncStorage.setItem('ss_cached_user_profile', JSON.stringify(userObj));
             } else {
                 // FALLBACK: For Developer Bypass users (shri/hari) who don't exist in Supabase DB
                 console.log('[AuthContext] Profile not found, applying bypass logic for:', userId);
                 if (userId === LEGACY_TO_UUID['shri']) {
-                    setCurrentUser({
+                    const bypassUser: User = {
                         id: userId,
                         name: 'Shri',
                         username: 'shri',
                         avatar: 'https://avatar.iran.liara.run/public/boy?username=shri',
                         avatarType: 'teddy',
                         bio: 'SoulSync Founder | Jai Shree Ram'
-                    });
+                    };
+                    setCurrentUser(bypassUser);
                     await AsyncStorage.setItem('ss_current_user', userId);
+                    await AsyncStorage.setItem('ss_cached_user_profile', JSON.stringify(bypassUser));
                 } else if (userId === LEGACY_TO_UUID['hari']) {
-                    setCurrentUser({
+                    const bypassUser: User = {
                         id: userId,
                         name: 'Hari',
                         username: 'hari',
                         avatar: 'https://avatar.iran.liara.run/public/boy?username=hari',
                         avatarType: 'teddy',
                         bio: 'SoulSync Dev | Om Namah Shivay'
-                    });
+                    };
+                    setCurrentUser(bypassUser);
                     await AsyncStorage.setItem('ss_current_user', userId);
+                    await AsyncStorage.setItem('ss_cached_user_profile', JSON.stringify(bypassUser));
                 }
             }
 
@@ -219,8 +232,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     await synchronizeSession(user.id);
                 }
             } else if (event === 'SIGNED_OUT') {
+                const cachedUserId = await AsyncStorage.getItem('ss_current_user');
+                if (isDeveloperBypassId(cachedUserId)) {
+                    console.log('[AuthContext] Ignoring SIGNED_OUT clear for developer bypass cache');
+                    return;
+                }
+
                 setCurrentUser(null);
-                await AsyncStorage.removeItem('ss_current_user');
+                await AsyncStorage.multiRemove(['ss_current_user', 'ss_cached_user_profile']);
             } else if (event === 'PASSWORD_RECOVERY') {
                 router.push('/forgot-password?mode=reset' as any);
             }
@@ -229,7 +248,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const { data: { subscription } } = authService.onAuthStateChange(handleAuthChange);
 
         return () => subscription.unsubscribe();
-    }, [synchronizeSession]);
+    }, [isDeveloperBypassId, synchronizeSession]);
 
     useEffect(() => {
         let isMounted = true;
@@ -238,15 +257,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.log('[AuthContext] Initializing - checking session...');
         
         const startInit = Date.now();
-        const sessionPromise = supabase.auth.getSession();
-        const timeoutPromise = new Promise<null>((resolve) => {
-            timeoutId = setTimeout(() => {
-                console.log(`[AuthContext] Session check timed out after ${Date.now() - startInit}ms, continuing anyway`);
-                resolve(null);
-            }, 10000);
-        });
+        
+        // --- NEW: Block until Database Migration is verified ---
+        getDb().then(() => {
+            console.log(`[AuthContext] Database ready after ${Date.now() - startInit}ms`);
+            
+            const sessionPromise = supabase.auth.getSession();
+            const timeoutPromise = new Promise<null>((resolve) => {
+                timeoutId = setTimeout(() => {
+                    console.log(`[AuthContext] Session check timed out after ${Date.now() - startInit}ms, continuing anyway`);
+                    resolve(null);
+                }, 10000);
+            });
 
-        Promise.race([sessionPromise, timeoutPromise]).then((sessionResult: any) => {
+            return Promise.race([sessionPromise, timeoutPromise]);
+        }).then((sessionResult: any) => {
             console.log(`[AuthContext] Session race complete after ${Date.now() - startInit}ms`);
             if (!isMounted) return;
             clearTimeout(timeoutId);
@@ -277,21 +302,67 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 });
             } else {
                 console.log('[AuthContext] No session found, checking cache...');
-                AsyncStorage.getItem('ss_current_user').then(cachedUserId => {
-                    if (isMounted) {
-                        if (cachedUserId) {
-                            console.log('[AuthContext] Found cached user:', cachedUserId);
+                AsyncStorage.getItem('ss_current_user').then(async (cachedUserId) => {
+                    if (!isMounted) return;
+
+                    if (cachedUserId) {
+                        if (isDeveloperBypassId(cachedUserId)) {
+                            console.log('[AuthContext] Restoring developer bypass user from local cache:', cachedUserId);
                             synchronizeSessionWithTimeout(cachedUserId).finally(() => {
                                 if (isMounted) {
-                                    console.log(`[AuthContext] Cache sync complete (total init time: ${Date.now() - startInit}ms), readying app`);
+                                    console.log(`[AuthContext] Bypass cache restore complete (total init time: ${Date.now() - startInit}ms), readying app`);
                                     setIsReady(true);
                                 }
                             });
-                        } else {
-                            console.log(`[AuthContext] No session or cached user (total init time: ${Date.now() - startInit}ms), readying app`);
+                            return;
+                        }
+
+                        console.log('[AuthContext] Found cached user without active session:', cachedUserId);
+                        console.log('[AuthContext] Attempting session refresh from persisted auth state...');
+
+                        const refreshed = await authService.refreshSession();
+                        const { data: refreshedSessionData } = await supabase.auth.getSession();
+                        const refreshedUserId = refreshedSessionData.session?.user?.id;
+
+                        if (refreshed && refreshedUserId) {
+                            console.log('[AuthContext] Session restored. Syncing profile for:', refreshedUserId);
+                            synchronizeSessionWithTimeout(refreshedUserId).finally(() => {
+                                if (isMounted) {
+                                    console.log(`[AuthContext] Refreshed session sync complete (total init time: ${Date.now() - startInit}ms), readying app`);
+                                    setIsReady(true);
+                                }
+                            });
+                            return;
+                        }
+
+                        const cachedProfileRaw = await AsyncStorage.getItem('ss_cached_user_profile');
+                        if (cachedProfileRaw) {
+                            try {
+                                const parsed = JSON.parse(cachedProfileRaw) as User;
+                                if (parsed?.id === cachedUserId) {
+                                    console.warn('[AuthContext] Session missing, restoring cached profile in offline mode');
+                                    setCurrentUser(parsed);
+                                    if (isMounted) {
+                                        setIsReady(true);
+                                    }
+                                    return;
+                                }
+                            } catch (parseError) {
+                                console.warn('[AuthContext] Failed to parse cached profile:', parseError);
+                            }
+                        }
+
+                        console.warn('[AuthContext] Cached user is stale (no valid session). Clearing local auth cache.');
+                        setCurrentUser(null);
+                        await AsyncStorage.multiRemove(['ss_current_user', 'ss_cached_user_profile']);
+                        if (isMounted) {
                             setIsReady(true);
                         }
+                        return;
                     }
+
+                    console.log(`[AuthContext] No session or cached user (total init time: ${Date.now() - startInit}ms), readying app`);
+                    setIsReady(true);
                 }).catch((err) => {
                     console.error('[AuthContext] Cache check failed:', err);
                     if (isMounted) setIsReady(true);
@@ -308,7 +379,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             isMounted = false;
             if (timeoutId) clearTimeout(timeoutId);
         };
-    }, [synchronizeSession, synchronizeSessionWithTimeout]);
+    }, [isDeveloperBypassId, synchronizeSession, synchronizeSessionWithTimeout]);
 
     const login = useCallback(async (emailOrUsername: string, password: string): Promise<boolean> => {
         const result = await authService.signInWithPassword(emailOrUsername, password);
@@ -339,7 +410,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         await authService.signOut();
         setCurrentUser(null);
-        await AsyncStorage.multiRemove(['ss_current_user', 'ss_device_session_id']);
+        await AsyncStorage.multiRemove(['ss_current_user', 'ss_cached_user_profile', 'ss_device_session_id']);
         router.replace('/login');
     }, []);
 
@@ -364,9 +435,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             if (!error) {
                 await refreshProfile(currentUser.id);
+            } else {
+                console.error('[AuthContext] Update profile error:', error);
+                throw error;
             }
-        } catch (e) {
+        } catch (e: any) {
             console.error('[AuthContext] Update profile failed:', e);
+            throw e;
         }
     }, [currentUser, refreshProfile]);
 
@@ -402,13 +477,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     console.log(`[AuthContext] Session update detected: DB=${newSessionId}, Local=${currentLocalId}`);
                     
                     if (newSessionId && currentLocalId && newSessionId !== currentLocalId) {
-                        console.warn('[AuthContext] Session mismatch detected! Triggering logout...');
-                        Alert.alert(
-                            'Logged Out',
-                            'You have been logged out because you logged in on another device.',
-                            [{ text: 'OK', onPress: () => logout() }],
-                            { cancelable: false }
-                        );
+                        console.warn('[AuthContext] Session mismatch detected! Scheduling alert...');
+                        setSessionError('You have been logged out because you logged in on another device.');
                     }
                 }
             )
@@ -436,13 +506,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                         const localId = deviceSessionIdRef.current;
                         
                         if (dbSessionId && localId && dbSessionId !== localId) {
-                            console.warn('[AuthContext] Foreground session mismatch! Triggering logout...');
-                            Alert.alert(
-                                'Session Expired',
-                                'Account active on another device. Please log in again to continue.',
-                                [{ text: 'OK', onPress: () => logout() }],
-                                { cancelable: false }
-                            );
+                            console.warn('[AuthContext] Foreground session mismatch! Scheduling alert...');
+                            setSessionError('Account active on another device. Please log in again to continue.');
                         }
                     }
                 } catch (e) {
@@ -453,6 +518,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         return () => subscription.remove();
     }, [currentUser?.id, logout]);
+
+    useEffect(() => {
+        if (sessionError) {
+            Alert.alert(
+                'Session Mismatch',
+                sessionError,
+                [{ text: 'OK', onPress: () => {
+                    setSessionError(null);
+                    logout();
+                }}],
+                { cancelable: false }
+            );
+        }
+    }, [sessionError, logout]);
 
     const value = {
         currentUser,

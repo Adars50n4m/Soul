@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
+import { Alert } from 'react-native';
 import { supabase } from '../config/supabase';
 import { callService, CallSignal } from '../services/CallService';
 // Safe import — WebRTC not available in Expo Go
@@ -178,7 +179,19 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     setActiveCall(prev => prev ? { ...prev, isRinging: true } : null);
                     break;
                 case 'video-toggle':
-                    setActiveCall(prev => prev ? { ...prev, remoteVideoOff: signal.payload?.videoOff } : null);
+                    setActiveCall(prev => {
+                        if (!prev) return null;
+                        const nextType = signal.payload?.callType === 'video' || signal.payload?.callType === 'audio'
+                            ? signal.payload.callType
+                            : prev.type;
+                        return {
+                            ...prev,
+                            type: nextType,
+                            remoteVideoOff: typeof signal.payload?.videoOff === 'boolean'
+                                ? signal.payload.videoOff
+                                : (nextType === 'audio'),
+                        };
+                    });
                     break;
                 case 'audio-toggle':
                     setActiveCall(prev => prev ? { ...prev, remoteMuted: signal.payload?.muted } : null);
@@ -186,6 +199,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 case 'offer':
                 case 'answer':
                 case 'ice-candidate':
+                    if (signal.callType === 'audio' || signal.callType === 'video') {
+                        setActiveCall(prev => prev ? { ...prev, type: signal.callType } : null);
+                        callService.setCurrentCallType(signal.callType);
+                    }
                     if (webRTCService) {
                         try {
                             if (signal.type === 'offer' && !webRTCService.peerConnection) {
@@ -214,6 +231,18 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, [currentUser, fetchCalls]);
 
     const startCall = useCallback(async (contactId: string, type: 'audio' | 'video') => {
+        if (!webRTCService?.isAvailable?.()) {
+            const reason =
+                webRTCService?.getAvailabilityError?.()
+                || 'WebRTC native module is unavailable in this build.';
+            console.warn('[CallContext] startCall blocked:', reason);
+            Alert.alert(
+                'Calling Unavailable',
+                'This app build does not include native WebRTC. Please rebuild dev client (expo prebuild + expo run:android/ios).'
+            );
+            return;
+        }
+
         const normalizedContactId = normalizeId(contactId);
         const roomId = await callService.startCall(normalizedContactId, type);
         if (roomId) {
@@ -291,24 +320,42 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, [currentUser]);
 
     const toggleVideo = useCallback(() => {
-        setActiveCall(prev => {
-            if (!prev) return null;
-            const newVideoOff = !prev.isVideoOff;
-            if (webRTCService) try { webRTCService.toggleVideo(); } catch (_) {}
-            
+        const current = activeCallRef.current;
+        if (!current) return;
+
+        const nextType: 'audio' | 'video' = current.type === 'video' ? 'audio' : 'video';
+        const nextVideoOff = nextType === 'audio';
+
+        (async () => {
+            try {
+                if (webRTCService?.switchCallType) {
+                    await webRTCService.switchCallType(nextType);
+                } else if (webRTCService && nextType === 'video') {
+                    // Fallback for older builds where switchCallType is unavailable.
+                    await webRTCService.prepareCall('video');
+                    await webRTCService.startCall?.();
+                }
+            } catch (error) {
+                console.warn('[CallContext] Failed to switch call mode:', error);
+                return;
+            }
+
+            // Keep CallService signaling metadata aligned with renegotiation signals.
+            callService.setCurrentCallType(nextType);
+
+            setActiveCall(prev => prev ? { ...prev, type: nextType, isVideoOff: nextVideoOff } : null);
+
             callService.sendSignal({
                 type: 'video-toggle',
-                callId: prev.callId || prev.roomId || '',
+                callId: current.callId || current.roomId || '',
                 callerId: currentUser?.id || '',
-                calleeId: prev.contactId,
-                callType: prev.type,
-                payload: { videoOff: newVideoOff },
+                calleeId: current.contactId,
+                callType: nextType,
+                payload: { videoOff: nextVideoOff, callType: nextType },
                 timestamp: new Date().toISOString(),
-                roomId: prev.roomId,
+                roomId: current.roomId,
             }).catch(() => {});
-            
-            return { ...prev, isVideoOff: newVideoOff };
-        });
+        })();
     }, [currentUser]);
 
     const deleteCall = useCallback(async (id: string) => {

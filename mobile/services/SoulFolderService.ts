@@ -142,9 +142,12 @@ export const soulFolderService = {
   //   soulFolderService.getMediaPath('audio', true)   → Soul Audio/Sent/
   //
   getMediaPath(
-    mediaType: 'image' | 'video' | 'audio' | 'document' | 'file' | 'voice_note',
+    mediaType: 'image' | 'video' | 'audio' | 'document' | 'file' | 'voice_note' | 'status' | 'profile_photo',
     isSent: boolean
   ): string {
+    if (mediaType === 'status') return FOLDERS.statuses;
+    if (mediaType === 'profile_photo') return FOLDERS.profilePhotos;
+
     const mapping = MEDIA_FOLDER_MAP[mediaType];
     if (!mapping) {
       console.warn(`[SoulFolder] Unknown media type: ${mediaType}, defaulting to documents`);
@@ -161,12 +164,13 @@ export const soulFolderService = {
   //     → "IMG-20250328-SOUL0001.jpg"
   //
   generateFilename(
-    mediaType: 'image' | 'video' | 'audio' | 'document' | 'file' | 'voice_note',
-    originalUri: string
+    mediaType: 'image' | 'video' | 'audio' | 'document' | 'file' | 'voice_note' | 'status' | 'profile_photo',
+    originalUri: string,
+    id?: string
   ): string {
     const prefix = FILE_PREFIX[mediaType] || 'DOC';
     const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const counter = getDailyCounter(mediaType);
+    const counter = id ? id.slice(-4).toUpperCase() : getDailyCounter(mediaType);
     const ext = getExtension(originalUri);
     return `${prefix}-${date}-SOUL${counter}.${ext}`;
   },
@@ -179,12 +183,13 @@ export const soulFolderService = {
   //   // → ".../Soul/Media/Soul Images/IMG-20250328-SOUL0001.jpg"
   //
   getDestinationPath(
-    mediaType: 'image' | 'video' | 'audio' | 'document' | 'file' | 'voice_note',
+    mediaType: 'image' | 'video' | 'audio' | 'document' | 'file' | 'voice_note' | 'status' | 'profile_photo',
     isSent: boolean,
-    originalUri: string
+    originalUri: string,
+    id?: string
   ): string {
     const folder = this.getMediaPath(mediaType, isSent);
-    const filename = this.generateFilename(mediaType, originalUri);
+    const filename = this.generateFilename(mediaType, originalUri, id);
     return `${folder}${filename}`;
   },
 

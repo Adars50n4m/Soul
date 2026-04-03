@@ -4,7 +4,7 @@ import * as MediaLibrary from 'expo-media-library';
 import { SERVER_URL, safeFetchJson } from '../config/api';
 import { R2_CONFIG } from '../config/r2';
 import { USE_R2 } from '../config/env';
-import { r2StorageService } from './R2StorageService';
+import { r2StorageService, UploadResponse, R2AuthError } from './R2StorageService';
 import { offlineService } from './LocalDBService';
 import { mediaDownloadService } from './MediaDownloadService';
 import { soulFolderService } from './SoulFolderService';
@@ -13,6 +13,24 @@ import { soulFolderService } from './SoulFolderService';
 const R2_PUBLIC_BASE = R2_CONFIG.PUBLIC_URL && !R2_CONFIG.PUBLIC_URL.includes('XXXXXXXXXXXX')
     ? R2_CONFIG.PUBLIC_URL.replace(/\/$/, '')
     : null;
+
+const isR2AuthFailure = (error: any): boolean => {
+    if (!error) return false;
+    if (error instanceof R2AuthError) return true;
+
+    const message = typeof error?.message === 'string' ? error.message : '';
+    return message.includes('Auth token missing')
+        || message.includes('Authentication required')
+        || message.includes('Worker auth rejected request')
+        || message.includes('Unauthorized');
+};
+
+const isNetworkLikeError = (error: any): boolean => {
+    const message = typeof error?.message === 'string' ? error.message : '';
+    return error?.name === 'AbortError'
+        || message.includes('fetch')
+        || message.includes('Network');
+};
 
 export const storageService = {
     /**
@@ -37,6 +55,9 @@ export const storageService = {
      * Detects MIME type from URI/Filename
      */
     getMimeType(uri: string): string {
+        if (!uri) return 'application/octet-stream';
+
+        // 1. Try to get extension from the end of the URI (standard file paths)
         const ext = uri.split('.').pop()?.toLowerCase() || '';
         const map: Record<string, string> = {
             'jpg': 'image/jpeg',
@@ -53,7 +74,17 @@ export const storageService = {
             'aac': 'audio/aac',
             'caf': 'audio/x-caf'
         };
-        return map[ext] || 'application/octet-stream';
+
+        if (map[ext]) return map[ext];
+
+        // 2. Special handling for Android content:// URIs which often lack extensions
+        if (uri.startsWith('content://')) {
+            if (uri.includes('image')) return 'image/jpeg';
+            if (uri.includes('video')) return 'video/mp4';
+            if (uri.includes('audio')) return 'audio/x-m4a';
+        }
+
+        return 'application/octet-stream';
     },
 
     async uploadViaServerProxy(
@@ -92,18 +123,19 @@ export const storageService = {
             throw new Error(`Upload proxy failed with status ${result?.status || 'unknown'}`);
         }
 
-        let payload: { key?: string; error?: string } = {};
+        let payload: Partial<UploadResponse> = {};
         try {
             payload = result.body ? JSON.parse(result.body) : {};
         } catch {
-            throw new Error('Upload proxy returned invalid JSON');
+            console.warn('[StorageService] Failed to parse proxy response body');
         }
 
-        if (!payload.key) {
-            throw new Error(payload.error || 'Upload proxy did not return a key');
+        if (result && result.status >= 200 && result.status < 300 && payload.success) {
+            const key = payload.key || payload.filename;
+            if (key) return key;
         }
 
-        return payload.key;
+        throw new Error(payload.error || `Upload proxy failed with status ${result?.status || 'unknown'}`);
     },
 
     /**
@@ -111,9 +143,11 @@ export const storageService = {
      */
     async uploadImage(uri: string, bucket: string, folder: string = '', onProgress?: (progress: number) => void): Promise<string | null> {
         console.log(`[StorageService] Starting upload for: ${uri}`);
+        let localUri = uri;
+        let r2AuthUnavailable = false;
         try {
-            // 0. Resolve URI and Detect Content Type
-            const localUri = await this.resolveUri(uri);
+            // 1. Resolve URI to local file path
+            localUri = await this.resolveUri(uri);
             const contentType = this.getMimeType(localUri);
             const ext = localUri.split('.').pop()?.toLowerCase() || 'jpg';
             const fileName = `${folder ? folder + '-' : ''}${Date.now()}.${ext}`;
@@ -130,7 +164,12 @@ export const storageService = {
                         return r2Key;
                     }
                 } catch (r2Err: any) {
-                    console.warn(`[StorageService] Direct R2 failed: ${r2Err.message}. Falling back to Server Presigned.`);
+                    if (isR2AuthFailure(r2Err)) {
+                        r2AuthUnavailable = true;
+                        console.warn('[StorageService] Direct R2 skipped: no valid auth session. Falling back to server upload paths.');
+                    } else {
+                        console.warn(`[StorageService] Direct R2 failed: ${r2Err.message}. Falling back to Server Presigned.`);
+                    }
                 }
             }
 
@@ -163,12 +202,14 @@ export const storageService = {
             if (!success || !data) {
                 console.warn(`[StorageService] Presign failed (${error}). Falling back to Direct R2.`);
                 // Fallback to direct R2 worker if server fails
-                try {
-                    return await r2StorageService.uploadImage(localUri, bucket, folder);
-                } catch (fallbackErr: any) {
-                    console.error('[StorageService] Fallback also failed:', fallbackErr.message);
-                    throw new Error(error || 'Failed to get presigned URL from server');
+                if (!r2AuthUnavailable) {
+                    try {
+                        return await r2StorageService.uploadImage(localUri, bucket, folder);
+                    } catch (fallbackErr: any) {
+                        console.warn('[StorageService] Fallback also failed:', fallbackErr.message);
+                    }
                 }
+                throw new Error(error || 'Failed to get presigned URL from server');
             }
             
             const { presignedUrl, key } = data;
@@ -211,13 +252,19 @@ export const storageService = {
         } catch (e: any) {
             console.warn(`[StorageService] Upload catch error:`, e.message);
             // Emergency fallback for network errors or timeouts
-            if (e.name === 'AbortError' || e.message.includes('fetch') || e.message.includes('Network')) {
+            if (isNetworkLikeError(e) && !r2AuthUnavailable) {
                try {
-                 return await r2StorageService.uploadImage(uri, bucket, folder);
+                 console.log(`[StorageService] Emergency R2 fallback for: ${localUri}`);
+                 return await r2StorageService.uploadImage(localUri, bucket, folder);
                } catch (finalErr) {
-                 console.error('[StorageService] Emergency fallback failed:', finalErr);
+                 console.warn('[StorageService] Emergency fallback failed:', finalErr);
                }
             }
+
+            if (isNetworkLikeError(e) && r2AuthUnavailable) {
+                throw new Error('Upload requires an active session or reachable sync server. Please log in again and retry.');
+            }
+
             throw e; 
         }
     },

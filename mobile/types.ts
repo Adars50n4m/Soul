@@ -23,6 +23,8 @@ export interface Message {
     thumbnailUri?: string;
     fileSize?: number;
     mimeType?: string;
+    editedAt?: string;
+    isStarred?: boolean;
 }
 
 export interface Story {
@@ -61,6 +63,8 @@ export interface Contact {
     noteTimestamp?: string; // ISO date string
     isArchived?: boolean;
     last_updated_at?: string; // Server timestamp for profile validation
+    localAvatarUri?: string; // Local file path for offline DP
+    avatarUpdatedAt?: string; // Timestamp of the last successful DP download
 }
 
 export interface StatusUpdate {
@@ -119,6 +123,7 @@ export interface CachedUser {
     username?: string;
     displayName?: string;
     avatarUrl?: string;
+    localAvatarUri?: string; // Local cached avatar file
     soulNote?: string;
     soulNoteAt?: number;
 }

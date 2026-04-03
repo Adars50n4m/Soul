@@ -16,7 +16,6 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
 import Animated, { 
   useSharedValue, 
   useAnimatedStyle, 
@@ -186,7 +185,11 @@ export const StatusViewerModal = ({
 
             <View style={styles.header}>
                 <View style={styles.userInfo}>
-                    <SoulAvatar uri={group.user.avatarUrl || ''} size={40} />
+                    <SoulAvatar 
+                      uri={group.user.avatarUrl || ''} 
+                      localUri={group.user.localAvatarUri}
+                      size={40} 
+                    />
                     <View style={styles.userNameContainer}>
                         <Text style={styles.userName}>{group.user.displayName || 'Soulmate'}</Text>
                         <Text style={styles.timeAgo}>

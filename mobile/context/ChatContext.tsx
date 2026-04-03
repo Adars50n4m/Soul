@@ -10,6 +10,8 @@ import { type Contact, type Message } from '../types';
 
 import { normalizeId, getSuperuserName, LEGACY_TO_UUID, isWithinEditWindow } from '../utils/idNormalization';
 import { Alert } from 'react-native';
+import { syncAvatar } from '../services/MediaDownloadService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface ChatContextType {
   contacts: Contact[];
@@ -87,8 +89,11 @@ function normalizeContact(row: any): Contact {
     lastMessage: row.lastMessage ?? row.last_message ?? '',
     unreadCount: row.unreadCount ?? row.unread_count ?? 0,
     about: row.about ?? row.bio ?? '',
+    avatarType: row.avatar_type || row.avatarType || 'default',
     lastSeen: row.lastSeen ?? row.last_seen ?? undefined,
     last_updated_at: row.updated_at || row.updatedAt || undefined,
+    localAvatarUri: row.local_avatar_uri || row.localAvatarUri || undefined,
+    avatarUpdatedAt: row.avatar_updated_at || row.avatarUpdatedAt || undefined,
   };
 }
 
@@ -200,6 +205,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Phase 2: Background network sync with 5-minute throttling
     const now = Date.now();
     const FIVE_MINUTES = 5 * 60 * 1000;
+    
+    // Read from AsyncStorage if ref is 0 (first run since app start)
+    if (lastServerSyncRef.current === 0) {
+      const saved = await AsyncStorage.getItem('ss_last_contact_sync');
+      if (saved) lastServerSyncRef.current = parseInt(saved, 10);
+    }
+
     if (now - lastServerSyncRef.current < FIVE_MINUTES) {
       console.log('[ChatContext] Skipping server refresh (synced recently)');
       return;
@@ -267,19 +279,36 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           
           for (const profile of allVisibleProfiles) {
             const primaryId = LEGACY_TO_UUID[profile.id] || profile.id;
-            if (primaryId === myUuid) continue; // Skip saving self to contacts DB
+            if (primaryId === myUuid) continue; 
+            
             const existing = contactsRef.current.find(c => c.id === primaryId);
+            const avatarUrl = profile.avatar_url || existing?.avatar || '';
+            const updatedAt = profile.updated_at || existing?.last_updated_at || new Date().toISOString();
+
+            // Background sync the avatar file
+            if (avatarUrl) {
+              syncAvatar(primaryId, avatarUrl, updatedAt).then(localUri => {
+                if (localUri) {
+                  setContacts(prev => prev.map(c => 
+                    c.id === primaryId ? { ...c, localAvatarUri: localUri } : c
+                  ));
+                }
+              }).catch(() => {});
+            }
+
             await offlineService.saveContact({
               id: primaryId,
               name: profile.display_name || profile.username || 'User',
-              avatar: profile.avatar_url || existing?.avatar || '',
+              avatar: avatarUrl,
               avatarType: profile.avatar_type || existing?.avatarType || 'default',
               status: existing?.status || 'offline',
               lastMessage: existing?.lastMessage || '',
-              unreadCount: existing?.unreadCount || 0
+              unreadCount: existing?.unreadCount || 0,
+              updatedAt: updatedAt
             });
           }
           lastServerSyncRef.current = Date.now();
+          AsyncStorage.setItem('ss_last_contact_sync', lastServerSyncRef.current.toString()).catch(() => {});
         }
       } catch (e) {
         console.warn('[ChatContext] Background refresh error:', e);
@@ -549,6 +578,18 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 updatedAt: updated.updated_at,
                 note: updated.note,
                 noteTimestamp: updated.note_timestamp
+            }).then(() => {
+                // Background sync the avatar file for real-time updates
+                if (updated.avatar_url) {
+                    syncAvatar(updated.id, updated.avatar_url, updated.updated_at).then(localUri => {
+                        if (localUri) {
+                            setContacts(prevContacts => prevContacts.map(c => 
+                                (LEGACY_TO_UUID[c.id] || c.id) === updatedId ? { ...c, localAvatarUri: localUri } : c
+                            ));
+                            offlineService.updateContactAvatar(updated.id, localUri, updated.updated_at).catch(() => {});
+                        }
+                    }).catch(e => console.warn('[ChatContext] Avatar sync failed for real-time update:', e));
+                }
             }).catch(e => console.warn('[ChatContext] Failed to persist real-time profile update:', e));
 
             return next;
@@ -560,7 +601,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       channel.untrack();
       supabase.removeChannel(channel);
-      supabase.removeChannel(profileChannel);
+      if (profileChannel) {
+        supabase.removeChannel(profileChannel);
+      }
     };
   }, [currentUser]);
 
@@ -594,7 +637,20 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return {
         ...prev,
         [chatId]: chatMsgs.map((message) =>
-          message.id === messageId ? { ...message, ...updates } : message
+          message.id === messageId
+              ? {
+                ...message,
+                ...updates,
+                ...(typeof updates.text === 'string' ? { editedAt: new Date().toISOString() } : {}),
+                media: message.media
+                  ? {
+                      ...message.media,
+                      ...(updates.media || {}),
+                      ...(typeof updates.text === 'string' ? { caption: updates.text || undefined } : {}),
+                    }
+                  : updates.media,
+              }
+            : message
         ),
       };
     });

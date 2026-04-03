@@ -6,15 +6,20 @@ import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
 import { SoulAvatar } from './SoulAvatar';
 
-// Safe import for RTCView
+// Load the video view separately so audio PiP keeps working even if the RTC
+// video native view is unavailable in the current build.
 let RTCView: any = null;
 let webRTCService: any = null;
 try {
-    const webrtc = require('react-native-webrtc');
-    RTCView = webrtc.RTCView;
+    RTCView = require('react-native-webrtc/lib/commonjs/RTCView').default;
+} catch (e: any) {
+    console.log('[PipOverlay] RTCView unavailable:', e?.message || 'unknown');
+}
+
+try {
     webRTCService = require('../services/WebRTCService').webRTCService;
-} catch(e) {
-    console.log("WebRTC not available in PipOverlay");
+} catch (e: any) {
+    console.log('[PipOverlay] WebRTC service unavailable:', e?.message || 'unknown');
 }
 
 const OVERLAY_WIDTH = 100;
@@ -114,7 +119,7 @@ export default function PipOverlay() {
                 <Pressable onPress={handlePress} style={styles.pressable}>
                     <View style={styles.contentContainer}>
                         {isVideo ? (
-                            remoteStream ? (
+                            remoteStream && RTCView ? (
                                 <RTCView
                                     streamURL={typeof remoteStream.toURL === 'function' ? remoteStream.toURL() : remoteStream}
                                     style={styles.videoStream}
@@ -257,4 +262,3 @@ const styles = StyleSheet.create({
         borderColor: 'rgba(255,255,255,0.2)',
     },
 });
-

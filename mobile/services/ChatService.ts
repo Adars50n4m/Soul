@@ -57,6 +57,31 @@ const MAX_RETRY_DELAY      = 60_000;  // 1 minute cap
 const ACTIVE_POLL_INTERVAL = 2_000;   // 2 seconds
 const IDLE_POLL_INTERVAL   = 3_000;   // 3 seconds
 const REALTIME_POLL_INTERVAL = 30_000; // 30 seconds
+const MEDIA_GROUP_MARKER = '__MEDIA_GROUP_V1__:';
+
+type GroupMediaItem = {
+  type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
+  url?: string;
+  localFileUri?: string;
+  caption?: string;
+  thumbnail?: string;
+  name?: string;
+  duration?: number;
+};
+
+const decodeGroupedItems = (thumbnail?: string): GroupMediaItem[] => {
+  if (!thumbnail || !thumbnail.startsWith(MEDIA_GROUP_MARKER)) return [];
+  try {
+    const raw = thumbnail.slice(MEDIA_GROUP_MARKER.length);
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const encodeGroupedItems = (items: GroupMediaItem[]): string =>
+  `${MEDIA_GROUP_MARKER}${JSON.stringify(items)}`;
 
 class ChatService {
   private channel:              ReturnType<typeof supabase.channel> | null = null;
@@ -349,12 +374,37 @@ class ChatService {
 
     try {
       let finalMediaUrl = message.media?.url;
-      if (message.localFileUri && !finalMediaUrl && message.media) {
+      let mediaType = message.media?.type ?? null;
+      let mediaThumbnail = message.media?.thumbnail ?? null;
+      let mediaDuration = message.media?.duration ?? null;
+
+      const groupedItems = decodeGroupedItems(message.media?.thumbnail);
+      if (groupedItems.length > 0) {
+        const uploadedItems: GroupMediaItem[] = [];
+        for (const item of groupedItems) {
+          let uploadedUrl = item.url || '';
+          if (!uploadedUrl && item.localFileUri) {
+            uploadedUrl = await storageService.uploadImage(item.localFileUri, 'chat-media', this.userId, (progress) => {
+              this.onUploadProgressCb?.(message.id, progress);
+            }) || '';
+          }
+          uploadedItems.push({
+            ...item,
+            url: uploadedUrl,
+            localFileUri: undefined,
+          });
+        }
+
+        finalMediaUrl = uploadedItems[0]?.url || finalMediaUrl;
+        mediaType = uploadedItems[0]?.type || mediaType;
+        mediaDuration = uploadedItems[0]?.duration || mediaDuration;
+        mediaThumbnail = encodeGroupedItems(uploadedItems);
+      } else if (message.localFileUri && !finalMediaUrl && message.media) {
         finalMediaUrl = await storageService.uploadImage(message.localFileUri, 'chat-media', this.userId, (progress) => {
           this.onUploadProgressCb?.(message.id, progress);
         }) || undefined;
-        if (finalMediaUrl) await offlineService.updateMessageMediaUrl(message.id, finalMediaUrl);
       }
+      if (finalMediaUrl) await offlineService.updateMessageMediaUrl(message.id, finalMediaUrl);
 
       const expiresAt = new Date(Date.now() + 300000).toISOString();
 
@@ -365,14 +415,14 @@ class ChatService {
           sender:        this.userId,
           receiver:      message.chatId,
           text:          message.text,
-          media_type:    message.media?.type    ?? null,
+          media_type:    mediaType,
           media_url:     finalMediaUrl          ?? null,
           media_caption: message.media?.caption ?? null,
-          media_thumbnail: message.media?.thumbnail ?? null,
+          media_thumbnail: mediaThumbnail,
           reply_to_id:   message.replyTo        ?? null,
           created_at:    message.timestamp,
           expires_at:    expiresAt,
-          media_duration: message.media?.duration ?? null,
+          media_duration: mediaDuration,
         })
         .select()
         .single();
@@ -409,22 +459,49 @@ class ChatService {
   private async fetchMissedMessages(): Promise<void> {
     if (!this.userId || !this.partnerId) return;
     try {
-      const { data, error } = await supabase
+      // 1. Get the latest message timestamp from local DB to avoid redundant fetching
+      const localMessages = await offlineService.getMessages(this.partnerId, 1);
+      const latestLocalTimestamp = localMessages.length > 0 ? localMessages[0].timestamp : null;
+      
+      let query = supabase
         .from('messages')
         .select('*')
-        .or(`and(sender.eq.${this.partnerId},receiver.eq.${this.userId}),and(sender.eq.${this.userId},receiver.eq.${this.partnerId})`)
-        .order('created_at', { ascending: false })
-        .limit(50);
+        .or(`and(sender.eq.${this.partnerId},receiver.eq.${this.userId}),and(sender.eq.${this.userId},receiver.eq.${this.partnerId})`);
+
+      if (latestLocalTimestamp) {
+        // Only fetch messages NEWER than what we already have
+        console.log(`[ChatService] Fetching missed messages since: ${latestLocalTimestamp}`);
+        query = query.gt('created_at', latestLocalTimestamp);
+      } else {
+        // First sync for this chat, get last 50
+        console.log('[ChatService] First sync, fetching last 50 messages');
+        query = query.order('created_at', { ascending: false }).limit(50);
+      }
+
+      const { data, error } = await query;
 
       if (error || !data) {
-        this.lastPollAt = new Date().toISOString();
+        if (!this.lastPollAt) this.lastPollAt = new Date().toISOString();
         return;
       }
+      
       this.syncConnected();
-      this.lastPollAt = new Date().toISOString();
-      const recentMessages = data.reverse();
+      
+      const messages = [...data];
+      if (!latestLocalTimestamp) {
+        messages.reverse(); // If we used limit(50) with desc order, reverse for storage
+      } else {
+        // If we queried with gt, ensure ascending order for processing
+        messages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      }
+      
+      if (messages.length > 0) {
+        this.lastPollAt = messages[messages.length - 1].created_at;
+      } else if (!this.lastPollAt) {
+        this.lastPollAt = new Date().toISOString();
+      }
 
-      for (const row of recentMessages) {
+      for (const row of messages) {
         const msg = this.mapDbRowToChatMessage(row);
         if (msg.sender_id === this.userId && this.sendingIds.has(msg.id)) continue;
 

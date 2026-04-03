@@ -37,8 +37,6 @@
 
 import { supabase } from '../config/supabase';
 
-const SHRI_ID = 'f00f00f0-0000-0000-0000-000000000002';
-const HARI_ID = 'f00f00f0-0000-0000-0000-000000000001';
 import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
@@ -99,36 +97,111 @@ class AuthService {
         return { success: false, error: 'Please enter your password.' };
       }
 
-      let targetInput = input;
-      let targetPassword = password;
-
       // ── DEVELOPER BYPASS (Internal Testing & Owner Accounts) ──────────────
-      // Allows quick access for Shri & Hari without needing real Auth emails.
-      if (input === 'shri' && password.toLowerCase() === 'hari') {
-        return {
+      // Allows quick access for Shri & Hari.
+      // Now upgraded to establish a real Supabase session (required for R2 uploads).
+      const isShri = input === 'shri' && password.toLowerCase() === 'hari';
+      const isHari = input === 'hari' && password.toLowerCase() === 'shri';
+      
+      if (isShri || isHari) {
+        const bypassEmail = isShri
+          ? 'shri.internal@soulsync.dev'
+          : 'hari.internal@soulsync.dev';
+        const bypassPassword = 'soulsync_internal_bypass_2026';
+        const bypassUsername = isShri ? 'shri' : 'hari';
+        const legacyBypassId = isShri
+          ? 'f00f00f0-0000-0000-0000-000000000002'
+          : 'f00f00f0-0000-0000-0000-000000000001';
+        const bypassCooldownKey = `ss_bypass_real_auth_cooldown_${bypassUsername}`;
+
+        const isRateLimitError = (message?: string) => {
+          const msg = (message || '').toLowerCase();
+          return msg.includes('rate limit')
+            || msg.includes('over_email_send_rate_limit')
+            || msg.includes('email rate limit');
+        };
+
+        const getMockBypassResult = (): AuthResult => ({
           success: true,
           isNewUser: false,
           user: {
-            id: SHRI_ID,
-            username: 'shri',
-            displayName: 'Shri Account',
-            email: 'shri@internal',
+            id: legacyBypassId,
+            username: bypassUsername,
+            displayName: isShri ? 'Shri Account' : 'Hari Account',
+            email: bypassEmail,
             createdAt: new Date().toISOString(),
           } as any,
-        };
-      }
-      if (input === 'hari' && password.toLowerCase() === 'shri') {
-        return {
-          success: true,
-          isNewUser: false,
-          user: {
-            id: HARI_ID,
-            username: 'hari',
-            displayName: 'Hari Account',
-            email: 'hari@internal',
-            createdAt: new Date().toISOString(),
-          } as any,
-        };
+        });
+
+        console.log(`[Auth] Establishing real Supabase session for bypass: ${bypassEmail}`);
+        
+        try {
+          const cooldownUntil = Number(await AsyncStorage.getItem(bypassCooldownKey) || '0');
+          if (cooldownUntil > Date.now()) {
+            console.log('[Auth] Bypass real-auth cooldown active. Using local bypass session.');
+            return getMockBypassResult();
+          }
+
+          const signInBypass = () => supabase.auth.signInWithPassword({
+            email: bypassEmail,
+            password: bypassPassword
+          });
+
+          let { data: bypassData, error: bypassError } = await signInBypass();
+
+          if (bypassError) {
+              // If account doesn't exist, create it silently
+              if (bypassError.message.includes('Invalid login credentials')) {
+                  console.log(`[Auth] Bypass account ${bypassEmail} missing. Creating...`);
+                  const { error: signUpError } = await supabase.auth.signUp({
+                      email: bypassEmail,
+                      password: bypassPassword,
+                      options: { data: { username: bypassUsername } }
+                  });
+
+                  if (signUpError && !signUpError.message.toLowerCase().includes('already registered')) {
+                    if (isRateLimitError(signUpError.message)) {
+                      await AsyncStorage.setItem(bypassCooldownKey, String(Date.now() + 60_000));
+                      return getMockBypassResult();
+                    }
+                    throw signUpError;
+                  }
+
+                  // One re-attempt only
+                  const retry = await signInBypass();
+                  bypassData = retry.data;
+                  bypassError = retry.error;
+
+                  if (bypassError) {
+                    if (isRateLimitError(bypassError.message)) {
+                      await AsyncStorage.setItem(bypassCooldownKey, String(Date.now() + 60_000));
+                      return getMockBypassResult();
+                    }
+                    throw bypassError;
+                  }
+              } else {
+                throw bypassError;
+              }
+          }
+
+          if (bypassData.user) {
+              await AsyncStorage.removeItem(bypassCooldownKey);
+              const profile = await this.getProfile(bypassData.user.id);
+              return { success: true, isNewUser: false, user: profile ?? undefined };
+          }
+
+          throw new Error('Bypass sign-in did not return a user.');
+        } catch (e: any) {
+            const isNetworkError = e?.message?.includes('Network request failed') || e?.message?.includes('fetch');
+            if (isRateLimitError(e?.message) || isNetworkError) {
+              // On network failures or rate limits, cool down the "real session" attempts for 1 minute
+              await AsyncStorage.setItem(bypassCooldownKey, String(Date.now() + 60_000));
+              console.warn(`[Auth] Real session establishment for bypass ${isNetworkError ? 'blocked by network' : 'rate limited'}. Using local mock.`);
+            } else {
+              console.warn('[Auth] Real session establishment for bypass failed, using local bypass session:', e.message);
+            }
+            return getMockBypassResult();
+        }
       }
 
       // Resolve username → email if needed

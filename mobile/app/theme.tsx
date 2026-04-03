@@ -1,12 +1,10 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet, StatusBar, ScrollView } from 'react-native';
-import { useRouter, useNavigation } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
+import { useNavigation } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useApp, THEMES, ThemeName } from '../context/AppContext';
 
 export default function ThemeScreen() {
-    const router = useRouter();
     const navigation = useNavigation();
     const { theme, setTheme, activeTheme } = useApp();
 
@@ -40,7 +38,7 @@ export default function ThemeScreen() {
                 <Text style={styles.sectionTitle}>CHOOSE YOUR VIBE</Text>
 
                 <View style={styles.themeGrid}>
-                    {(Object.keys(THEMES) as ThemeName[]).map((themeName) => {
+                    {(Object.keys(THEMES ?? {}) as ThemeName[]).map((themeName) => {
                         const themeConfig = THEMES[themeName];
                         const isSelected = theme === themeName;
 
@@ -54,7 +52,7 @@ export default function ThemeScreen() {
                                 onPress={() => handleSelectTheme(themeName)}
                             >
                                 {/* Theme Preview */}
-                                <View style={[styles.themePreview, { backgroundColor: themeConfig.bg }]}>
+                                <View style={[styles.themePreview, { backgroundColor: themeConfig.background }]}>
                                     {/* Mini App Preview */}
                                     <View style={styles.miniHeader}>
                                         <View style={[styles.miniDot, { backgroundColor: themeConfig.primary }]} />
@@ -100,7 +98,7 @@ export default function ThemeScreen() {
                                 <View style={styles.swatches}>
                                     <View style={[styles.swatch, { backgroundColor: themeConfig.primary }]} />
                                     <View style={[styles.swatch, { backgroundColor: themeConfig.accent }]} />
-                                    <View style={[styles.swatch, { backgroundColor: themeConfig.bg, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' }]} />
+                                    <View style={[styles.swatch, { backgroundColor: themeConfig.background, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' }]} />
                                 </View>
                             </Pressable>
                         );

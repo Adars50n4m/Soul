@@ -1,33 +1,29 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
-    ScrollView, useWindowDimensions, Alert, Modal, Share, FlatList, Platform
+    ScrollView, useWindowDimensions, Alert, Modal, Share, FlatList, Platform, Dimensions, BackHandler
 } from 'react-native';
 
-import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+import { useLocalSearchParams, useNavigation } from 'expo-router';
 import GlassView from '../../components/ui/GlassView';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { proxySupabaseUrl } from '../../config/api';
 import { useApp } from '../../context/AppContext';
 import { useCall } from '../../context/CallContext';
-import { normalizeId, getSuperuserName, LEGACY_TO_UUID } from '../../utils/idNormalization';
+import { normalizeId, getSuperuserName, getSuperuserHandle } from '../../utils/idNormalization';
+import {
+    PROFILE_AVATAR_SHARED_TRANSITION,
+    PROFILE_AVATAR_TRANSITION_TAG,
+    SUPPORT_PROFILE_AVATAR_SHARED_TRANSITION,
+} from '../../constants/sharedTransitions';
 import Animated, {
-    useSharedValue, useAnimatedStyle, withSpring, withTiming, interpolate, runOnJS, Easing,
-    useAnimatedScrollHandler, Extrapolation, SharedTransition
+    useSharedValue, useAnimatedStyle, withTiming, interpolate, runOnJS, Easing,
+    useAnimatedScrollHandler, Extrapolation
 } from 'react-native-reanimated';
-import { BlurView } from 'expo-blur';
-import MaskedView from '@react-native-masked-view/masked-view';
-
-const morphTransition = SharedTransition.custom((values) => {
-    'worklet';
-    return {
-        width: withSpring(values.targetWidth, { damping: 15, stiffness: 150 }),
-        height: withSpring(values.targetHeight, { damping: 15, stiffness: 150 }),
-        originX: withSpring(values.targetOriginX, { damping: 15, stiffness: 150 }),
-        originY: withSpring(values.targetOriginY, { damping: 15, stiffness: 150 }),
-        borderRadius: withSpring(values.targetBorderRadius, { damping: 15, stiffness: 150 }),
-    };
-});
+import ProgressiveBlur from '../../components/chat/ProgressiveBlur';
 
 const MediaGalleryItem = ({ item, activeCategory, morphProgress }: any) => {
     const { width, height } = useWindowDimensions();
@@ -68,9 +64,8 @@ const MediaGalleryItem = ({ item, activeCategory, morphProgress }: any) => {
 export default function ProfileScreen() {
     const { width, height } = useWindowDimensions();
 
-    const params = useLocalSearchParams<{ id: string }>();
+    const params = useLocalSearchParams<{ id: string; avatarX?: string; avatarY?: string; avatarW?: string; avatarH?: string }>();
     const id = normalizeId(Array.isArray(params.id) ? params.id[0] : params.id);
-    const router = useRouter();
     const navigation = useNavigation();
     const { currentUser, otherUser, contacts, messages, activeTheme, clearChatMessages, connectivity, fetchOtherUserProfile } = useApp();
     const { startCall } = useCall();
@@ -79,12 +74,12 @@ export default function ProfileScreen() {
     const isOwnProfile = id === currentUser?.id;
 
     // Find contact from contacts list (same data as chat screen)
-    const contactFromList = contacts.find(c => c.id === id);
+    const contactFromList = contacts.find(c => normalizeId(c.id) === id);
 
     // For other users, prefer contact from list (same as chat screen), fallback to otherUser
     const otherUserData = contactFromList || otherUser;
     const profileUser = isOwnProfile ? currentUser : otherUserData;
-    const profileName = getSuperuserName(id) || profileUser?.name || profileUser?.display_name || (id ? `@${id.substring(0, 5)}` : 'User');
+    const profileName = getSuperuserName(id) || profileUser?.name || profileUser?.display_name || (id ? `User_${id.substring(0, 5)}` : 'User');
 
     // Fetch other user profile data on mount
     useEffect(() => {
@@ -97,6 +92,18 @@ export default function ProfileScreen() {
     const [activeCategory, setActiveCategory] = useState<'photos' | 'videos' | 'audio' | 'docs'>('photos');
     const [viewerVisible, setViewerVisible] = useState(false);
     const [selectedIndex, setSelectedIndex] = useState(0);
+    const avatarOrigin = useMemo(() => ({
+        x: Number(Array.isArray(params.avatarX) ? params.avatarX[0] : params.avatarX),
+        y: Number(Array.isArray(params.avatarY) ? params.avatarY[0] : params.avatarY),
+        width: Number(Array.isArray(params.avatarW) ? params.avatarW[0] : params.avatarW),
+        height: Number(Array.isArray(params.avatarH) ? params.avatarH[0] : params.avatarH),
+    }), [params.avatarH, params.avatarW, params.avatarX, params.avatarY]);
+    const hasAvatarMorph = Number.isFinite(avatarOrigin.x)
+        && Number.isFinite(avatarOrigin.y)
+        && Number.isFinite(avatarOrigin.width)
+        && Number.isFinite(avatarOrigin.height)
+        && avatarOrigin.width > 0
+        && avatarOrigin.height > 0;
     
     // Reanimated shared values for seamless morph
     const morphProgress = useSharedValue(0);
@@ -108,6 +115,10 @@ export default function ProfileScreen() {
     const fadeAnim = useSharedValue(1);
     const slideAnim = useSharedValue(0);
     const scrollY = useSharedValue(0);
+    const heroMorphProgress = useSharedValue(hasAvatarMorph ? 0 : 1);
+    const headerOpacity = useSharedValue(hasAvatarMorph ? 0 : 1);
+    const isClosingRef = useRef(false);
+    const allowNativePopRef = useRef(false);
 
     const onScroll = useAnimatedScrollHandler((event) => {
         scrollY.value = event.contentOffset.y;
@@ -135,6 +146,36 @@ export default function ProfileScreen() {
             ] as any,
         };
     });
+
+    const heroEntryAnimatedStyle = useAnimatedStyle(() => {
+        if (!hasAvatarMorph) {
+            return {
+                left: 0,
+                top: 0,
+                width,
+                height: 540,
+                borderRadius: 0,
+            };
+        }
+
+        return {
+            left: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.x, 0], Extrapolation.CLAMP),
+            top: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.y, 0], Extrapolation.CLAMP),
+            width: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.width, width], Extrapolation.CLAMP),
+            height: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.height, 540], Extrapolation.CLAMP),
+            borderRadius: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.width / 2, 0], Extrapolation.CLAMP),
+        };
+    });
+
+    const chromeAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: headerOpacity.value,
+        transform: [{ translateY: interpolate(headerOpacity.value, [0, 1], [16, 0]) }],
+    }));
+
+    const scrollDismissAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: headerOpacity.value,
+        transform: [{ translateY: interpolate(headerOpacity.value, [0, 1], [32, 0]) }],
+    }));
 
     const contentAnimatedStyle = useAnimatedStyle(() => {
         return {
@@ -307,13 +348,84 @@ export default function ProfileScreen() {
         });
     }, [id, profileUser]);
 
+    useEffect(() => {
+        if (!hasAvatarMorph) {
+            heroMorphProgress.value = 1;
+            headerOpacity.value = 1;
+            return;
+        }
+
+        heroMorphProgress.value = withTiming(1, {
+            duration: 460,
+            easing: Easing.bezier(0.22, 1, 0.36, 1),
+        });
+        headerOpacity.value = withTiming(1, {
+            duration: 220,
+            easing: Easing.out(Easing.cubic),
+        });
+    }, [hasAvatarMorph, headerOpacity, heroMorphProgress]);
+
+    const finishDismiss = useCallback((action?: any) => {
+        allowNativePopRef.current = true;
+        if (action) {
+            navigation.dispatch(action);
+            return;
+        }
+        if (navigation.canGoBack()) {
+            navigation.goBack();
+        }
+    }, [navigation]);
+
+    const runDismissAnimation = useCallback((action?: any) => {
+        if (isClosingRef.current) return;
+        isClosingRef.current = true;
+
+        if (!hasAvatarMorph) {
+            finishDismiss(action);
+            return;
+        }
+
+        headerOpacity.value = withTiming(0, { duration: 120 });
+        heroMorphProgress.value = withTiming(0, {
+            duration: 420,
+            easing: Easing.bezier(0.4, 0, 0.2, 1),
+        });
+        setTimeout(() => {
+            finishDismiss(action);
+        }, 280);
+    }, [finishDismiss, hasAvatarMorph, headerOpacity, heroMorphProgress]);
+
+    useEffect(() => {
+        const unsubscribe = navigation.addListener('beforeRemove', (event: any) => {
+            if (!hasAvatarMorph || isClosingRef.current || allowNativePopRef.current) {
+                return;
+            }
+            event.preventDefault();
+            runDismissAnimation(event.data.action);
+        });
+
+        const backSubscription = BackHandler.addEventListener('hardwareBackPress', () => {
+            if (!hasAvatarMorph || isClosingRef.current) {
+                return false;
+            }
+            runDismissAnimation();
+            return true;
+        });
+
+        return () => {
+            allowNativePopRef.current = false;
+            unsubscribe();
+            backSubscription.remove();
+        };
+    }, [hasAvatarMorph, navigation, runDismissAnimation]);
+
     const headerContentAnimatedStyle = useAnimatedStyle(() => ({
-        opacity: fadeAnim.value
+        opacity: fadeAnim.value * headerOpacity.value
     }));
 
     const mediaSectionAnimatedStyle = useAnimatedStyle(() => ({
-        opacity: fadeAnim.value,
-        transform: [{ translateY: slideAnim.value }]
+        opacity: fadeAnim.value * headerOpacity.value,
+        transform: [{ translateY: slideAnim.value + interpolate(headerOpacity.value, [0, 1], [28, 0]) }]
     }));
 
     const { width: screenWidth, height: screenHeight } = useWindowDimensions();
@@ -324,9 +436,7 @@ export default function ProfileScreen() {
                 <StatusBar barStyle="light-content" translucent />
                 <View style={styles.header}>
                     <Pressable 
-                        onPress={() => {
-                            if (navigation.canGoBack()) navigation.goBack();
-                        }} 
+                        onPress={() => runDismissAnimation()}
                         style={styles.backButton}
                     >
                         <Ionicons name="chevron-back" size={28} color="#ffffff" />
@@ -345,59 +455,53 @@ export default function ProfileScreen() {
 
 
 
-            {/* Immersive Hero Background (Parallax) */}
-            <Animated.View style={[styles.heroBackgroundContainer, headerAnimatedStyle]}>
-                {/* Background Image - not shared, just for parallax effect */}
-                <Animated.Image
-                    source={{ uri: profileUser?.avatar }}
-                    style={[
-                        styles.heroImage,
-                        {
-                            borderRadius: 0,
-                            width: screenWidth,
-                            height: 480,
-                        }
-                    ]}
-                    resizeMode="cover"
-                    sharedTransitionTag="avatar-universal-morph"
-                    sharedTransitionStyle={morphTransition}
-                />
-
-
-                {/* True Progressive Blur Layer - Using MaskedView */}
-                <MaskedView
-                    style={StyleSheet.absoluteFill}
-                    maskElement={
-                        <LinearGradient
-                            colors={['transparent', 'rgba(0,0,0,0.5)', '#000000']}
-                            locations={[0.2, 0.5, 0.8]}
-                            style={StyleSheet.absoluteFill}
-                        />
+            {/* Immersive Hero Background */}
+            <Animated.View style={[styles.heroBackgroundContainer, headerAnimatedStyle, heroEntryAnimatedStyle]}>
+                {(() => {
+                    const avatarType = profileUser?.avatarType || profileUser?.avatar_type || 'default';
+                    const uri = profileUser?.avatar || profileUser?.avatar_url;
+                    const localUri = profileUser?.localAvatarUri || profileUser?.local_avatar_uri;
+                    const fallbackId = profileUser?.id || id || 'default';
+                    
+                    const proxiedUri = proxySupabaseUrl(uri);
+                    // Use local if available, otherwise remote or special types
+                    let finalUri: string;
+                    if (avatarType === 'teddy') {
+                        finalUri = `https://avatar.iran.liara.run/public/boy?username=${fallbackId}`;
+                    } else if (avatarType === 'memoji') {
+                        finalUri = `https://avatar.iran.liara.run/public/girl?username=${fallbackId}`;
+                    } else {
+                        finalUri = localUri || proxiedUri || uri || '';
                     }
-                >
-                    <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
-                </MaskedView>
 
-                {/* Deep Bottom Fade - Multi-stop Gradient for Black Melt */}
-                <LinearGradient
-                    colors={[
-                        'transparent',
-                        'rgba(9, 9, 14, 0.3)',
-                        'rgba(9, 9, 14, 0.7)',
-                        '#09090E'
-                    ]}
-                    locations={[0, 0.5, 0.85, 1]}
-                    style={styles.heroGradient}
+                    return (
+                        <Animated.Image
+                            source={{ uri: finalUri }}
+                            style={[styles.heroImage, { backgroundColor: '#111' }]}
+                            resizeMode="cover"
+                            {...(SUPPORT_PROFILE_AVATAR_SHARED_TRANSITION ? {
+                                sharedTransitionTag: PROFILE_AVATAR_TRANSITION_TAG,
+                                sharedTransitionStyle: PROFILE_AVATAR_SHARED_TRANSITION,
+                            } : {})}
+                        />
+                    );
+                })()}
+
+                {/* Progressive Blur — subtle bottom fade */}
+                <ProgressiveBlur
+                    position="bottom"
+                    height={240}
+                    intensity={Platform.OS === 'ios' ? 80 : 40}
+                    tint="dark"
+                    maxAlpha={1}
                 />
             </Animated.View>
 
 
             {/* Header - Transparent & Minimal */}
-            <View style={styles.header}>
+            <Animated.View style={[styles.header, chromeAnimatedStyle]}>
                 <Pressable 
-                    onPress={() => {
-                        if (navigation.canGoBack()) navigation.goBack();
-                    }} 
+                    onPress={() => runDismissAnimation()}
                     style={styles.headerGlassCircle}
                 >
                     <GlassView intensity={40} tint="dark" style={styles.headerIconGlass}>
@@ -416,10 +520,10 @@ export default function ProfileScreen() {
                         <Ionicons name="ellipsis-horizontal" size={24} color="#ffffff" />
                     </GlassView>
                 </Pressable>
-            </View>
+            </Animated.View>
 
             <Animated.ScrollView
-                style={styles.scrollView}
+                style={[styles.scrollView, scrollDismissAnimatedStyle]}
                 contentContainerStyle={styles.scrollContent}
                 showsVerticalScrollIndicator={false}
                 onScroll={onScroll}
@@ -432,20 +536,19 @@ export default function ProfileScreen() {
                         headerContentAnimatedStyle
                     ]}
                 >
-                    <View style={styles.nameContent}>
-                        <View style={styles.nameRow}>
-                            <Text style={styles.userName}>{profileName}</Text>
-                            <MaterialIcons name="verified" size={26} color="#ffffff" style={{ marginTop: 8 }} />
-                        </View>
-                        <Text style={styles.userHandle}>
-                            @{profileUser?.username || 
-                              (id === LEGACY_TO_UUID['shri'] ? 'shri' : 
-                               id === LEGACY_TO_UUID['hari'] ? 'hari' : 
-                               (profileUser?.id || id)?.split('-')[0]) || 
-                              'soul_user'}
-                        </Text>
-                    </View>
+                    {/* Spacer pushes content below the hero image */}
+                    <View style={styles.heroSpacer} />
 
+                    {/* Integrated Identity Overlay — moved from absolute to relative for better spacing */}
+                    <View style={styles.heroNameOverlay}>
+                        <Text style={styles.heroName}>{profileName}</Text>
+                        <View style={styles.heroHandleRow}>
+                             {/* Correct Username formatting: Handle-first, fallback-second, no status dot */}
+                             <Text style={styles.heroHandle}>
+                                @{profileUser?.username || getSuperuserHandle(id) || (id ? id.substring(0, 8) : 'soul_user')}
+                            </Text>
+                        </View>
+                    </View>
 
                     {/* Optimized Multi-Action Row */}
                     {!isOwnProfile && (
@@ -733,7 +836,9 @@ const styles = StyleSheet.create({
         top: 0,
         left: 0,
         right: 0,
-        height: 480,
+        height: 540,
+        overflow: 'hidden',
+        backgroundColor: '#000', // Ensure a solid base for the melt
     },
     heroImage: {
         width: '100%',
@@ -742,6 +847,45 @@ const styles = StyleSheet.create({
     heroGradient: {
         ...StyleSheet.absoluteFillObject,
         zIndex: 2,
+    },
+    heroNameOverlay: {
+        width: '100%',
+        alignItems: 'center',
+        marginTop: -110, // Pull name UP into the blurred region
+        zIndex: 10,
+    },
+    heroName: {
+        color: '#fff',
+        fontSize: 38,
+        fontWeight: '900',
+        letterSpacing: -0.5,
+        textAlign: 'center',
+        textShadowColor: 'rgba(0,0,0,0.6)',
+        textShadowOffset: { width: 0, height: 2 },
+        textShadowRadius: 8,
+    },
+    heroHandleRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        marginTop: 6,
+    },
+    onlineDot: {
+        width: 9,
+        height: 9,
+        borderRadius: 5,
+        borderWidth: 1.5,
+        borderColor: 'rgba(0,0,0,0.3)',
+    },
+    heroHandle: {
+        color: 'rgba(255,255,255,0.65)',
+        fontSize: 16,
+        fontWeight: '600',
+        letterSpacing: 0.3,
+    },
+    heroSpacer: {
+        height: 380, // Reduced from 540 to eliminate "faltu space"
     },
     glowOrb: {
         position: 'absolute',
@@ -752,22 +896,30 @@ const styles = StyleSheet.create({
         zIndex: 3,
     },
     nameContent: {
-        marginTop: 240,
         width: '100%',
         paddingHorizontal: 10,
         alignItems: 'center',
     },
-    userHandle: {
-        color: 'rgba(255,255,255,0.4)',
-        fontSize: 16,
-        fontWeight: '600',
-        marginTop: 4,
-        textAlign: 'center',
+    actionPillText: {
+        color: '#fff',
+        fontSize: 15,
+        fontWeight: '800',
+    },
+    heroSection: {
+        width: '100%',
+        alignItems: 'center',
+    },
+    actionRow: {
+        flexDirection: 'row',
+        paddingHorizontal: 20,
+        gap: 12,
+        marginTop: 10,
+        marginBottom: 30,
     },
     actionPill: {
         flex: 1,
-        height: 60,
-        borderRadius: 30,
+        height: 56,
+        borderRadius: 28,
         overflow: 'hidden',
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.1)',
@@ -777,116 +929,9 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 8,
-    },
-    actionPillText: {
-        color: '#fff',
-        fontSize: 15,
-        fontWeight: '800',
-    },
-    heroSection: {
-        width: '100%',
-        paddingHorizontal: 20,
-        paddingTop: 10,
-        zIndex: 20,
-    },
-    avatarGlowContainer: {
-        position: 'relative',
-        padding: 10,
-        marginBottom: 20,
-    },
-    profileAvatar: {
-        width: 160,
-        height: 160,
-        borderRadius: 80,
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
-    },
-    avatarGlassBorder: {
-        ...StyleSheet.absoluteFillObject,
-        borderRadius: 90,
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.05)',
-        margin: -5,
-    },
-    nameRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 8,
-    },
-    userName: {
-        color: '#ffffff',
-        fontSize: 42,
-        fontWeight: '900',
-        letterSpacing: -1.5,
-        textAlign: 'center',
-    },
-    subInfoRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginTop: 12,
-        gap: 6,
-    },
-    subInfoText: {
-        color: 'rgba(255,255,255,0.6)',
-        fontSize: 14,
-        fontWeight: '600',
-    },
-    dotSeparator: {
-        width: 4,
-        height: 4,
-        borderRadius: 2,
-        backgroundColor: 'rgba(255,255,255,0.2)',
-        marginHorizontal: 4,
-    },
-    userBio: {
-        color: 'rgba(255,255,255,0.5)',
-        fontSize: 15,
-        fontWeight: '400',
-        textAlign: 'center',
-        marginTop: 8,
-        paddingHorizontal: 40,
-        lineHeight: 20,
-    },
-    actionRow: {
-        flexDirection: 'row',
-        width: '100%',
-        marginTop: 32,
-        gap: 16,
-    },
-    primaryGlassAction: {
-        flex: 2,
-        height: 64,
-        borderRadius: 32,
-        overflow: 'hidden',
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.15)',
-    },
-    secondaryGlassAction: {
-        width: 64,
-        height: 64,
-        borderRadius: 32,
-        overflow: 'hidden',
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
-    },
-    actionGlassEffect: {
-        flex: 1,
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'rgba(255,255,255,0.08)',
-        gap: 8,
-    },
-    actionText: {
-        color: '#fff',
-        fontSize: 14,
-        fontWeight: '800',
-        letterSpacing: 1,
     },
     mediaSection: {
-        marginTop: 32,
+        marginTop: 10,
         paddingHorizontal: 20,
     },
     sectionTitle: {
@@ -1143,16 +1188,5 @@ const styles = StyleSheet.create({
         paddingVertical: 6,
         paddingHorizontal: 16,
         gap: 8,
-    },
-    statusDot: {
-        width: 8,
-        height: 8,
-        borderRadius: 4,
-    },
-    connectionText: {
-        color: 'rgba(255,255,255,0.7)',
-        fontSize: 12,
-        fontWeight: '600',
-        letterSpacing: 0.5,
     },
 });

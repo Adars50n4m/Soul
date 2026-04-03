@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, Pressable, Platform } from 'react-native';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import Animated, { useAnimatedStyle, interpolate, Extrapolation, SharedValue } from 'react-native-reanimated';
@@ -12,6 +12,8 @@ interface ProfileHeaderProps {
     subtitle?: string;
     username: string;
     onEditPress?: () => void;
+    heroRef?: React.Ref<View>;
+    hidden?: boolean;
     isVerified?: boolean;
     scrollY?: SharedValue<number>;
 }
@@ -26,6 +28,8 @@ const ProfileHeader = ({
     subtitle,
     username,
     onEditPress,
+    heroRef,
+    hidden = false,
     isVerified = true,
     scrollY,
 }: ProfileHeaderProps) => {
@@ -53,13 +57,19 @@ const ProfileHeader = ({
 
     return (
         <View style={styles.container}>
-            <View style={styles.imageContainer}>
+            <View
+                ref={heroRef}
+                collapsable={false}
+                renderToHardwareTextureAndroid
+                shouldRasterizeIOS
+                style={[styles.imageContainer, hidden && styles.imageContainerHidden]}
+            >
                 <Animated.View style={[styles.imageWrapper, animatedImageStyle as any]}>
                     <Image
                         source={typeof image === 'string' ? { uri: image } : image}
                         style={styles.image}
                         contentFit="cover"
-                        transition={200}
+                        transition={0}
                     />
                 </Animated.View>
                 
@@ -110,6 +120,9 @@ const styles = StyleSheet.create({
         borderRadius: 28,
         overflow: 'hidden',
         backgroundColor: '#1a1a1a',
+    },
+    imageContainerHidden: {
+        opacity: 0,
     },
     imageWrapper: {
         width: '100%',

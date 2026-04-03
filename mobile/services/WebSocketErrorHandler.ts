@@ -75,6 +75,12 @@ class WebSocketErrorHandler {
       try {
       const message = args[0]?.toString() || '';
       
+      // ALWAYS suppress connection-limit and channel errors (prevents red overlay)
+      if (this.isSupabaseConnectionError(message)) {
+        console.warn('[Suppressed]', message.substring(0, 80));
+        return;
+      }
+      
       // Filter out WebSocket errors during app reload
       if (this.isShuttingDown && this.isWebSocketError(message)) {
         return;
@@ -109,6 +115,21 @@ class WebSocketErrorHandler {
     return wsPatterns.some(pattern => 
       message.toLowerCase().includes(pattern.toLowerCase())
     );
+  }
+
+  /**
+   * Check if the error is a Supabase Realtime connection-limit error.
+   * These should ALWAYS be suppressed from console.error to prevent the red overlay.
+   */
+  private isSupabaseConnectionError(message: string): boolean {
+    const patterns = [
+      'CHANNEL_ERROR',
+      'connection limit',
+      'Potential connection limit',
+      'too many connections',
+      'Both proxy and direct fetch failed', // Added to suppress intrusive network failure overlays
+    ];
+    return patterns.some(p => message.toLowerCase().includes(p.toLowerCase()));
   }
 
   /**

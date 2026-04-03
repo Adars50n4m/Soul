@@ -41,6 +41,7 @@ interface MessageBubbleProps {
     onQuotePress?: (msgId: string) => void;
     uploadProgress?: number;
     onMediaDownload?: (msgId: string, url: string, index: number) => void;
+    onRetry?: (msgId: string) => void;
 }
 
 const formatTime = (ts: string) => {
@@ -89,7 +90,8 @@ const MessageBubble = React.memo(({
   isHighlighted = false,
   onQuotePress,
   uploadProgress,
-  onMediaDownload,
+    onMediaDownload,
+    onRetry,
 }: MessageBubbleProps) => {
     const initialMediaItems = getMessageMediaItems(msg);
     const initialMediaSource =
@@ -645,22 +647,29 @@ const MessageBubble = React.memo(({
                         isMe ? ChatStyles.messageFooterMe : ChatStyles.messageFooterThem,
                         msg.reactions && msg.reactions.length > 0 && ChatStyles.messageFooterWithReaction
                     ]}>
+                        {!!msg.isStarred && (
+                            <MaterialIcons name="star" size={10} color="#facc15" style={{ marginRight: 4 }} />
+                        )}
+                        {!!msg.editedAt && (
+                            <Text style={[ChatStyles.timestamp, { marginRight: 4, fontSize: 10 }]}>edited</Text>
+                        )}
                         <Text style={ChatStyles.timestamp}>{formatTime(msg.timestamp)}</Text>
                         {isMe && (
-                            <MaterialIcons
-                                name={
-                                    msg.status === 'pending' ? 'schedule' :
-                                    msg.status === 'failed' ? 'error-outline' :
-                                    msg.status === 'delivered' || msg.status === 'read' ? 'done-all' :
-                                    'done'
-                                }
-                                size={msg.status === 'failed' ? 11 : 10}
-                                color={
-                                    msg.status === 'read' ? '#34B7F1' :
-                                    msg.status === 'failed' ? '#ef4444' :
-                                    'rgba(255,255,255,0.3)'
-                                }
-                            />
+                            msg.status === 'failed' ? (
+                                <Pressable onPress={() => onRetry?.(msg.id)} hitSlop={10}>
+                                    <MaterialIcons name="error-outline" size={12} color="#ef4444" />
+                                </Pressable>
+                            ) : (
+                                <MaterialIcons
+                                    name={
+                                        msg.status === 'pending' ? 'schedule' :
+                                        msg.status === 'delivered' || msg.status === 'read' ? 'done-all' :
+                                        'done'
+                                    }
+                                    size={10}
+                                    color={msg.status === 'read' ? '#34B7F1' : 'rgba(255,255,255,0.3)'}
+                                />
+                            )
                         )}
                     </View>
                 </Animated.View>

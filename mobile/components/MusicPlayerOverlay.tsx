@@ -4,7 +4,7 @@ import {
     Animated, ScrollView, ActivityIndicator, TextInput,
     Dimensions, PanResponder, KeyboardAvoidingView, Platform, Keyboard
 } from 'react-native';
-import { BlurView } from 'expo-blur';
+import { GlassView } from './ui/GlassView';
 import { MaterialIcons } from '@expo/vector-icons';
 import { getSaavnApiUrl } from '../config/api';
 import { useApp } from '../context/AppContext';
@@ -181,7 +181,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                 { transform: [{ translateY: slideAnim }] },
                 keyboardVisible && { height: '100%', top: 100 } // Push to top when keyboard is open
             ]}>
-                <BlurView intensity={90} tint="dark" style={styles.glassContainer}>
+                <GlassView intensity={80} tint="dark" style={styles.glassContainer}>
                     <KeyboardAvoidingView
                         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
                         style={{ flex: 1 }}
@@ -254,7 +254,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
 
                             {/* Search Bar - Always Visible */}
                             <View style={[styles.searchContainer, keyboardVisible && { marginTop: 40 }]}>
-                                <BlurView intensity={30} tint="light" style={styles.searchInputWrapper}>
+                                <GlassView intensity={30} tint="light" style={styles.searchInputWrapper}>
                                     <MaterialIcons name="search" size={20} color="rgba(255,255,255,0.5)" style={{ marginRight: 10 }} />
                                     <TextInput
                                         style={styles.searchInput}
@@ -265,7 +265,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                                         onSubmitEditing={handleSearch}
                                         returnKeyType="search"
                                     />
-                                </BlurView>
+                                </GlassView>
                             </View>
 
                             {/* Song List */}
@@ -311,7 +311,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                             {/* Floating Tab Bar - Hide when typing */}
                             {!keyboardVisible && (
                                 <View style={styles.floatingTabsContainer}>
-                                    <BlurView intensity={40} tint="dark" style={styles.floatingTabs}>
+                                    <GlassView intensity={40} tint="dark" style={styles.floatingTabs}>
                                         <Pressable
                                             style={[styles.tabItem, activeTab === 'favorites' && styles.tabItemActive]}
                                             onPress={() => setActiveTab('favorites')}
@@ -326,13 +326,13 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                                             <MaterialIcons name="library-music" size={18} color={activeTab === 'music' ? "#f43f5e" : "rgba(255,255,255,0.4)"} />
                                             <Text style={[styles.tabText, activeTab === 'music' && styles.tabTextActive]}>Music</Text>
                                         </Pressable>
-                                    </BlurView>
+                                    </GlassView>
                                 </View>
                             )}
 
                         </View>
                     </KeyboardAvoidingView>
-                </BlurView>
+                </GlassView>
             </Animated.View>
         </Modal>
     );
@@ -360,7 +360,7 @@ const styles = StyleSheet.create({
     },
     glassContainer: {
         flex: 1,
-        backgroundColor: 'rgba(15, 15, 15, 0.92)', // Darker background as per HTML
+        backgroundColor: 'rgba(15, 15, 15, 0.65)', // Reduced from 0.92 to avoid black screen masking
     },
     dragHandleContainer: {
         alignItems: 'center',

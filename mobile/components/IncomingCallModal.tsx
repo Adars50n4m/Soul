@@ -26,7 +26,8 @@ export const IncomingCallModal = () => {
     const { width, height } = useWindowDimensions();
     
     // Simplified visibility: Incoming and not yet accepted
-    const isVisible = !!activeCall && activeCall.isIncoming && !activeCall.isAccepted;
+    // Added safety check for contactId to prevent phantom calls from showing a black overlay
+    const isVisible = !!activeCall && !!activeCall.contactId && activeCall.isIncoming && !activeCall.isAccepted;
 
     useEffect(() => {
         console.log(`[IncomingCallModal] Visibility state changed: ${isVisible}. Call type: ${activeCall?.type}, From: ${activeCall?.contactId}`);
@@ -99,7 +100,10 @@ export const IncomingCallModal = () => {
     if (!isVisible) return null;
 
     return (
-        <View style={[StyleSheet.absoluteFill, { zIndex: 9999, elevation: 10 }]}>
+        <View 
+            style={[StyleSheet.absoluteFill, { zIndex: 9999, elevation: 10 }]}
+            pointerEvents={isVisible ? 'auto' : 'none'}
+        >
             <View style={styles.container}>
                 <GlassView intensity={90} tint="dark" style={styles.blurContainer} >
                     {displayAvatar ? (
@@ -175,7 +179,7 @@ const incomingCallNameTextShadow = Platform.select({
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: 'rgba(0,0,0,0.5)',
+        backgroundColor: Platform.OS === 'android' ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.5)',
     },
     blurContainer: {
         flex: 1,

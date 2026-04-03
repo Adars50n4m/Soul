@@ -14,6 +14,7 @@ import Animated, {
 import { Message } from '../../types';
 import { ChatStyles, SCREEN_WIDTH, SCREEN_HEIGHT } from './ChatStyles';
 import MessageBubble from './MessageBubble';
+import { getMessageMediaItems } from '../../utils/chatUtils';
 
 interface MessageContextMenuProps {
     visible: boolean;
@@ -79,8 +80,10 @@ const MessageContextMenu = ({
     if (!visible || !msg || !layout) return null;
 
     const isMe = msg.sender === 'me';
+    const mediaItems = getMessageMediaItems(msg);
+    const isGroupedMedia = mediaItems.length > 1;
 
-    const ACTION_HEIGHT = 180; // Tightened estimate
+    const ACTION_HEIGHT = 320; // includes copy + copy time + forward + star/edit/pin/select/delete
     const EMOJI_HEIGHT = 54;
     const UNIT_GAP = 8; // Smaller gap for a tighter look
     const TOTAL_GAP = UNIT_GAP * 2; 
@@ -170,6 +173,28 @@ const MessageContextMenu = ({
                                     <MaterialIcons name="reply" size={20} color="#fff" />
                                     <Text style={ChatStyles.contextActionText}>Reply</Text>
                                 </Pressable>
+                                <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('copy'); handleClose(); }}>
+                                    <MaterialIcons name="content-copy" size={20} color="#fff" />
+                                    <Text style={ChatStyles.contextActionText}>Copy</Text>
+                                </Pressable>
+                                <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('copy_time'); handleClose(); }}>
+                                    <MaterialIcons name="schedule" size={20} color="#fff" />
+                                    <Text style={ChatStyles.contextActionText}>Copy Time</Text>
+                                </Pressable>
+                                <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('forward'); handleClose(); }}>
+                                    <MaterialIcons name="forward" size={20} color="#fff" />
+                                    <Text style={ChatStyles.contextActionText}>Forward</Text>
+                                </Pressable>
+                                <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction(msg.isStarred ? 'unstar' : 'star'); handleClose(); }}>
+                                    <MaterialIcons name={msg.isStarred ? 'star-outline' : 'star'} size={20} color="#fff" />
+                                    <Text style={ChatStyles.contextActionText}>{msg.isStarred ? 'Unstar' : 'Star'}</Text>
+                                </Pressable>
+                                {isMe && (
+                                    <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('edit'); handleClose(); }}>
+                                        <MaterialIcons name="edit" size={20} color="#fff" />
+                                        <Text style={ChatStyles.contextActionText}>Edit</Text>
+                                    </Pressable>
+                                )}
                                 <Pressable style={ChatStyles.contextActionBtn} onPress={() => { onAction('pin'); handleClose(); }}>
                                     <MaterialIcons name="push-pin" size={20} color="#fff" />
                                     <Text style={ChatStyles.contextActionText}>Pin</Text>
@@ -180,7 +205,9 @@ const MessageContextMenu = ({
                                 </Pressable>
                                 <Pressable style={[ChatStyles.contextActionBtn, { borderBottomWidth: 0 }]} onPress={() => { onAction('delete'); handleClose(); }}>
                                     <MaterialIcons name="delete-outline" size={20} color="#ff4444" />
-                                    <Text style={[ChatStyles.contextActionText, { color: '#ff4444' }]}>Delete</Text>
+                                    <Text style={[ChatStyles.contextActionText, { color: '#ff4444' }]}>
+                                        {isGroupedMedia ? `Delete (${mediaItems.length})` : 'Delete'}
+                                    </Text>
                                 </Pressable>
                             </GlassView>
                         </View>

@@ -6,7 +6,7 @@
  * in react-native-reanimated 4.1.x (Expo SDK 54).
  */
 
-import { Easing } from 'react-native-reanimated';
+import { Easing, SharedTransition, withSpring } from 'react-native-reanimated';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPRING CONFIGURATIONS
@@ -60,6 +60,45 @@ export const SharedTransitionTags = {
   profilePicture: (userId: string) => `profile-picture-${userId}`,
   profileCard: () => 'profile-card-shell',
 } as const;
+
+export const PROFILE_AVATAR_TRANSITION_TAG = 'avatar-universal-morph';
+
+/**
+ * We intentionally keep native shared-element transitions disabled on both
+ * platforms and rely on the app's custom morph overlays instead.
+ *
+ * Why:
+ * - Reanimated 3.x shared transitions remain experimental.
+ * - Android is the main source of crashes and missing-tag glitches.
+ * - iOS-only shared elements made the app feel different across platforms.
+ *
+ * The custom morph path in chat/home already gives us a premium transition
+ * while keeping motion consistent on iOS and Android.
+ */
+export const SUPPORT_SHARED_TRANSITIONS = false;
+
+/**
+ * Targeted opt-in for the chat-avatar -> profile-hero transition.
+ * This keeps the request-specific shared element path enabled without
+ * re-enabling experimental shared transitions across the whole app.
+ */
+export const SUPPORT_PROFILE_AVATAR_SHARED_TRANSITION = false;
+
+export const PROFILE_AVATAR_SHARED_TRANSITION = SharedTransition.custom((values) => {
+  'worklet';
+  return {
+    width: withSpring(values.targetWidth, { damping: 18, stiffness: 180, mass: 0.85 }),
+    height: withSpring(values.targetHeight, { damping: 18, stiffness: 180, mass: 0.85 }),
+    originX: withSpring(values.targetOriginX, { damping: 18, stiffness: 180, mass: 0.85 }),
+    originY: withSpring(values.targetOriginY, { damping: 18, stiffness: 180, mass: 0.85 }),
+    borderRadius: withSpring(values.targetBorderRadius, { damping: 18, stiffness: 180, mass: 0.85 }),
+  };
+}).progressAnimation((values, progress) => {
+  'worklet';
+  return {
+    opacity: progress < 0.04 ? 0 : 1,
+  };
+});
 
 export type SpringConfig = typeof LIQUID_GLASS_SPRING;
 export type TimingConfig = typeof LIQUID_TIMING;

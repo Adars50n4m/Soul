@@ -1,5 +1,22 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
-import { View, Text, Image, Pressable, StyleSheet, StatusBar, Dimensions, Alert, FlatList, Platform, TouchableOpacity, RefreshControl, ActionSheetIOS, TextInput, Modal, ActivityIndicator } from 'react-native';
+import {
+  View,
+  Text,
+  Image,
+  Pressable,
+  StyleSheet,
+  StatusBar,
+  Dimensions,
+  Alert,
+  FlatList,
+  Platform,
+  TouchableOpacity,
+  ActionSheetIOS,
+  TextInput,
+  Modal,
+  ActivityIndicator,
+  PanResponder,
+} from 'react-native';
 import { Svg, Circle } from 'react-native-svg';
 import { FlashList } from '@shopify/flash-list';
 
@@ -10,36 +27,52 @@ import GlassView from '../../components/ui/GlassView';
 import { MaterialIcons } from '@expo/vector-icons';
 import Animated, {
   useSharedValue,
+  useAnimatedScrollHandler,
   useAnimatedStyle,
+  interpolateColor,
+  useDerivedValue,
+  runOnJS,
   withSpring,
   withTiming,
+  withRepeat,
+  cancelAnimation,
   Easing,
   SharedTransition,
   interpolate,
   Extrapolation,
+  FadeIn,
+  FadeOut,
 } from 'react-native-reanimated';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system';
+import * as Haptics from 'expo-haptics';
 import { storageService } from '../../services/StorageService';
 import { proxySupabaseUrl } from '../../config/api';
 import { chatTransitionState } from '../../services/chatTransitionState';
 import SwipeableRow from '../../components/ui/SwipeableRow';
 
 import { useApp } from '../../context/AppContext';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { usePresence } from '../../context/PresenceContext';
 import { useScrollMotion } from '../../components/navigation/ScrollMotionProvider';
 import { normalizeId, getSuperuserName, LEGACY_TO_UUID, UUID_TO_LEGACY } from '../../utils/idNormalization';
 import { SHRI_ID, HARI_ID } from '../../config/supabase';
 import { SoulAvatar } from '../../components/SoulAvatar';
+import { StatusThumbnail } from '../../components/StatusThumbnail';
 import { MediaPreviewModal } from '../../components/MediaPreviewModal';
 import { MediaPickerSheet } from '../../components/MediaPickerSheet';
 import { Contact } from '../../types';
 import { NoteBubble } from '../../components/NoteBubble';
 import { NoteCreatorModal } from '../../components/NoteCreatorModal';
+import { SUPPORT_SHARED_TRANSITIONS } from '../../constants/sharedTransitions';
 const DEFAULT_AVATAR = '';
-const ENABLE_SHARED_TRANSITIONS = Platform.OS === 'ios';
+const ENABLE_SHARED_TRANSITIONS = SUPPORT_SHARED_TRANSITIONS;
 const HOME_MORPH_DURATION = 480;
+const PULL_MAX_DISTANCE = 160;
+const PULL_REFRESH_TRIGGER = 85;
+const PULL_LOCK_DISTANCE = 80;
+const PULL_SPRING = { damping: 20, stiffness: 180, mass: 0.8 } as const;
 
 const resolveStatusAssetUri = async (asset: ImagePicker.ImagePickerAsset): Promise<string> => {
   let resolvedUri = asset.uri;
@@ -103,21 +136,24 @@ const formatTime = (ts: string) => {
     return ts;
   }
 };
-
-let hasRenderedHomeOnce = false;
+// Remove global hasRenderedHomeOnce flag
 
 interface ChatListItemProps {
   item: Contact;
   index: number;
   lastMsg: { text?: string; timestamp?: string };
   onSelect: (contact: Contact, y: number) => void;
+  onLongPress: (contact: Contact) => void;
   isTyping: boolean;
   getPresence: (userId: string) => { isOnline: boolean; lastSeen: string | null };
   connectivity: { isDeviceOnline: boolean; isServerReachable: boolean; isRealtimeConnected: boolean };
   homeMorphProgress: Animated.SharedValue<number>;
+  unreadCount: number;
+  isPinned: boolean;
+  isMuted: boolean;
 }
 
-const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, isTyping, getPresence, connectivity, homeMorphProgress }: ChatListItemProps) => {
+const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, onLongPress, isTyping, getPresence, connectivity, homeMorphProgress, unreadCount, isPinned, isMuted }: ChatListItemProps) => {
   const scaleAnim = useSharedValue(1);
   const opacityAnim = useSharedValue(1);
   const itemRef = useRef<View>(null);
@@ -151,6 +187,7 @@ const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, isTyping, get
     <Pressable
       ref={itemRef}
       onPress={handlePress}
+      onLongPress={() => onLongPress(item)}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
       style={styles.chatItem}
@@ -189,6 +226,7 @@ const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, isTyping, get
           >
             <SoulAvatar
               uri={proxySupabaseUrl(item.avatar) || DEFAULT_AVATAR}
+              localUri={item.localAvatarUri}
               size={40}
               avatarType={item.avatarType}
               teddyVariant={item.teddyVariant}
@@ -224,6 +262,15 @@ const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, isTyping, get
 
           <View style={styles.rightSide}>
             {lastMsg.timestamp && <Text style={styles.timestamp}>{formatTime(lastMsg.timestamp)}</Text>}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              {isMuted && <MaterialIcons name="volume-off" size={12} color="rgba(255,255,255,0.45)" />}
+              {isPinned && <MaterialIcons name="push-pin" size={12} color="#facc15" />}
+              {unreadCount > 0 && (
+                <View style={styles.unreadBadge}>
+                  <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                </View>
+              )}
+            </View>
             <MaterialIcons name="chevron-right" size={20} color={chevronColor} />
           </View>
         </View>
@@ -243,6 +290,9 @@ const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, isTyping, get
     prevProps.lastMsg.text === nextProps.lastMsg.text &&
     prevProps.lastMsg.timestamp === nextProps.lastMsg.timestamp &&
     prevProps.isTyping === nextProps.isTyping &&
+    prevProps.unreadCount === nextProps.unreadCount &&
+    prevProps.isPinned === nextProps.isPinned &&
+    prevProps.isMuted === nextProps.isMuted &&
     prevProps.onSelect === nextProps.onSelect &&
     prevProps.getPresence(prevProps.item.id).isOnline === nextProps.getPresence(nextProps.item.id).isOnline
   );
@@ -264,7 +314,7 @@ const AnimatedMoreMenu = ({ router, isSearching }: { router: any, isSearching: b
 
   const containerStyle = useAnimatedStyle(() => ({
     width: interpolate(progress.value, [0, 1], [40, 200]),
-    height: interpolate(progress.value, [0, 1], [40, 134]),
+    height: interpolate(progress.value, [0, 1], [40, 220]),
     borderRadius: interpolate(progress.value, [0, 1], [20, 16]),
     backgroundColor: expanded ? 'rgba(0,0,0,0.6)' : 'transparent',
   }));
@@ -322,6 +372,26 @@ const AnimatedMoreMenu = ({ router, isSearching }: { router: any, isSearching: b
               >
                 <MaterialIcons name="notifications-none" size={20} color="#fff" style={styles.moreMenuIconMorph} />
                 <Text style={styles.moreMenuTextMorph}>View Requests</Text>
+              </Pressable>
+
+              <View style={styles.moreMenuDividerMorph} />
+
+              <Pressable 
+                style={styles.moreMenuItemMorph}
+                onPress={() => { setExpanded(false); router.push('/search'); }}
+              >
+                <MaterialIcons name="search" size={20} color="#fff" style={styles.moreMenuIconMorph} />
+                <Text style={styles.moreMenuTextMorph}>Search</Text>
+              </Pressable>
+
+              <View style={styles.moreMenuDividerMorph} />
+
+              <Pressable 
+                style={styles.moreMenuItemMorph}
+                onPress={() => { setExpanded(false); /* Global Starred yet to be implemented */ }}
+              >
+                <MaterialIcons name="star-outline" size={20} color="#fff" style={styles.moreMenuIconMorph} />
+                <Text style={styles.moreMenuTextMorph}>Starred Messages</Text>
               </Pressable>
           </Animated.View>
 
@@ -397,39 +467,155 @@ export default function HomeScreen() {
     refreshLocalCache,
     typingUsers,
     connectivity,
+    isReady,
   } = useApp();
   const { getPresence } = usePresence();
   const navigation = useNavigation();
   const router = useRouter();
   const isFocused = useIsFocused();
-  const { onScroll: handleScrollMotion } = useScrollMotion('index');
+  const { onScrollRaw: handleScrollMotionRaw } = useScrollMotion('index');
 
   // Status Handlers
   const [isMediaPickerVisible, setIsMediaPickerVisible] = useState(false);
   const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' } | null>(null);
   const [isNoteModalVisible, setIsNoteModalVisible] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isSearching, setIsSearching] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshHint, setRefreshHint] = useState('Pull to refresh');
+  const [chatFilter, setChatFilter] = useState<'all' | 'unread'>('all');
+  const [pinnedChatIds, setPinnedChatIds] = useState<string[]>([]);
+  const [mutedChatIds, setMutedChatIds] = useState<string[]>([]);
   
-  const statusRefs = useRef<Record<string, any>>({});
-  const statusRailOpacity = useSharedValue(hasRenderedHomeOnce ? 0 : 1);
+  const hasFocusedOnce = useRef(false);
+  const statusRailOpacity = useSharedValue(0); // Start at 0, fade in when ready/focused
   const statusRailOffset = useSharedValue(0);
   const homeMorphProgress = useSharedValue(0);
-  const hasFocusedOnce = useRef(false);
+  const pullDownPosition = useSharedValue(0);
+  const scrollPosition = useSharedValue(0);
+  const isReadyToRefresh = useSharedValue(false);
+  const refreshSpin = useSharedValue(0);
+  const refreshingProgress = useSharedValue(0);
+  const statusRefs = useRef<Record<string, any>>({});
+  const readyHintRef = useRef(false);
+  const smoothPull = useDerivedValue(() => withSpring(pullDownPosition.value, PULL_SPRING), [pullDownPosition]);
   const statusRailAnimStyle = useAnimatedStyle(() => ({
     opacity: statusRailOpacity.value,
     transform: [{ translateY: statusRailOffset.value }],
   }));
 
-const homeContentAnimatedStyle = useAnimatedStyle(() => ({
-  transform: [
-    { translateY: interpolate(homeMorphProgress.value, [0, 1], [0, 45], Extrapolation.IDENTITY) },
-    { scale: interpolate(homeMorphProgress.value, [0, 1], [1, 0.92], Extrapolation.IDENTITY) },
-  ] as any,
-  opacity: Platform.OS === 'android' 
-    ? 1 
-    : interpolate(homeMorphProgress.value, [0, 0.6], [1, 1], Extrapolation.CLAMP), // Fixed: was using missing isViewerVisible
-}));
+const homeContentAnimatedStyle = useAnimatedStyle(() => {
+  const baseTranslateY = interpolate(homeMorphProgress.value, [0, 1], [0, 45], Extrapolation.IDENTITY);
+  return {
+    transform: [
+      { translateY: baseTranslateY + smoothPull.value },
+      { scale: interpolate(homeMorphProgress.value, [0, 1], [1, 0.92], Extrapolation.IDENTITY) },
+    ] as any,
+    opacity: Platform.OS === 'android'
+      ? 1
+      : interpolate(homeMorphProgress.value, [0, 0.6], [1, 1], Extrapolation.CLAMP),
+  };
+});
+
+  const refreshContainerStyle = useAnimatedStyle(() => ({
+    height: smoothPull.value,
+    opacity: interpolate(smoothPull.value, [0, 20, PULL_LOCK_DISTANCE], [0, 0.35, 1], Extrapolation.CLAMP),
+  }));
+
+  const refreshPillStyle = useAnimatedStyle(() => {
+    const readyProgress = interpolate(
+      smoothPull.value,
+      [PULL_REFRESH_TRIGGER - 18, PULL_REFRESH_TRIGGER + 12],
+      [0, 1],
+      Extrapolation.CLAMP
+    );
+
+    const idleToPull = interpolate(
+      smoothPull.value,
+      [0, PULL_LOCK_DISTANCE, PULL_MAX_DISTANCE],
+      [-44, 0, 2],
+      Extrapolation.CLAMP
+    );
+
+    const refreshingBob = isRefreshing
+      ? Math.sin(refreshSpin.value * Math.PI * 2) * 1.7
+      : 0;
+
+    return {
+      transform: [
+        { translateY: idleToPull + refreshingBob },
+        {
+          scale:
+            interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [0.9, 1], Extrapolation.CLAMP)
+            + readyProgress * 0.02,
+        },
+      ] as any,
+      opacity: interpolate(smoothPull.value, [0, 20, PULL_LOCK_DISTANCE], [0, 0.62, 1], Extrapolation.CLAMP),
+    };
+  });
+
+  const refreshRingStyle = useAnimatedStyle(() => {
+    const pullProgress = interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [0, 1], Extrapolation.CLAMP);
+    const pulse = isRefreshing
+      ? (Math.sin(refreshSpin.value * Math.PI * 4) + 1) / 2 // Faster pulse during refresh
+      : 0;
+
+    return {
+      opacity: 0.2 + pullProgress * 0.45 + (isRefreshing ? 0.25 : 0),
+      transform: [{ scale: 0.75 + pullProgress * 0.35 + pulse * 0.08 }] as any,
+      borderWidth: interpolate(pullProgress, [0, 1], [1.2, 1.8], Extrapolation.CLAMP),
+      borderColor: interpolateColor(
+        pullProgress + (isRefreshing ? 1 : 0),
+        [0, 1, 2],
+        ['rgba(255,255,255,0.2)', 'rgba(59,130,246,0.8)', 'rgba(188,0,42,1)']
+      ) as string,
+    };
+  });
+
+  const refreshIconStyle = useAnimatedStyle(() => {
+    const pullScale = interpolate(
+      smoothPull.value,
+      [0, PULL_LOCK_DISTANCE],
+      [0.45, 1],
+      Extrapolation.CLAMP
+    );
+    const pullRotation = interpolate(
+      smoothPull.value,
+      [0, PULL_MAX_DISTANCE],
+      [0, 360],
+      Extrapolation.CLAMP
+    );
+    const refreshingRotation = refreshSpin.value * 360;
+
+    return {
+      opacity: interpolate(refreshingProgress.value, [0, 0.45], [1, 0], Extrapolation.CLAMP),
+      transform: [
+        { scale: interpolate(refreshingProgress.value, [0, 0.5], [pullScale, 0.2], Extrapolation.CLAMP) },
+        { rotate: `${pullRotation + refreshingRotation}deg` },
+        { perspective: 1000 },
+        { rotateY: `${interpolate(refreshingProgress.value, [0, 1], [0, 180])}deg` }
+      ] as any,
+    };
+  });
+
+  const refreshTitleStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(smoothPull.value, [10, PULL_LOCK_DISTANCE], [0, 1], Extrapolation.CLAMP),
+    transform: [{ translateY: interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [8, 0], Extrapolation.CLAMP) }] as any,
+  }));
+
+  const refreshHintStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(smoothPull.value, [30, PULL_LOCK_DISTANCE], [0, 0.95], Extrapolation.CLAMP),
+    transform: [{ translateY: interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [10, 0], Extrapolation.CLAMP) }] as any,
+  }));
+
+  const refreshLogoStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(refreshingProgress.value, [0.35, 0.75], [0, 1], Extrapolation.CLAMP),
+    transform: [
+      {
+        scale: interpolate(refreshingProgress.value, [0, 1], [0.6, 1], Extrapolation.CLAMP),
+      },
+      { perspective: 1000 },
+      { rotateY: `${interpolate(refreshingProgress.value, [0, 1], [-180, 0])}deg` }
+    ] as any,
+  }));
 
   const homeBackdropAnimatedStyle = useAnimatedStyle(() => ({
     opacity: homeMorphProgress.value * 0.11,
@@ -461,9 +647,8 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
       homeMorphProgress.value = 1;
       if (!hasFocusedOnce.current) {
         hasFocusedOnce.current = true;
-        hasRenderedHomeOnce = true;
         homeMorphProgress.value = 0;
-        statusRailOpacity.value = 1;
+        statusRailOpacity.value = withTiming(1, { duration: 600 });
         statusRailOffset.value = 0;
         return;
       }
@@ -486,21 +671,21 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     return unsubscribe;
   }, [homeMorphProgress, navigation, statusRailOpacity]);
 
-  // Safety: Ensure visibility if focus listener fails or is delayed on mount (common on Android cold boots)
+  // Safety & Ready Trigger: Ensure visibility if focus listener fails or when app becomes ready
   useEffect(() => {
-    if (isFocused && homeMorphProgress.value === 1) {
-       const timer = setTimeout(() => {
-         if (homeMorphProgress.value === 1) {
-           console.log('[HomeScreen] Safety Visibility Trigger');
-           homeMorphProgress.value = withTiming(0, { 
-             duration: 500,
-             easing: Easing.bezier(0.22, 1, 0.36, 1)
-           });
-         }
-       }, 800);
-       return () => clearTimeout(timer);
+    if (isReady && isFocused) {
+        if (statusRailOpacity.value === 0) {
+            statusRailOpacity.value = withTiming(1, { duration: 600 });
+        }
+        if (homeMorphProgress.value === 1 && !chatTransitionState.getPhase().includes('returning')) {
+             console.log('[HomeScreen] Ready Visibility Trigger');
+             homeMorphProgress.value = withTiming(0, { 
+               duration: 600,
+               easing: Easing.bezier(0.22, 1, 0.36, 1)
+             });
+        }
     }
-  }, [isFocused]);
+  }, [isReady, isFocused]);
 
   useEffect(() => {
     const unsubscribe = chatTransitionState.subscribe((phase) => {
@@ -533,6 +718,26 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
     return unsubscribe;
   }, [homeMorphProgress, statusRailOpacity]);
+
+  useEffect(() => {
+    refreshingProgress.value = withTiming(isRefreshing ? 1 : 0, {
+      duration: isRefreshing ? 150 : 110,
+      easing: Easing.out(Easing.cubic),
+    });
+
+    if (isRefreshing) {
+      refreshSpin.value = 0;
+      refreshSpin.value = withRepeat(
+        withTiming(1, { duration: 980, easing: Easing.linear }),
+        -1,
+        false
+      );
+      return;
+    }
+
+    cancelAnimation(refreshSpin);
+    refreshSpin.value = withTiming(0, { duration: 120 });
+  }, [isRefreshing, refreshSpin, refreshingProgress]);
 
   const contactStatusGroupsMap = useMemo(() => {
     const map = new Map<string, any>();
@@ -593,11 +798,8 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
   }, [contacts, messages, statuses, currentUser]);
 
   const filteredVisibleContacts = useMemo(() => {
-    if (!searchQuery.trim()) return visibleContacts;
-    return visibleContacts.filter(c => 
-      c.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
-    );
-  }, [visibleContacts, searchQuery]);
+    return visibleContacts;
+  }, [visibleContacts]);
 
   const contactsWithStories = useMemo(() => {
     return visibleContacts.filter(c => contactStatusGroupsMap.has(c.id));
@@ -646,8 +848,9 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
       setStatusMediaPreview(null);
       setIsMediaPickerVisible(false);
     } catch (error) {
-      console.error('Failed to initiate status upload:', error);
-      Alert.alert('Error', 'Failed to start upload.');
+      const message = error instanceof Error ? error.message : 'Failed to start upload.';
+      console.warn('[Status] Failed to initiate status upload:', message);
+      Alert.alert('Error', message || 'Failed to start upload.');
       setStatusMediaPreview(null);
       setIsMediaPickerVisible(false);
     }
@@ -726,8 +929,12 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
   const renderStatusItem = useCallback(({ item, index }: { item: any; index: number }) => {
     if (item.id === 'my-status') {
-      const myPreviewUrl = myStatuses[0]?.mediaLocalPath || myStatuses[0]?.mediaUrl;
-      const hasStatus = myStatuses.length > 0;
+      const reversedMine = [...myStatuses].reverse();
+      const latestMyStatus =
+        reversedMine.find((status) => !!(status.mediaLocalPath || status.mediaUrl))
+        || reversedMine.find((status) => !!status.mediaKey)
+        || myStatuses[myStatuses.length - 1];
+      const hasStatus = !!latestMyStatus;
       const hasPendingUploads = pendingStatusUploads.length > 0;
       const isUploading = isStatusSyncing || pendingStatusUploads.some(upload => upload.uploadStatus === 'uploading');
       const hasFailedPendingUpload = pendingStatusUploads.some(upload => upload.uploadStatus === 'failed');
@@ -767,9 +974,15 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
                     </View>
                   </View>
                 </View>
-              ) : hasStatus && myPreviewUrl ? (
+              ) : hasStatus ? (
                 <View style={StyleSheet.absoluteFill}>
-                  <Image source={{ uri: myPreviewUrl }} style={styles.myStatusPreviewBgFull} />
+                  <StatusThumbnail 
+                    statusId={latestMyStatus.id}
+                    mediaKey={latestMyStatus.mediaKey}
+                    uriHint={latestMyStatus.mediaLocalPath || latestMyStatus.mediaUrl}
+                    mediaType={latestMyStatus.mediaType as any}
+                    style={styles.myStatusPreviewBgFull}
+                  />
                   <LinearGradient
                     colors={['rgba(0,0,0,0.5)', 'transparent']}
                     style={styles.myStatusTopGradient}
@@ -827,9 +1040,12 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
     
     const contact = item as Contact;
     const group = contactStatusGroupsMap.get(contact.id);
-    const hasStatus = !!group;
+    const latestStatus = group?.statuses
+      ? [...group.statuses].reverse().find((status) => !!(status.mediaLocalPath || status.mediaUrl))
+        || group.statuses[group.statuses.length - 1]
+      : undefined;
+    const hasStatus = !!latestStatus;
     const hasUnviewed = group?.hasUnviewed || false;
-    const previewUrl = group?.statuses[0]?.mediaLocalPath || group?.statuses[0]?.mediaUrl;
 
     return (
       <Pressable 
@@ -839,20 +1055,32 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         onPress={() => handleStatusPress(contact)}
       >
         <View style={styles.statusCardSurface}>
-          {previewUrl ? (
-            <Image source={{ uri: previewUrl }} style={styles.statusMediaBackground} />
+          {hasStatus ? (
+            <StatusThumbnail 
+              statusId={latestStatus.id}
+              mediaKey={latestStatus.mediaKey}
+              uriHint={latestStatus.mediaLocalPath || latestStatus.mediaUrl}
+              mediaType={latestStatus.mediaType as any}
+              style={styles.statusMediaBackground}
+            />
           ) : (
             <View style={[styles.statusMediaBackground, styles.statusPlaceholder]} />
           )}
           
           <View style={styles.statusOverlay} pointerEvents="none">
-            <View style={styles.contactAvatarPositioner}>
+            <View style={styles.contactAvatarCorner}>
               <LinearGradient
                 colors={hasUnviewed ? ['#8C0016', '#B5001E'] : ['rgba(255,255,255,0.2)', 'rgba(255,255,255,0.2)']}
                 style={[styles.storyRing, { padding: 2 }]}
               >
                 <View style={styles.storyRingInner}>
-                  <SoulAvatar uri={proxySupabaseUrl(contact.avatar)} size={42} avatarType={contact.avatarType as any} />
+                  <SoulAvatar 
+                    uri={proxySupabaseUrl(contact.avatar)} 
+                    localUri={contact.localAvatarUri}
+                    size={34} 
+                    avatarType={contact.avatarType as any} 
+                    style={styles.avatarGlow}
+                  />
                 </View>
               </LinearGradient>
             </View>
@@ -910,6 +1138,10 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
             index={index}
             lastMsg={lastMsg} 
             isTyping={isTyping}
+            unreadCount={item.unreadCount}
+            isMuted={mutedChatIds.includes(item.id)}
+            isPinned={pinnedChatIds.includes(item.id)}
+            onLongPress={() => {}}
             getPresence={getPresence}
             connectivity={connectivity}
             onSelect={handleUserSelect}
@@ -921,45 +1153,98 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
   const keyExtractor = useCallback((item: Contact) => item.id, []);
 
+  const triggerRefresh = useCallback(async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    setRefreshHint('Syncing chats...');
+    
+    // Premium Haptic: Successful start
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+    const startedAt = Date.now();
+    try {
+      await Promise.resolve(refreshLocalCache());
+    } catch (error) {
+      console.warn('[HomeScreen] refreshLocalCache failed:', error);
+    } finally {
+      const elapsed = Date.now() - startedAt;
+      const minVisibleDuration = 900;
+      if (elapsed < minVisibleDuration) {
+        await new Promise((resolve) => setTimeout(resolve, minVisibleDuration - elapsed));
+      }
+      setIsRefreshing(false);
+      setRefreshHint('Pull to refresh');
+      readyHintRef.current = false;
+      pullDownPosition.value = withSpring(0, PULL_SPRING);
+    }
+  }, [isRefreshing, refreshLocalCache, pullDownPosition]);
+
+  const onPanRelease = useCallback(() => {
+    const shouldRefresh = isReadyToRefresh.value;
+    pullDownPosition.value = withSpring(shouldRefresh ? PULL_LOCK_DISTANCE : 0, PULL_SPRING);
+
+    if (shouldRefresh) {
+      isReadyToRefresh.value = false;
+      void triggerRefresh();
+      return;
+    }
+
+    setRefreshHint('Pull to refresh');
+    readyHintRef.current = false;
+  }, [isReadyToRefresh, pullDownPosition, triggerRefresh]);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gestureState) => {
+          if (isRefreshing) return false;
+          const isPullingDown = gestureState.dy > 0 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
+          return scrollPosition.value <= 0 && isPullingDown;
+        },
+        onPanResponderMove: (_, gestureState) => {
+          const dragY = Math.max(gestureState.dy, 0);
+          const resistedPull =
+            dragY <= PULL_REFRESH_TRIGGER
+              ? dragY * 0.94
+              : PULL_REFRESH_TRIGGER * 0.94 + (dragY - PULL_REFRESH_TRIGGER) * 0.42;
+          const nextPull = Math.min(PULL_MAX_DISTANCE, resistedPull);
+          pullDownPosition.value = nextPull;
+          const nextReady = nextPull >= PULL_REFRESH_TRIGGER;
+          isReadyToRefresh.value = nextReady;
+
+          if (nextReady !== readyHintRef.current) {
+            readyHintRef.current = nextReady;
+            setRefreshHint(nextReady ? 'Release to sync' : 'Pull to refresh');
+            
+            // Premium Haptic: Threshold crossed
+            if (nextReady) {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            } else {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            }
+          }
+        },
+        onPanResponderRelease: onPanRelease,
+        onPanResponderTerminate: onPanRelease,
+      }),
+    [isRefreshing, scrollPosition, pullDownPosition, isReadyToRefresh, onPanRelease]
+  );
+
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      const y = event.contentOffset.y;
+      scrollPosition.value = y;
+      runOnJS(handleScrollMotionRaw)(y);
+    },
+  });
+
   const renderHeader = useCallback(() => (
     <View style={styles.homeHeaderWrapper}>
       <View style={styles.topHeader}>
-        {isSearching ? (
-          <View style={styles.searchBarContainer}>
-            <TextInput
-              style={styles.searchBarInput}
-              placeholder="Search chats..."
-              placeholderTextColor="rgba(255,255,255,0.4)"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              autoFocus
-              selectionColor="#fff"
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.searchClearBtn}>
-                <MaterialIcons name="close" size={20} color="rgba(255,255,255,0.5)" />
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity 
-              onPress={() => { setIsSearching(false); setSearchQuery(''); }} 
-              style={styles.searchCancelBtn}
-            >
-              <Text style={styles.searchCancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.headerActions}>
-            <Text style={styles.headerTitle}>Soul</Text>
-            <TouchableOpacity 
-              onPress={() => setIsSearching(true)} 
-              style={styles.headerIconButton}
-              activeOpacity={0.7}
-            >
-              <MaterialIcons name="search" size={24} color="#fff" />
-            </TouchableOpacity>
-            <AnimatedMoreMenu router={router} isSearching={isSearching} />
-          </View>
-        )}
+        <View style={styles.headerActions}>
+          <Text style={styles.headerTitle}>Soul</Text>
+          <AnimatedMoreMenu router={router} isSearching={false} />
+        </View>
       </View>
       <Animated.View style={[styles.statusRail, statusRailAnimStyle]}>
         <FlatList
@@ -973,31 +1258,65 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
         />
       </Animated.View>
     </View>
-  ), [contactsWithStories, renderStatusItem, statusRailAnimStyle, router, isSearching, searchQuery]);
+  ), [contactsWithStories, renderStatusItem, statusRailAnimStyle, router]);
 
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
+      
+      {/* Offline Connectivity Banner */}
+      {(!connectivity.isDeviceOnline || !connectivity.isServerReachable) && (
+        <Animated.View 
+          entering={FadeIn} 
+          exiting={FadeOut}
+          style={{
+            backgroundColor: 'rgba(239, 68, 68, 0.9)', // Red-500 with slight glass effect
+            paddingVertical: 4,
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 2000,
+          }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <MaterialIcons name="wifi-off" size={14} color="#fff" style={{ marginRight: 6 }} />
+            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 }}>
+              OFFLINE MODE
+            </Text>
+          </View>
+        </Animated.View>
+      )}
+
+      <Animated.View pointerEvents="none" style={[styles.refreshContainer, refreshContainerStyle]}>
+        <Animated.View style={[styles.refreshPill, refreshPillStyle]}>
+          <Animated.View style={[styles.refreshRing, refreshRingStyle]} />
+          <Animated.View style={[styles.refreshLogoWrap, refreshLogoStyle]}>
+            <Image source={require('../../assets/images/logo.jpg')} style={styles.refreshLogo} />
+          </Animated.View>
+          <Animated.View style={refreshIconStyle}>
+            <MaterialIcons name="autorenew" size={18} color="#fff" />
+          </Animated.View>
+          <Animated.Text style={[styles.refreshPillTitle, refreshTitleStyle]}>Soul</Animated.Text>
+          <Animated.Text style={[styles.refreshPillSubtitle, refreshHintStyle]}>{refreshHint}</Animated.Text>
+        </Animated.View>
+      </Animated.View>
+
       <Animated.View pointerEvents="none" style={[styles.homeMorphBackdrop, homeBackdropAnimatedStyle]} />
-      <Animated.View style={[styles.homeContent, homeContentAnimatedStyle]}>
-        <FlatList
+      <Animated.View
+        pointerEvents={isRefreshing ? 'none' : 'auto'}
+        style={[styles.homeContent, homeContentAnimatedStyle]}
+        {...panResponder.panHandlers}
+      >
+        <Animated.FlatList
           data={filteredVisibleContacts}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           ListHeaderComponent={renderHeader}
           contentContainerStyle={styles.listContent}
+          bounces={!isRefreshing}
+          scrollEnabled={!isRefreshing}
           showsVerticalScrollIndicator={false}
-          onScroll={handleScrollMotion}
+          onScroll={scrollHandler}
           scrollEventThrottle={16}
-          refreshControl={
-            <RefreshControl
-              refreshing={false}
-              onRefresh={() => {
-                refreshLocalCache();
-              }}
-              tintColor="#BC002A"
-            />
-          }
         />
       </Animated.View>
 
@@ -1038,6 +1357,59 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => ({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
+  refreshContainer: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 108 : 86,
+    left: 0,
+    right: 0,
+    zIndex: 1600,
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  refreshPill: {
+    width: 180,
+    height: 92,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 4,
+    gap: 1,
+  },
+  refreshRing: {
+    position: 'absolute',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1.4,
+  },
+  refreshLogoWrap: {
+    position: 'absolute',
+    top: 7,
+  },
+  refreshLogo: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+  },
+  refreshPillTitle: {
+    color: '#fff',
+    marginTop: 18,
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 0.45,
+    textTransform: 'uppercase',
+    textShadowColor: 'rgba(0,0,0,0.55)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  refreshPillSubtitle: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 10.5,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
   homeMorphBackdrop: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#000',
@@ -1178,6 +1550,7 @@ const styles = StyleSheet.create({
   myStatusEmptyPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 38 },
   statusOverlay: { ...StyleSheet.absoluteFillObject },
   contactAvatarPositioner: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 50, alignItems: 'center', justifyContent: 'center' },
+  contactAvatarCorner: { position: 'absolute', top: 12, left: 12, zIndex: 10 },
   storyRing: { borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
   storyRingInner: { backgroundColor: '#000', borderRadius: 28, padding: 2 },
   statusNameGradient: {
@@ -1255,5 +1628,19 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     marginTop: 4,
+  },
+  unreadBadge: {
+    backgroundColor: '#3b82f6',
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  unreadBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
   },
 });

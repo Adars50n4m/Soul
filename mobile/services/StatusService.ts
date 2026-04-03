@@ -9,108 +9,23 @@ import { storageService } from './StorageService';
 import * as FileSystem from 'expo-file-system';
 import * as SQLite from 'expo-sqlite';
 import NetInfo from '@react-native-community/netinfo';
-import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getDb } from './LocalDBService';
 
 class StatusService {
-  private _db: SQLite.SQLiteDatabase | null = null;
-  private _initPromise: Promise<void> | null = null;
-
   private async getDb() {
-    if (!this._db) {
-      this._db = await SQLite.openDatabaseAsync('soulsync.db');
-    }
-    await this.initDatabase();
-    return this._db;
-  }
-
-  private async initDatabase() {
-    if (this._initPromise) return this._initPromise;
-
-    this._initPromise = (async () => {
-      const db = this._db;
-      if (!db) return;
-      
-      console.log('[StatusService] Initializing tables...');
-      try {
-        await db.execAsync(`
-          CREATE TABLE IF NOT EXISTS statuses (
-            id TEXT PRIMARY KEY NOT NULL,
-            userId TEXT NOT NULL,
-            mediaKey TEXT NOT NULL,
-            mediaType TEXT NOT NULL,
-            caption TEXT,
-            expiresAt TEXT NOT NULL,
-            duration INTEGER,
-            createdAt TEXT NOT NULL
-          );
-          
-          CREATE TABLE IF NOT EXISTS pending_uploads (
-            id TEXT PRIMARY KEY NOT NULL,
-            localUri TEXT NOT NULL,
-            mediaType TEXT NOT NULL,
-            mediaKey TEXT,
-            caption TEXT,
-            createdAt INTEGER NOT NULL,
-            uploadStatus TEXT DEFAULT 'pending',
-            retryCount INTEGER DEFAULT 0
-          );
-
-          CREATE TABLE IF NOT EXISTS cached_statuses (
-            id TEXT PRIMARY KEY NOT NULL,
-            userId TEXT NOT NULL,
-            mediaUrl TEXT,
-            mediaLocalPath TEXT,
-            mediaKey TEXT,
-            mediaType TEXT NOT NULL,
-            caption TEXT,
-            duration INTEGER DEFAULT 5,
-            expiresAt INTEGER NOT NULL,
-            isViewed INTEGER DEFAULT 0,
-            isMine INTEGER DEFAULT 0,
-            createdAt INTEGER NOT NULL
-          );
-
-          CREATE TABLE IF NOT EXISTS cached_users (
-            id TEXT PRIMARY KEY NOT NULL,
-            username TEXT,
-            displayName TEXT,
-            avatarUrl TEXT,
-            soulNote TEXT,
-            soulNoteAt INTEGER
-          );
-        `);
-
-        // Migration logic for existing tables
-        try {
-          await db.execAsync("ALTER TABLE cached_statuses ADD COLUMN mediaKey TEXT;");
-        } catch { /* ignores existing column errors */ }
-        
-        try {
-          await db.execAsync("ALTER TABLE pending_uploads ADD COLUMN mediaKey TEXT;");
-        } catch { /* ignores existing column errors */ }
-
-        try {
-          await db.execAsync("ALTER TABLE cached_statuses ADD COLUMN duration INTEGER DEFAULT 5;");
-        } catch { /* ignores existing column errors */ }
-
-        console.log('[StatusService] Database initialized successfully');
-      } catch (err) {
-        console.error('[StatusService] DB Init Critical Error:', err);
-        this._initPromise = null;
-        throw err;
-      }
-    })();
-
-    return this._initPromise;
+    return await getDb();
   }
 
   async getPendingUploads(): Promise<PendingUpload[]> {
     const db = await this.getDb();
-    return db.getAllAsync<PendingUpload>('SELECT * FROM pending_uploads ORDER BY createdAt ASC');
+    const rows = await db.getAllAsync<any>(
+      'SELECT id, local_uri as localUri, media_type as mediaType, caption, created_at as createdAt, upload_status as uploadStatus, retry_count as retryCount, media_key as mediaKey FROM pending_uploads ORDER BY created_at ASC'
+    );
+    return rows as PendingUpload[];
   }
 
-  private async resolveStatusActor(): Promise<{ id: string; hasSession: boolean; isBypass: boolean } | null> {
+  public async resolveStatusActor(): Promise<{ id: string; hasSession: boolean; isBypass: boolean } | null> {
     const { data: userData, error: userError } = await supabase.auth.getUser();
     if (!userError && userData.user?.id) {
       return { id: userData.user.id, hasSession: true, isBypass: false };
@@ -152,18 +67,22 @@ class StatusService {
     mediaType: 'image' | 'video',
     caption?: string
   ): Promise<void> {
+    if (!userId || !userId.trim()) {
+      throw new Error('Status upload requires a valid user ID');
+    }
+
     const now = Date.now();
     const pendingId = `pending-${now}`;
     const expiresAt = now + 24 * 60 * 60 * 1000;
 
     await db.runAsync(
-      'INSERT OR REPLACE INTO pending_uploads (id, localUri, mediaType, mediaKey, caption, createdAt, uploadStatus, retryCount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT OR REPLACE INTO pending_uploads (id, local_uri, media_type, media_key, caption, created_at, upload_status, retry_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [pendingId, localUri, mediaType, localUri, caption || null, now, 'pending', 0]
     );
 
     await db.runAsync(
-      'INSERT OR REPLACE INTO cached_statuses (id, userId, mediaLocalPath, mediaUrl, mediaKey, mediaType, caption, duration, expiresAt, isViewed, isMine, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [pendingId, userId, localUri, null, localUri, mediaType, caption || null, this.getStatusDuration(mediaType), expiresAt, 1, 1, now]
+      'INSERT OR REPLACE INTO cached_statuses (id, user_id, media_local_path, media_key, media_type, caption, duration, expires_at, is_viewed, is_mine, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [pendingId, userId, localUri, localUri, mediaType, caption || null, this.getStatusDuration(mediaType), expiresAt, 1, 1, now]
     );
   }
 
@@ -194,14 +113,14 @@ class StatusService {
     }
     const userId = actor.id;
 
-    const pending = await db.getAllAsync<PendingUpload>(
-      "SELECT * FROM pending_uploads WHERE uploadStatus != 'uploading' ORDER BY createdAt ASC"
+    const pending = await db.getAllAsync<any>(
+      "SELECT id, local_uri as localUri, media_type as mediaType, media_key as mediaKey FROM pending_uploads WHERE upload_status != 'uploading' ORDER BY created_at ASC"
     );
 
     for (const item of pending || []) {
       try {
         console.log(`[StatusSync] Processing ${item.id} (mediaKey: ${item.mediaKey})`);
-        await db.runAsync('UPDATE pending_uploads SET uploadStatus = ? WHERE id = ?', ['uploading', item.id]);
+        await db.runAsync('UPDATE pending_uploads SET upload_status = ? WHERE id = ?', ['uploading', item.id]);
         
         // 1. Check if we already have a valid R2 key from a previous successful upload attempt
         let mediaKey = item.mediaKey;
@@ -216,7 +135,7 @@ class StatusService {
           if (!mediaKey) throw new Error('R2 upload failed during sync');
 
           // Save the successfully uploaded key immediately in case Supabase fails next
-          await db.runAsync('UPDATE pending_uploads SET mediaKey = ? WHERE id = ?', [mediaKey, item.id]);
+          await db.runAsync('UPDATE pending_uploads SET media_key = ? WHERE id = ?', [mediaKey, item.id]);
         } else {
           console.log(`[StatusSync] Media already uploaded for ${item.id}, skipping to Supabase insert`);
           if (onProgress) onProgress(item.id, 100);
@@ -255,12 +174,11 @@ class StatusService {
         await db.runAsync('DELETE FROM cached_statuses WHERE id = ?', [item.id]); 
         
         await db.runAsync(
-          'INSERT OR REPLACE INTO cached_statuses (id, userId, mediaLocalPath, mediaUrl, mediaKey, mediaType, caption, duration, expiresAt, isViewed, isMine, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT OR REPLACE INTO cached_statuses (id, user_id, media_local_path, media_key, media_type, caption, duration, expires_at, is_viewed, is_mine, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [
             statusId,
             userId,
             item.localUri,
-            this.getDirectMediaUrl(data.media_key || mediaKey, null),
             data.media_key || mediaKey,
             item.mediaType,
             item.caption || null,
@@ -274,7 +192,7 @@ class StatusService {
       } catch (e: any) {
         console.warn(`[StatusSync] Retry failed for ${item.id}:`, e.message || e);
         await db.runAsync(
-          'UPDATE pending_uploads SET uploadStatus = ?, retryCount = retryCount + 1 WHERE id = ?', 
+          'UPDATE pending_uploads SET upload_status = ?, retry_count = retry_count + 1 WHERE id = ?', 
           ['failed', item.id]
         );
       }
@@ -292,7 +210,61 @@ class StatusService {
     const isOnline = !!(await NetInfo.fetch()).isConnected;
     const now = Date.now();
 
+    // 1. Initial fetch from local DB
+    const getLocalGroups = async (): Promise<UserStatusGroup[]> => {
+      // Robust column check: if migration v26 just ran, we are safe.
+      const cachedUsers = await db.getAllAsync<CachedUser>('SELECT * FROM cached_users');
+      
+      // FIX: Use media_key in local query
+      const cachedStatuses = await db.getAllAsync<any>(
+         'SELECT id, user_id as userId, media_local_path as mediaLocalPath, media_key as mediaKey, media_type as mediaType, caption, duration, expires_at as expiresAt, is_viewed as isViewed, is_mine as isMine, created_at as createdAt FROM cached_statuses WHERE expires_at > ? ORDER BY created_at ASC',
+         [now]
+      );
+
+      const groupsMap: Map<string, UserStatusGroup> = new Map();
+      for (const status of cachedStatuses || []) {
+        if (!groupsMap.has(status.userId)) {
+          const user = cachedUsers?.find(u => u.id === status.userId) || { id: status.userId };
+          groupsMap.set(status.userId, {
+            user,
+            statuses: [],
+            hasUnviewed: false,
+            isMine: status.userId === currentUserId
+          });
+        }
+        const group = groupsMap.get(status.userId)!;
+        group.statuses.push(status);
+        if (!status.isViewed) group.hasUnviewed = true;
+      }
+
+      return Array.from(groupsMap.values()).sort((a, b) => {
+        if (a.isMine) return -1;
+        if (b.isMine) return 1;
+        if (a.hasUnviewed && !b.hasUnviewed) return -1;
+        if (!a.hasUnviewed && b.hasUnviewed) return 1;
+        return 0;
+      });
+    };
+
+    // Return local data immediately to be "Offline-First"
+    let groups = await getLocalGroups();
+
+    // 2. Background Sync (Unblocked)
     if (isOnline) {
+      // NOTE: We don't await the entire sync process here to keep the return fast
+      // But we will kick it off. In a more advanced implementation, the UI would
+      // listen for DB changes.
+      this.syncStatusFeedFromSupabase(currentUserId).catch(e => {
+        console.warn('[StatusService] Async feed sync failed:', e);
+      });
+    }
+
+    return groups;
+  }
+
+  // New helper to handle the actual server sync logic without blocking the initial feed return
+  private async syncStatusFeedFromSupabase(currentUserId: string): Promise<void> {
+      const db = await this.getDb();
       try {
         const { data: serverStatuses, error } = await supabase
           .from('statuses')
@@ -309,17 +281,20 @@ class StatusService {
             .select('id, username, display_name, avatar_url, soul_note, soul_note_at')
             .in('id', userIds);
 
-          if (profilesError) {
-            console.warn('[StatusService] Profile fetch for statuses failed:', profilesError);
-          } else {
-            for (const profile of profiles || []) {
+          if (!profilesError && profiles) {
+            for (const profile of profiles) {
+              const contact = await db.getFirstAsync<any>(
+                'SELECT local_avatar_uri FROM contacts WHERE id = ?',
+                [profile.id]
+              );
               await db.runAsync(
-                'INSERT OR REPLACE INTO cached_users (id, username, displayName, avatarUrl, soulNote, soulNoteAt) VALUES (?, ?, ?, ?, ?, ?)',
+                'INSERT OR REPLACE INTO cached_users (id, username, display_name, avatar_url, local_avatar_uri, soul_note, soul_note_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 [
                   profile.id,
                   profile.username || null,
                   profile.display_name || null,
                   profile.avatar_url || null,
+                  contact?.local_avatar_uri || null,
                   profile.soul_note || null,
                   profile.soul_note_at ? Date.parse(profile.soul_note_at) : null,
                 ]
@@ -330,21 +305,21 @@ class StatusService {
 
         for (const s of serverStatuses || []) {
           const statusId = String(s.id);
+          // Check if we already have local metadata for this status (e.g. downloaded path)
           const existing = await db.getFirstAsync<any>(
-            'SELECT isViewed, mediaLocalPath, mediaUrl, mediaKey, duration FROM cached_statuses WHERE id = ?',
+            'SELECT is_viewed as isViewed, media_local_path as mediaLocalPath, media_key as mediaKey, duration FROM cached_statuses WHERE id = ?',
             [statusId]
           );
 
           await db.runAsync(
-            'INSERT OR REPLACE INTO cached_statuses (id, userId, mediaType, mediaUrl, mediaKey, caption, duration, expiresAt, isViewed, isMine, createdAt, mediaLocalPath) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT OR REPLACE INTO cached_statuses (id, user_id, media_type, media_key, caption, duration, expires_at, is_viewed, is_mine, created_at, media_local_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
               statusId,
               s.user_id,
               s.media_type,
-              existing?.mediaUrl || this.getDirectMediaUrl(s.media_key, null),
               s.media_key || existing?.mediaKey || null,
               s.caption || null,
-              typeof s.duration === 'number' ? s.duration : existing?.duration || this.getStatusDuration(s.media_type),
+              typeof s.duration === 'number' ? s.duration : (existing?.duration || this.getStatusDuration(s.media_type)),
               Date.parse(s.expires_at),
               existing?.isViewed || 0,
               s.user_id === currentUserId ? 1 : 0,
@@ -354,43 +329,8 @@ class StatusService {
           );
         }
       } catch (e) {
-        console.warn('[StatusService] Online refresh failed:', e);
+        throw e;
       }
-    }
-
-    // Read directly from cached_statuses SQLite (filter expired)
-    const cachedUsers = await db.getAllAsync<CachedUser>('SELECT * FROM cached_users');
-    const cachedStatuses = await db.getAllAsync<CachedStatus>(
-       'SELECT * FROM cached_statuses WHERE expiresAt > ? ORDER BY createdAt ASC',
-       [now]
-    );
-
-    // Group by user_id
-    const groupsMap: Map<string, UserStatusGroup> = new Map();
-
-    for (const status of cachedStatuses || []) {
-      if (!groupsMap.has(status.userId)) {
-        const user = cachedUsers?.find(u => u.id === status.userId) || { id: status.userId };
-        groupsMap.set(status.userId, {
-          user,
-          statuses: [],
-          hasUnviewed: false,
-          isMine: status.userId === currentUserId
-        });
-      }
-      const group = groupsMap.get(status.userId)!;
-      group.statuses.push(status);
-      if (!status.isViewed) group.hasUnviewed = true;
-    }
-
-    // Sort: ME first, then others with unviewed, then viewed
-    return Array.from(groupsMap.values()).sort((a, b) => {
-      if (a.isMine) return -1;
-      if (b.isMine) return 1;
-      if (a.hasUnviewed && !b.hasUnviewed) return -1;
-      if (!a.hasUnviewed && b.hasUnviewed) return 1;
-      return 0;
-    });
   }
 
   // ─── VIEWING ──────────────────────────────
@@ -398,7 +338,7 @@ class StatusService {
   async onStatusViewed(statusId: string, userId: string): Promise<void> {
     const db = await this.getDb();
     
-    await db.runAsync('UPDATE cached_statuses SET isViewed = 1 WHERE id = ?', [statusId]);
+    await db.runAsync('UPDATE cached_statuses SET is_viewed = 1 WHERE id = ?', [statusId]);
 
     const isOnline = !!(await NetInfo.fetch()).isConnected;
     if (isOnline && !statusId.startsWith('pending-')) {
@@ -408,8 +348,8 @@ class StatusService {
       }
     }
 
-    const status = await db.getFirstAsync<CachedStatus>(
-      'SELECT id, mediaType, mediaLocalPath, mediaKey FROM cached_statuses WHERE id = ?',
+    const status = await db.getFirstAsync<any>(
+      'SELECT id, media_type as mediaType, media_local_path as mediaLocalPath, media_key as mediaKey FROM cached_statuses WHERE id = ?',
       [statusId]
     );
 
@@ -423,7 +363,7 @@ class StatusService {
         }
         mediaKey = data?.media_key || null;
         if (mediaKey) {
-          await db.runAsync('UPDATE cached_statuses SET mediaKey = ? WHERE id = ?', [mediaKey, statusId]);
+          await db.runAsync('UPDATE cached_statuses SET media_key = ? WHERE id = ?', [mediaKey, statusId]);
         }
       }
 
@@ -435,36 +375,74 @@ class StatusService {
 
         const localPath = await storageService.downloadToDevice(signedUrl, statusId, status.mediaType);
         if (localPath) {
-          await db.runAsync('UPDATE cached_statuses SET mediaLocalPath = ?, mediaUrl = ? WHERE id = ?', [localPath, signedUrl, statusId]);
+          await db.runAsync('UPDATE cached_statuses SET media_local_path = ? WHERE id = ?', [localPath, statusId]);
         }
       }
     }
   }
 
   async prefetchNextStatuses(currentUserId: string, feedGroups: UserStatusGroup[]): Promise<void> {
-    // Download next 2-3 unviewed statuses silently in background
+    // Logic: Download next 3 unviewed statuses silently in background
     let count = 0;
     for (const group of feedGroups) {
       if (group.isMine) continue;
       for (const status of group.statuses) {
         if (!status.isViewed && !status.mediaLocalPath) {
-          await this.onStatusViewed(status.id, currentUserId); // This handles download
+          // Trigger download without marking as viewed
+          this.downloadStatusToCache(status.id).catch(() => {}); 
           count++;
-          if (count >= 3) return;
+          if (count >= 3) break;
+        }
+      }
+      if (count >= 3) break;
+    }
+  }
+
+  async syncAllStatusMedia(currentUserId: string, feedGroups: UserStatusGroup[]): Promise<void> {
+    // For a truly offline experience like WhatsApp, we try to download all current statuses
+    for (const group of feedGroups) {
+      for (const status of group.statuses) {
+        if (!status.mediaLocalPath) {
+          this.downloadStatusToCache(status.id).catch(() => {});
         }
       }
     }
   }
 
-  async getMediaSource(statusId: string, mediaKey?: string): Promise<{uri: string, isLocal: boolean} | null> {
+  private async downloadStatusToCache(statusId: string): Promise<void> {
     const db = await this.getDb();
+    const status = await db.getFirstAsync<any>(
+      'SELECT media_key as mediaKey, media_type as mediaType FROM cached_statuses WHERE id = ?',
+      [statusId]
+    );
+
+    if (!status?.mediaKey) return;
+
+    try {
+      const signedUrl = await storageService.getSignedUrl(status.mediaKey);
+      if (signedUrl) {
+        const localPath = await storageService.downloadToDevice(signedUrl, statusId, status.mediaType);
+        if (localPath) {
+          await db.runAsync('UPDATE cached_statuses SET media_local_path = ? WHERE id = ?', [localPath, statusId]);
+        }
+      }
+    } catch (e) {
+      console.warn(`[StatusService] Failed to cache status ${statusId}:`, e);
+    }
+  }
+
+  async getMediaSource(statusId: string, mediaKey?: string): Promise<{uri: string, isLocal: boolean} | null> {
+    const db = await getDb();
     
-    const status = await db.getFirstAsync<CachedStatus>(
-      'SELECT mediaLocalPath, mediaUrl, mediaKey FROM cached_statuses WHERE id = ?',
+    const status = await db.getFirstAsync<any>(
+      'SELECT media_local_path as mediaLocalPath, media_key as mediaKey, mediaUrl FROM cached_statuses WHERE id = ?',
       [statusId]
     );
 
     if (status?.mediaLocalPath) {
+      if (status.mediaLocalPath.startsWith('content://')) {
+        return { uri: status.mediaLocalPath, isLocal: true };
+      }
       const info = await FileSystem.getInfoAsync(status.mediaLocalPath);
       if (info.exists) return { uri: status.mediaLocalPath, isLocal: true };
     }
@@ -473,10 +451,13 @@ class StatusService {
       return { uri: status.mediaUrl, isLocal: false };
     }
 
-    const keyToUse = mediaKey || status?.mediaKey || status?.mediaUrl;
+    const keyToUse = mediaKey || status?.mediaKey || status?.mediaUrl || status?.mediaLocalPath;
     if (!keyToUse) return null;
 
     if (keyToUse.startsWith('http')) return { uri: keyToUse, isLocal: false };
+    if (keyToUse.startsWith('file://') || keyToUse.startsWith('content://')) {
+      return { uri: keyToUse, isLocal: true };
+    }
 
     const signedUrl = await storageService.getSignedUrl(keyToUse);
     if (signedUrl) {
@@ -494,8 +475,8 @@ class StatusService {
 
   async getMyStatuses(): Promise<CachedStatus[]> {
     const db = await this.getDb();
-    return db.getAllAsync<CachedStatus>(
-      'SELECT * FROM cached_statuses WHERE isMine = 1 AND expiresAt > ? ORDER BY createdAt ASC',
+    return db.getAllAsync<any>(
+      'SELECT id, user_id as userId, media_local_path as mediaLocalPath, media_key as mediaKey, media_type as mediaType, caption, duration, expires_at as expiresAt, is_viewed as isViewed, is_mine as isMine, created_at as createdAt FROM cached_statuses WHERE is_mine = 1 AND expires_at > ? ORDER BY created_at ASC',
       [Date.now()]
     );
   }
@@ -512,8 +493,8 @@ class StatusService {
 
   async deleteMyStatus(statusId: string, mediaKey: string): Promise<void> {
     const db = await this.getDb();
-    const status = await db.getFirstAsync<CachedStatus>(
-      'SELECT mediaLocalPath, mediaKey FROM cached_statuses WHERE id = ?',
+    const status = await db.getFirstAsync<any>(
+      'SELECT media_local_path as mediaLocalPath, media_key as mediaKey FROM cached_statuses WHERE id = ?',
       [statusId]
     );
 
@@ -539,6 +520,26 @@ class StatusService {
     await db.runAsync('DELETE FROM cached_statuses WHERE id = ?', [statusId]);
   }
 
+  async updateMyStatusCaption(statusId: string, caption: string): Promise<void> {
+    const db = await this.getDb();
+    const normalizedCaption = caption.trim();
+    const captionValue = normalizedCaption.length > 0 ? normalizedCaption : null;
+
+    if (!statusId.startsWith('pending-')) {
+      const { error } = await supabase
+        .from('statuses')
+        .update({ caption: captionValue })
+        .eq('id', statusId);
+
+      if (error) {
+        throw error;
+      }
+    }
+
+    await db.runAsync('UPDATE cached_statuses SET caption = ? WHERE id = ?', [captionValue, statusId]);
+    await db.runAsync('UPDATE pending_uploads SET caption = ? WHERE id = ?', [captionValue, statusId]);
+  }
+
   // ─── SOUL NOTE ────────────────────────────
 
   async updateSoulNote(text: string): Promise<void> {
@@ -557,15 +558,15 @@ class StatusService {
 
     const db = await this.getDb();
     await db.runAsync(
-      'UPDATE cached_users SET soulNote = ?, soulNoteAt = ? WHERE id = ?',
+      'UPDATE cached_users SET soul_note = ?, soul_note_at = ? WHERE id = ?',
       [text, Date.now(), actor.id]
     );
   }
 
   async getSoulNote(userId: string): Promise<string | null> {
     const db = await this.getDb();
-    const user = await db.getFirstAsync<CachedUser>(
-      'SELECT soulNote, soulNoteAt FROM cached_users WHERE id = ?',
+    const user = await db.getFirstAsync<any>(
+      'SELECT soul_note as soulNote, soul_note_at as soulNoteAt FROM cached_users WHERE id = ?',
       [userId]
     );
 
@@ -580,8 +581,8 @@ class StatusService {
 
   async cleanupExpiredLocal(): Promise<void> {
     const db = await this.getDb();
-    const expired = await db.getAllAsync<CachedStatus>(
-      'SELECT * FROM cached_statuses WHERE expiresAt < ?',
+    const expired = await db.getAllAsync<any>(
+      'SELECT id, media_local_path as mediaLocalPath FROM cached_statuses WHERE expires_at < ?',
       [Date.now()]
     );
 

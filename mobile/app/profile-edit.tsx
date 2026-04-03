@@ -3,23 +3,31 @@ import { useEffect, useRef, useState } from 'react';
 import {
     View, Text, Pressable, StyleSheet, StatusBar,
     TextInput, ScrollView, Alert, Modal, Animated as RNAnimated,
-    KeyboardAvoidingView, useWindowDimensions, Platform, ActivityIndicator
+    KeyboardAvoidingView, useWindowDimensions, Platform, ActivityIndicator, BackHandler
 } from 'react-native';
 import { Image } from 'expo-image';
-import { BlurView } from 'expo-blur';
-import { useRouter } from 'expo-router';
+import { GlassView } from '../components/ui/GlassView';
+import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 const DEFAULT_AVATAR = '';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useApp } from '../context/AppContext';
 import { SoulAvatar } from '../components/SoulAvatar';
+import { SUPPORT_SHARED_TRANSITIONS } from '../constants/sharedTransitions';
 import { storageService } from '../services/StorageService';
+import { proxySupabaseUrl } from '../config/api';
+import { setProfileEditSourceHidden } from '../services/profileEditMorphState';
 import { CountryPicker } from '../components/CountryPicker';
 import { COUNTRIES, Country } from '../constants/Countries';
 import Animated, {
     Easing,
+    Extrapolation,
     SharedTransition,
+    interpolate,
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
     withTiming,
 } from 'react-native-reanimated';
 
@@ -45,10 +53,18 @@ const SettingRow = ({ label, value, icon, onPress }: {
 }) => (
     <Pressable style={styles.settingRow} onPress={onPress}>
         <View style={styles.settingContent}>
-            <Text style={styles.settingLabel}>{label}</Text>
-            <Text style={styles.settingValue} numberOfLines={1}>{value || 'Not set'}</Text>
+            {label ? <Text style={styles.settingLabel}>{label}</Text> : null}
+            <Text 
+                style={[
+                    styles.settingValue, 
+                    !value && { color: 'rgba(255,255,255,0.3)' }
+                ]} 
+                numberOfLines={1}
+            >
+                {value || 'Not set'}
+            </Text>
         </View>
-        <MaterialIcons name="chevron-right" size={24} color="rgba(255,255,255,0.3)" />
+        <MaterialIcons name="chevron-right" size={20} color="rgba(255,255,255,0.4)" />
     </Pressable>
 );
 
@@ -83,10 +99,34 @@ const profileBoundsTransition = SharedTransition.custom((values) => {
 }).duration(400);
 
 export default function ProfileEditScreen() {
-    const enableSharedMorph = Platform.OS === 'ios';
+    const enableSharedMorph = SUPPORT_SHARED_TRANSITIONS;
+    const targetSize = 180;
+    const targetRadius = 90;
+    const sourceImageBaseTop = -40;
+    const sourceImageHeightMultiplier = 1.4;
+
     const { width } = useWindowDimensions();
     const router = useRouter();
+    const navigation = useNavigation();
+    const params = useLocalSearchParams<{ heroX?: string; heroY?: string; heroW?: string; heroH?: string; heroScrollY?: string }>();
     const { currentUser, updateProfile, changeUsername, activeTheme } = useApp();
+    const heroOrigin = {
+        x: Number(Array.isArray(params.heroX) ? params.heroX[0] : params.heroX),
+        y: Number(Array.isArray(params.heroY) ? params.heroY[0] : params.heroY),
+        width: Number(Array.isArray(params.heroW) ? params.heroW[0] : params.heroW),
+        height: Number(Array.isArray(params.heroH) ? params.heroH[0] : params.heroH),
+    };
+    const hasHeroMorph = Number.isFinite(heroOrigin.x)
+        && Number.isFinite(heroOrigin.y)
+        && Number.isFinite(heroOrigin.width)
+        && Number.isFinite(heroOrigin.height)
+        && heroOrigin.width > 0
+        && heroOrigin.height > 0;
+    const sourceScrollY = Number(Array.isArray(params.heroScrollY) ? params.heroScrollY[0] : params.heroScrollY) || 0;
+    const sourceParallaxTranslateY = Math.max(-100, Math.min(100, sourceScrollY * 0.3125));
+    const sourceParallaxScale = sourceScrollY < 0
+        ? 1 + (Math.min(320, Math.abs(sourceScrollY)) / 320) * 0.5
+        : 1;
 
     const [name, setName] = useState(currentUser?.name || '');
     const [username, setUsername] = useState(currentUser?.username || '');
@@ -104,6 +144,29 @@ export default function ProfileEditScreen() {
     const [isEditing, setIsEditing] = useState<'name' | 'bio' | 'username' | null>(null);
     const [showDatePicker, setShowDatePicker] = useState(false);
     const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+    const [isContentReady, setIsContentReady] = useState(!hasHeroMorph);
+    const morphProgress = useSharedValue(hasHeroMorph ? 0 : 1);
+    const chromeOpacity = useSharedValue(hasHeroMorph ? 0 : 1);
+    const isClosingRef = useRef(false);
+    const allowNativePopRef = useRef(false);
+    const entryHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const sourceRevealTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const dismissFinishTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const clearMorphTimers = React.useCallback(() => {
+        if (entryHideTimeoutRef.current) {
+            clearTimeout(entryHideTimeoutRef.current);
+            entryHideTimeoutRef.current = null;
+        }
+        if (sourceRevealTimeoutRef.current) {
+            clearTimeout(sourceRevealTimeoutRef.current);
+            sourceRevealTimeoutRef.current = null;
+        }
+        if (dismissFinishTimeoutRef.current) {
+            clearTimeout(dismissFinishTimeoutRef.current);
+            dismissFinishTimeoutRef.current = null;
+        }
+    }, []);
 
     useEffect(() => {
         if (currentUser) {
@@ -120,9 +183,254 @@ export default function ProfileEditScreen() {
         }
     }, [currentUser?.birthdate, currentUser?.name, currentUser?.bio, currentUser?.avatar, isEditing, showDatePicker]);
 
+    useEffect(() => {
+        clearMorphTimers();
+
+        if (!hasHeroMorph) {
+            setProfileEditSourceHidden(false);
+            setIsContentReady(true);
+            morphProgress.value = 1;
+            chromeOpacity.value = 1;
+            return;
+        }
+
+        setProfileEditSourceHidden(false);
+        setIsContentReady(false);
+        entryHideTimeoutRef.current = setTimeout(() => {
+            setProfileEditSourceHidden(true);
+            entryHideTimeoutRef.current = null;
+        }, 18);
+        morphProgress.value = withTiming(1, {
+            duration: 460,
+            easing: Easing.bezier(0.22, 1, 0.36, 1),
+        }, (finished) => {
+            if (finished) {
+                runOnJS(setIsContentReady)(true);
+            }
+        });
+        chromeOpacity.value = 1;
+
+        return () => {
+            clearMorphTimers();
+            setProfileEditSourceHidden(false);
+        };
+    }, [chromeOpacity, clearMorphTimers, hasHeroMorph, morphProgress]);
+
     const slideAnim = useRef(new RNAnimated.Value(0)).current;
+    const heroMorphAnimatedStyle = useAnimatedStyle(() => {
+        const targetLeft = (width - targetSize) / 2;
+        const targetTop = 118;
+
+        if (!hasHeroMorph) {
+            return {
+                left: targetLeft,
+                top: targetTop,
+                width: targetSize,
+                height: targetSize,
+                borderRadius: targetRadius,
+            };
+        }
+
+        const sourceCenterX = heroOrigin.x + (heroOrigin.width / 2);
+        const sourceCenterY = heroOrigin.y + (heroOrigin.height / 2);
+        const targetCenterX = targetLeft + (targetSize / 2);
+        const targetCenterY = targetTop + (targetSize / 2);
+
+        const initialScaleX = heroOrigin.width / targetSize;
+        const initialScaleY = heroOrigin.height / targetSize;
+
+        return {
+            left: targetLeft,
+            top: targetTop,
+            width: targetSize,
+            height: targetSize,
+            borderRadius: interpolate(morphProgress.value, [0, 1], [28, targetRadius], Extrapolation.CLAMP),
+            opacity: interpolate(morphProgress.value, [0, 0.975, 1], [1, 1, 0], Extrapolation.CLAMP),
+            transform: [
+                {
+                    translateX: interpolate(
+                        morphProgress.value,
+                        [0, 1],
+                        [sourceCenterX - targetCenterX, 0],
+                        Extrapolation.CLAMP
+                    ),
+                },
+                {
+                    translateY: interpolate(
+                        morphProgress.value,
+                        [0, 1],
+                        [sourceCenterY - targetCenterY, 0],
+                        Extrapolation.CLAMP
+                    ),
+                },
+                {
+                    scaleX: interpolate(
+                        morphProgress.value,
+                        [0, 1],
+                        [initialScaleX, 1],
+                        Extrapolation.CLAMP
+                    ),
+                },
+                {
+                    scaleY: interpolate(
+                        morphProgress.value,
+                        [0, 1],
+                        [initialScaleY, 1],
+                        Extrapolation.CLAMP
+                    ),
+                },
+            ] as any,
+        };
+    });
+
+    const heroMorphImageAnimatedStyle = useAnimatedStyle(() => {
+        if (!hasHeroMorph) {
+            return {
+                top: 0,
+                height: targetSize,
+                transform: [{ translateY: 0 }, { scale: 1 }] as any,
+            };
+        }
+
+        const outerScaleY = interpolate(
+            morphProgress.value,
+            [0, 1],
+            [heroOrigin.height / targetSize, 1],
+            Extrapolation.CLAMP
+        );
+
+        return {
+            top: interpolate(
+                morphProgress.value,
+                [0, 1],
+                [sourceImageBaseTop / outerScaleY, 0],
+                Extrapolation.CLAMP
+            ),
+            height: interpolate(
+                morphProgress.value,
+                [0, 1],
+                [targetSize * sourceImageHeightMultiplier, targetSize],
+                Extrapolation.CLAMP
+            ),
+            transform: [
+                {
+                    translateY: interpolate(
+                        morphProgress.value,
+                        [0, 1],
+                        [sourceParallaxTranslateY / outerScaleY, 0],
+                        Extrapolation.CLAMP
+                    ),
+                },
+                {
+                    scale: interpolate(
+                        morphProgress.value,
+                        [0, 1],
+                        [sourceParallaxScale, 1],
+                        Extrapolation.CLAMP
+                    ),
+                },
+            ] as any,
+        };
+    });
+
+    const backdropAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: hasHeroMorph
+            ? interpolate(morphProgress.value, [0, 0.2, 1], [0, 0.45, 1], Extrapolation.CLAMP)
+            : 1,
+    }));
+
+    const chromeAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: hasHeroMorph
+            ? interpolate(morphProgress.value, [0, 0.5, 0.86, 1], [0, 0, 0.5, 1], Extrapolation.CLAMP)
+            : chromeOpacity.value,
+        transform: [{ translateY: interpolate(morphProgress.value, [0, 1], [18, 0], Extrapolation.CLAMP) }],
+    }));
+
+    const contentAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: hasHeroMorph
+            ? interpolate(morphProgress.value, [0, 0.56, 0.9, 1], [0, 0, 0.45, 1], Extrapolation.CLAMP)
+            : chromeOpacity.value,
+        transform: [{ translateY: interpolate(morphProgress.value, [0, 1], [22, 0], Extrapolation.CLAMP) }],
+    }));
+
+    const avatarRevealAnimatedStyle = useAnimatedStyle(() => ({
+        opacity: hasHeroMorph
+            ? interpolate(morphProgress.value, [0, 0.96, 1], [0, 0, 1], Extrapolation.CLAMP)
+            : 1,
+        transform: [
+            {
+                scale: hasHeroMorph
+                    ? interpolate(morphProgress.value, [0, 0.96, 1], [0.985, 0.985, 1], Extrapolation.CLAMP)
+                    : 1,
+            },
+        ] as any,
+    }));
+
+    const finishDismiss = React.useCallback((action?: any) => {
+        allowNativePopRef.current = true;
+        if (action) {
+            navigation.dispatch(action);
+            return;
+        }
+        if (navigation.canGoBack()) {
+            navigation.goBack();
+        } else {
+            router.back();
+        }
+    }, [navigation, router]);
+
+    const runDismissAnimation = React.useCallback((action?: any) => {
+        if (isClosingRef.current) return;
+        isClosingRef.current = true;
+        clearMorphTimers();
+
+        if (!hasHeroMorph) {
+            setProfileEditSourceHidden(false);
+            finishDismiss(action);
+            return;
+        }
+
+        setIsContentReady(false);
+        morphProgress.value = withTiming(0, {
+            duration: 420,
+            easing: Easing.bezier(0.4, 0, 0.2, 1),
+        });
+        sourceRevealTimeoutRef.current = setTimeout(() => {
+            setProfileEditSourceHidden(false);
+            sourceRevealTimeoutRef.current = null;
+        }, 170);
+        dismissFinishTimeoutRef.current = setTimeout(() => {
+            finishDismiss(action);
+            dismissFinishTimeoutRef.current = null;
+        }, 300);
+    }, [clearMorphTimers, finishDismiss, hasHeroMorph, morphProgress]);
+
+    useEffect(() => {
+        const unsubscribe = navigation.addListener('beforeRemove', (event: any) => {
+            if (!hasHeroMorph || isClosingRef.current || allowNativePopRef.current) {
+                return;
+            }
+            event.preventDefault();
+            runDismissAnimation(event.data.action);
+        });
+
+        const backSubscription = BackHandler.addEventListener('hardwareBackPress', () => {
+            if (!hasHeroMorph || isClosingRef.current) {
+                return false;
+            }
+            runDismissAnimation();
+            return true;
+        });
+
+        return () => {
+            allowNativePopRef.current = false;
+            unsubscribe();
+            backSubscription.remove();
+        };
+    }, [hasHeroMorph, navigation, runDismissAnimation]);
+
     const handleBack = () => {
-        router.back();
+        runDismissAnimation();
     };
 
     const showModal = () => {
@@ -164,18 +472,20 @@ export default function ProfileEditScreen() {
 
                 if (!result.canceled && result.assets[0]) {
                     const localUri = result.assets[0].uri;
+                    
+                    // Optimistic UI: Update local state immediately
+                    setAvatar(localUri);
                     setIsUploadingAvatar(true);
                     
-                    // Upload to Supabase
+                    // Upload to Storage
                     try {
-                        const uploadedUrl = await storageService.uploadImage(localUri, 'avatars', currentUser?.id);
-                        if (uploadedUrl) {
-                            await updateProfile({ avatar: uploadedUrl });
-                            setAvatar(uploadedUrl); // Only update local state on success
+                        const uploadedKey = await storageService.uploadImage(localUri, 'avatars', currentUser?.id);
+                        if (uploadedKey) {
+                            await updateProfile({ avatar: uploadedKey });
                         }
                     } catch (error: any) {
                         console.warn('Avatar upload error (camera):', error);
-                        Alert.alert('Upload Failed', `Could not save profile picture: ${error.message || 'Unknown error'}`);
+                        Alert.alert('Sync Failed', 'Photo saved locally but could not upload to server. It will sync later.');
                     } finally {
                         setIsUploadingAvatar(false);
                     }
@@ -208,18 +518,27 @@ export default function ProfileEditScreen() {
 
                 if (!result.canceled && result.assets[0]) {
                     const localUri = result.assets[0].uri;
+                    
+                    // Optimistic UI: Update local state immediately
+                    setAvatar(localUri);
                     setIsUploadingAvatar(true);
 
-                    // Upload to Supabase
+                    // Upload to Storage
                     try {
-                        const uploadedUrl = await storageService.uploadImage(localUri, 'avatars', currentUser?.id);
-                        if (uploadedUrl) {
-                            await updateProfile({ avatar: uploadedUrl });
-                            setAvatar(uploadedUrl); // Update local state with the resolved URL (or key)
+                        const uploadedKey = await storageService.uploadImage(localUri, 'avatars', currentUser?.id);
+                        if (uploadedKey) {
+                            console.log('[ProfileEdit] Upload successful, updating profile with key:', uploadedKey);
+                            await updateProfile({ avatar: uploadedKey });
+                            Alert.alert('Success', 'Profile photo updated successfully!');
+                        } else {
+                            throw new Error('Upload failed - no key returned');
                         }
                     } catch (error: any) {
-                        console.warn('Avatar upload error (gallery):', error);
-                        Alert.alert('Upload Failed', `Could not save profile picture: ${error.message || 'Unknown error'}`);
+                        console.warn('[ProfileEdit] Avatar update sequence failed:', error?.message || error);
+                        Alert.alert(
+                            'Sync Pending',
+                            'Photo selected successfully, but sync failed right now. It will retry when connection/session is restored.'
+                        );
                     } finally {
                         setIsUploadingAvatar(false);
                     }
@@ -324,9 +643,14 @@ export default function ProfileEditScreen() {
             style={styles.container}
         >
             <StatusBar barStyle="light-content" />
+            <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.backdrop, backdropAnimatedStyle]} />
 
             {/* Header */}
-            <Animated.View style={styles.header}>
+            <Animated.View
+                renderToHardwareTextureAndroid
+                shouldRasterizeIOS
+                style={[styles.header, chromeAnimatedStyle]}
+            >
                 <Pressable 
                     style={styles.backButton} 
                     onPress={handleBack}
@@ -343,13 +667,19 @@ export default function ProfileEditScreen() {
                 style={{ flex: 1 }}
                 behavior={Platform.OS === 'ios' ? 'padding' : undefined}
             >
-                <ScrollView
-                    style={styles.scrollView}
+                {isContentReady ? (
+                <Animated.ScrollView
+                    style={[styles.scrollView, contentAnimatedStyle]}
                     contentContainerStyle={styles.scrollContent}
                     showsVerticalScrollIndicator={false}
                 >
                     {/* Profile Photo Section */}
-                    <Animated.View style={styles.avatarSection} collapsable={false}>
+                    <Animated.View
+                        renderToHardwareTextureAndroid
+                        shouldRasterizeIOS
+                        style={[styles.avatarSection, chromeAnimatedStyle]}
+                        collapsable={false}
+                    >
                         <View style={styles.avatarContainer}>
                             <Pressable 
                                 onPress={showModal} 
@@ -358,12 +688,12 @@ export default function ProfileEditScreen() {
                             >
                                 {avatar ? (
                                     <AnimatedImage
-                                        sharedTransitionTag="profile-avatar"
-                                        sharedTransitionStyle={profileTransition}
-                                        source={{ uri: avatar.startsWith('http') ? avatar : `https://xuipxbyvsawhuldopvjn.supabase.co/storage/v1/object/public/avatars/${avatar}` }}
-                                        style={StyleSheet.absoluteFill}
+                                        sharedTransitionTag={enableSharedMorph ? 'profile-image' : undefined}
+                                        sharedTransitionStyle={enableSharedMorph ? profileMorphTransition : undefined}
+                                        style={[styles.avatarImage, avatarRevealAnimatedStyle]}
+                                        source={{ uri: proxySupabaseUrl(avatar) }}
                                         contentFit="cover"
-                                        transition={200}
+                                        transition={0}
                                     />
                                 ) : (
                                     <View style={[StyleSheet.absoluteFill, { backgroundColor: '#262626', justifyContent: 'center', alignItems: 'center' }]}>
@@ -376,12 +706,12 @@ export default function ProfileEditScreen() {
                                     </View>
                                 )}
                             </Pressable>
-                            <View style={styles.avatarGlassBorder} pointerEvents="none" />
+                            <Animated.View style={[styles.avatarGlassBorder, avatarRevealAnimatedStyle]} pointerEvents="none" />
                         </View>
                     </Animated.View>
 
                     {/* Settings Rows */}
-                    <Animated.View style={styles.section}>
+                    <Animated.View style={[styles.section, contentAnimatedStyle]}>
                         <Text style={styles.sectionLabel}>About</Text>
                         <View style={styles.settingsGroup}>
                             {isEditing === 'bio' ? (
@@ -391,7 +721,7 @@ export default function ProfileEditScreen() {
                                         value={bio}
                                         onChangeText={setBio}
                                         placeholder="Enter your bio"
-                                        placeholderTextColor="rgba(255,255,255,0.3)"
+                                        placeholderTextColor="rgba(255,255,255,0.45)"
                                         maxLength={140}
                                         multiline
                                     />
@@ -415,7 +745,7 @@ export default function ProfileEditScreen() {
                         </View>
                     </Animated.View>
 
-                    <Animated.View style={styles.section}>
+                    <Animated.View style={[styles.section, contentAnimatedStyle]}>
                         <Text style={styles.sectionLabel}>Soul ID</Text>
                         <View style={styles.settingsGroup}>
                             {isEditing === 'username' ? (
@@ -427,7 +757,7 @@ export default function ProfileEditScreen() {
                                             value={username}
                                             onChangeText={setUsername}
                                             placeholder="username"
-                                            placeholderTextColor="rgba(255,255,255,0.3)"
+                                            placeholderTextColor="rgba(255,255,255,0.45)"
                                             autoCapitalize="none"
                                             autoCorrect={false}
                                         />
@@ -464,7 +794,7 @@ export default function ProfileEditScreen() {
                         </View>
                     </Animated.View>
 
-                    <Animated.View style={styles.section}>
+                    <Animated.View style={[styles.section, contentAnimatedStyle]}>
                         <Text style={styles.sectionLabel}>Name</Text>
                         <View style={styles.settingsGroup}>
                             {isEditing === 'name' ? (
@@ -474,7 +804,7 @@ export default function ProfileEditScreen() {
                                         value={name}
                                         onChangeText={setName}
                                         placeholder="Enter your name"
-                                        placeholderTextColor="rgba(255,255,255,0.3)"
+                                        placeholderTextColor="rgba(255,255,255,0.45)"
                                         maxLength={25}
                                     />
                                     <View style={styles.editActions}>
@@ -497,7 +827,7 @@ export default function ProfileEditScreen() {
                         </View>
                     </Animated.View>
 
-                    <Animated.View style={styles.section}>
+                    <Animated.View style={[styles.section, contentAnimatedStyle]}>
                         <Text style={styles.sectionLabel}>Birthdate</Text>
                         <View style={styles.settingsGroup}>
                             <SettingRow
@@ -518,7 +848,7 @@ export default function ProfileEditScreen() {
                         </View>
                     </Animated.View>
 
-                    <Animated.View style={styles.section}>
+                    <Animated.View style={[styles.section, contentAnimatedStyle]}>
                         <Text style={styles.sectionLabel}>Country</Text>
                         <View style={styles.settingsGroup}>
                             <SettingRow
@@ -541,7 +871,7 @@ export default function ProfileEditScreen() {
                             <Pressable style={styles.modalBackdrop} onPress={() => setShowDatePicker(false)} />
                             <RNAnimated.View style={[styles.modalContent, { minHeight: 380 }]}>
                                 <View style={styles.modalContentWrapper}>
-                                    <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+                                    <GlassView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
                                     <View style={styles.modalHeader}>
                                         <Text style={styles.modalTitle}>Choose Birthdate</Text>
                                         <View style={{ flexDirection: 'row', gap: 12 }}>
@@ -577,8 +907,29 @@ export default function ProfileEditScreen() {
                             </RNAnimated.View>
                         </View>
                     </Modal>
-                </ScrollView>
+                </Animated.ScrollView>
+                ) : (
+                <Animated.View style={[styles.scrollView, styles.shellPlaceholder]} />
+                )}
             </KeyboardAvoidingView>
+
+            {hasHeroMorph && avatar ? (
+                <Animated.View
+                    pointerEvents="none"
+                    renderToHardwareTextureAndroid
+                    shouldRasterizeIOS
+                    style={[styles.heroMorphShell, heroMorphAnimatedStyle]}
+                >
+                    <Animated.View style={[styles.heroMorphImageWrapper, heroMorphImageAnimatedStyle]}>
+                        <Image
+                            source={{ uri: proxySupabaseUrl(avatar) }}
+                            style={styles.heroMorphImage}
+                            contentFit="cover"
+                            transition={0}
+                        />
+                    </Animated.View>
+                </Animated.View>
+            ) : null}
 
             {/* Full Image Modal */}
             <Modal visible={showFullImage} transparent animationType="fade">
@@ -618,7 +969,7 @@ export default function ProfileEditScreen() {
                         ]}
                     >
                         <View style={styles.modalContentWrapper}>
-                            <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+                            <GlassView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
                             <ScrollView style={styles.modalScrollView} contentContainerStyle={styles.modalScrollContent}>
                                 <View style={styles.modalHeader}>
                                     <Text style={styles.modalTitle}>Choose Avatar</Text>
@@ -678,6 +1029,9 @@ export default function ProfileEditScreen() {
 const styles = StyleSheet.create({
     container: {
         flex: 1,
+        backgroundColor: 'transparent',
+    },
+    backdrop: {
         backgroundColor: '#000000',
     },
     header: {
@@ -705,8 +1059,27 @@ const styles = StyleSheet.create({
     scrollView: {
         flex: 1,
     },
+    shellPlaceholder: {
+        flex: 1,
+    },
     scrollContent: {
         paddingBottom: 40,
+    },
+    heroMorphShell: {
+        position: 'absolute',
+        overflow: 'hidden',
+        backgroundColor: '#1a1a1a',
+        zIndex: 20,
+    },
+    heroMorphImageWrapper: {
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        overflow: 'hidden',
+    },
+    heroMorphImage: {
+        width: '100%',
+        height: '100%',
     },
     avatarSection: {
         alignItems: 'center',
@@ -726,6 +1099,11 @@ const styles = StyleSheet.create({
         overflow: 'hidden',
         position: 'relative',
     },
+    avatarImage: {
+        width: '100%',
+        height: '100%',
+        position: 'absolute',
+    },
     avatarGlassBorder: {
         position: 'absolute',
         top: -10,
@@ -743,59 +1121,65 @@ const styles = StyleSheet.create({
         fontWeight: '600',
     },
     section: {
-        marginBottom: 24,
+        marginBottom: 12,
     },
     sectionLabel: {
-        color: 'rgba(255,255,255,0.4)',
-        fontSize: 14,
-        fontWeight: '500',
+        color: 'rgba(255,255,255,0.7)',
+        fontSize: 13,
+        fontWeight: '600',
         paddingHorizontal: 20,
-        marginBottom: 8,
+        marginBottom: 6,
     },
     settingsGroup: {
         marginHorizontal: 16,
-        backgroundColor: 'rgba(255,255,255,0.05)',
-        borderRadius: 12,
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        borderRadius: 16,
         overflow: 'hidden',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)',
     },
     settingRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingVertical: 16,
+        paddingVertical: 12,
         paddingHorizontal: 16,
     },
     settingContent: {
         flex: 1,
     },
     settingLabel: {
-        color: 'rgba(255,255,255,0.4)',
-        fontSize: 12,
-        marginBottom: 4,
+        color: 'rgba(255,255,255,0.7)',
+        fontSize: 11,
+        marginBottom: 2,
     },
     settingValue: {
         color: '#ffffff',
         fontSize: 16,
     },
     editRow: {
-        padding: 16,
+        padding: 12,
     },
     editInput: {
         color: '#ffffff',
         fontSize: 16,
-        padding: 12,
-        backgroundColor: 'rgba(255,255,255,0.08)',
-        borderRadius: 8,
-        marginBottom: 12,
+        padding: 10,
+        backgroundColor: 'rgba(255,255,255,0.12)',
+        borderRadius: 12,
+        marginBottom: 8,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.25)',
     },
     inputPrefixWrapper: {
         flexDirection: 'row',
         alignItems: 'center',
-        backgroundColor: 'rgba(255,255,255,0.08)',
-        borderRadius: 8,
+        backgroundColor: 'rgba(255,255,255,0.12)',
+        borderRadius: 12,
         paddingLeft: 12,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.25)',
     },
     inputPrefix: {
-        color: 'rgba(255,255,255,0.4)',
+        color: 'rgba(255,255,255,0.6)',
         fontSize: 16,
         marginRight: -4,
     },

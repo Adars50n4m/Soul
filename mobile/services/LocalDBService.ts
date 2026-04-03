@@ -93,17 +93,25 @@ async function ensureDatabaseMigration(): Promise<void> {
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
   await ensureDatabaseMigration();
 
-  return dbManager.getDatabase({
+  console.log('[SQLite] LocalDBService getting database instance...');
+  const db = await dbManager.getDatabase({
     name: DB_NAME,
-    migrations: MIGRATE_DB,
+    migrations: async (dbInstance) => {
+        console.log('[SQLite] LocalDBService triggering MIGRATE_DB...');
+        await MIGRATE_DB(dbInstance);
+    },
     onOpen: async (db) => {
-      // Removed integrity check: too slow for startup (watchdog violation)
-      // await checkDatabaseIntegrity(db);
-      // FIX #19: Setup periodic WAL checkpoint to prevent data loss on crash
+      // Setup periodic WAL checkpoint to prevent data loss on crash
       setupWalCheckpoint(db);
     }
   });
+  console.log('[SQLite] LocalDBService database instance acquired.');
+  return db;
 }
+
+// Exported for other services (StatusService, etc.)
+export { getDb };
+
 
 
 
@@ -428,8 +436,34 @@ class OfflineService {
         lastSeen: r.last_seen ?? undefined,
         updatedAt: r.updated_at ?? undefined,
         note: r.note ?? undefined,
-        noteTimestamp: r.note_timestamp ?? undefined
+        noteTimestamp: r.note_timestamp ?? undefined,
+        localAvatarUri: r.local_avatar_uri ?? undefined,
+        avatarUpdatedAt: r.avatar_updated_at ?? undefined
     }));
+  }
+
+  async getContact(id: string): Promise<any | null> {
+    const db = await getDb();
+    const row = await db.getFirstAsync(`SELECT * FROM contacts WHERE id = ? LIMIT 1;`, [id]) as any;
+    if (!row) return null;
+    return {
+        id: row.id,
+        name: row.name,
+        avatar: row.avatar ?? '',
+        avatarType: row.avatar_type ?? 'default',
+        teddyVariant: row.teddy_variant ?? undefined,
+        localAvatarUri: row.local_avatar_uri ?? undefined,
+        avatarUpdatedAt: row.avatar_updated_at ?? undefined,
+        updatedAt: row.updated_at ?? undefined
+    };
+  }
+
+  async updateContactAvatar(id: string, localUri: string, updatedAt: string): Promise<void> {
+    const db = await getDb();
+    await db.runAsync(
+      `UPDATE contacts SET local_avatar_uri = ?, avatar_updated_at = ? WHERE id = ?;`,
+      [localUri, updatedAt, id]
+    );
   }
 
   async saveContact(contact: any): Promise<void> {
@@ -455,8 +489,8 @@ class OfflineService {
 
     await db.runAsync(
         `INSERT OR REPLACE INTO contacts 
-            (id, name, avatar, avatar_type, teddy_variant, status, last_message, unread_count, about, last_seen, last_synced_at, updated_at, note, note_timestamp) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, 
+            (id, name, avatar, avatar_type, teddy_variant, status, last_message, unread_count, about, last_seen, last_synced_at, updated_at, note, note_timestamp, local_avatar_uri, avatar_updated_at) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, 
         [
             contact.id, 
             contact.name, 
@@ -471,7 +505,9 @@ class OfflineService {
             new Date().toISOString(),
             contact.updatedAt ?? null,
             contact.note ?? null,
-            contact.noteTimestamp ?? null
+            contact.noteTimestamp ?? null,
+            contact.localAvatarUri ?? null,
+            contact.avatarUpdatedAt ?? null
         ]
     );
   }
@@ -483,17 +519,20 @@ class OfflineService {
 
   async getStatuses(): Promise<any[]> {
     const db = await getDb();
-    return await db.getAllAsync(`SELECT * FROM statuses WHERE expires_at > ? ORDER BY created_at DESC;`, [Date.now()]);
+    return await db.getAllAsync(`SELECT * FROM cached_statuses WHERE expires_at > ? ORDER BY created_at DESC;`, [Date.now()]);
   }
 
   async saveStatus(status: any): Promise<void> {
     const db = await getDb();
-    await db.runAsync(`INSERT OR REPLACE INTO statuses (id, user_id, type, r2_key, local_path, text_content, created_at, expires_at, is_mine) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`, [status.id, status.userId, status.type, status.r2Key ?? null, status.localPath ?? null, status.textContent ?? null, status.createdAt, status.expiresAt, status.isMine ? 1 : 0]);
+    await db.runAsync(
+      `INSERT OR REPLACE INTO cached_statuses (id, user_id, media_type, media_key, media_local_path, caption, created_at, expires_at, is_mine) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`, 
+      [status.id, status.userId, status.mediaType, status.mediaKey ?? null, status.mediaLocalPath ?? null, status.caption ?? null, status.createdAt, status.expiresAt, status.isMine ? 1 : 0]
+    );
   }
 
   async deleteStatus(statusId: string): Promise<void> {
     const db = await getDb();
-    await db.runAsync(`DELETE FROM statuses WHERE id = ?;`, [statusId]);
+    await db.runAsync(`DELETE FROM cached_statuses WHERE id = ?;`, [statusId]);
   }
 
   async markStatusAsSeen(statusId: string): Promise<void> {

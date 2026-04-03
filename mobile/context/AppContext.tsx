@@ -1,5 +1,5 @@
 import * as React from 'react';
-// Force re-bundle: 2026-03-30T00:15:00Z (Android Resilience v2)
+// Force re-bundle: 2026-04-03T16:00:00Z (DB Migration v27)
 import { useState, useEffect, createContext, useContext, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth, AuthProvider } from './AuthContext';
@@ -22,6 +22,8 @@ const THEME_MAP = {
     crimson: { primary: '#DC2626', accent: '#FCA5A5', background: '#140607', surface: '#2A1114' },
     cyberpunk: { primary: '#FACC15', accent: '#67E8F9', background: '#08080A', surface: '#18181B' },
 } satisfies Record<ThemeName, { primary: string; accent: string; background: string; surface: string }>;
+
+export const THEMES = THEME_MAP;
 
 export const USERS: Record<string, { id: string }> = {};
 

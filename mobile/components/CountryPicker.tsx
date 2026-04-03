@@ -10,7 +10,7 @@ import {
   Pressable,
   Platform,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
+import { GlassView } from './ui/GlassView';
 import { MaterialIcons } from '@expo/vector-icons';
 import { COUNTRIES, Country } from '../constants/Countries';
 
@@ -81,7 +81,7 @@ export const CountryPicker: React.FC<CountryPickerProps> = ({
       <View style={styles.overlay}>
         <Pressable style={styles.backdrop} onPress={onClose} />
         <View style={styles.container}>
-          <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+          <GlassView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
           
           <View style={styles.header}>
             <View style={styles.handle} />

@@ -4,6 +4,7 @@ import { AppState } from 'react-native';
 import { statusService } from '../services/StatusService';
 import { UserStatusGroup, CachedStatus, PendingUpload } from '../types';
 import NetInfo from '@react-native-community/netinfo';
+import { useAuth } from './AuthContext';
 
 interface StatusContextType {
   statusGroups: UserStatusGroup[];
@@ -22,6 +23,7 @@ interface StatusContextType {
 export const StatusContext = createContext<StatusContextType | undefined>(undefined);
 
 export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isReady } = useAuth();
   const [statusGroups, setStatusGroups] = useState<UserStatusGroup[]>([]);
   const [myStatuses, setMyStatuses] = useState<CachedStatus[]>([]);
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
@@ -41,6 +43,12 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       ]);
       setStatusGroups(groups);
       setMyStatuses(mine);
+      
+      // Background Sync: Download all media for truly offline access
+      const userId = (await statusService.resolveStatusActor())?.id;
+      if (userId) {
+        statusService.syncAllStatusMedia(userId, groups).catch(() => {});
+      }
     } catch (e) {
       console.error('[StatusContext] Refresh error:', e);
     }
@@ -102,8 +110,10 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   useEffect(() => {
     let isMounted = true;
+    const lastBackgroundTime = { current: 0 };
 
     const init = async () => {
+      if (!isReady) return;
       try {
         await statusService.cleanupExpiredLocal();
         await Promise.all([refreshStatuses(), refreshPendingUploads()]);
@@ -117,15 +127,27 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     init();
 
-    const refreshInterval = setInterval(() => {
-      void refreshStatuses();
-    }, 60000); // Every minute
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'active') {
+        const now = Date.now();
+        const FIVE_MINUTES = 5 * 60 * 1000;
+        
+        // Only refresh if it's been more than 5 minutes since last background
+        if (lastBackgroundTime.current > 0 && (now - lastBackgroundTime.current > FIVE_MINUTES)) {
+          console.log('[StatusContext] App returned to foreground after 5+ mins, refreshing...');
+          void refreshStatuses();
+        }
+        lastBackgroundTime.current = 0;
+      } else if (nextAppState === 'background' || nextAppState === 'inactive') {
+        lastBackgroundTime.current = Date.now();
+      }
+    });
 
     return () => {
       isMounted = false;
-      clearInterval(refreshInterval);
+      subscription.remove();
     };
-  }, [refreshPendingUploads, refreshStatuses, syncPendingUploads]);
+  }, [isReady, refreshPendingUploads, refreshStatuses, syncPendingUploads]);
 
   useEffect(() => {
     if (pendingUploads.length === 0) {
@@ -137,7 +159,7 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }, 8000);
 
     return () => clearInterval(retryInterval);
-  }, [pendingUploads.length, syncPendingUploads]);
+  }, [isReady, pendingUploads.length, syncPendingUploads]);
 
   const addStatus = useCallback(async (localUri: string, mediaType: 'image' | 'video', caption?: string) => {
     await statusService.uploadStory(localUri, mediaType, caption);
@@ -166,6 +188,7 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [syncPendingUploads]);
 
   useEffect(() => {
+    if (!isReady) return;
     // Listen for connectivity changes to trigger automatic sync
     const unsubscribe = NetInfo.addEventListener((state) => {
       if (state.isConnected) {
@@ -175,9 +198,10 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     return () => unsubscribe();
-  }, [syncPendingUploads]);
+  }, [isReady, syncPendingUploads]);
 
   useEffect(() => {
+    if (!isReady) return;
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
         return;
@@ -192,7 +216,7 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     return () => subscription.remove();
-  }, [pendingUploads.length, refreshPendingUploads, refreshStatuses, syncPendingUploads]);
+  }, [isReady, pendingUploads.length, refreshPendingUploads, refreshStatuses, syncPendingUploads]);
 
   const value = useMemo(() => ({
     statusGroups,

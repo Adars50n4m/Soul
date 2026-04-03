@@ -17,7 +17,7 @@ export const SoulLogo = ({ className, width = 160, height = 160 }: { className?:
         }}
     >
         <Image
-            source={require('../assets/images/logo_new.jpg')}
+            source={require('../assets/images/logo.jpg')}
             style={{
                 width: '100%',
                 height: '100%',

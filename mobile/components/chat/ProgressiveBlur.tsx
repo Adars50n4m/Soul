@@ -1,4 +1,3 @@
-import React from 'react';
 import { View, StyleSheet, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -8,76 +7,53 @@ interface ProgressiveBlurProps {
     height?: number;
     intensity?: number;
     tint?: 'light' | 'dark' | 'default';
+    maxAlpha?: number;
 }
 
 /**
- * ProgressiveBlur — Real iOS-style progressive blur.
- *
- * Uses 6 large overlapping blur zones (each covers ~50% of height)
- * with increasing intensity + a smooth dark gradient overlay
- * to mask any seams. The heavy overlap makes transitions seamless.
+ * ProgressiveBlur — Real progressive blur on both platforms.
  */
 function ProgressiveBlur({
     position = 'bottom',
     height = 250,
     intensity = 80,
     tint = 'dark',
+    maxAlpha = 0.85,
 }: ProgressiveBlurProps) {
     const isDark = tint === 'dark' || tint === 'default';
     const base = isDark ? '0,0,0' : '255,255,255';
     const isBottom = position === 'bottom';
+    const isAndroid = Platform.OS === 'android';
 
-    // ── ANDROID: smooth gradient (no blur API) ───────────────────────────────
-    if (Platform.OS === 'android') {
-        const maxA = Math.min(intensity / 100, 0.85);
-        const s = `rgba(${base},${maxA.toFixed(2)})`;
-        const t = `rgba(${base},0)`;
-        return (
-            <LinearGradient
-                colors={isBottom ? [t, s, s] : [s, s, t] as any}
-                locations={isBottom ? [0, 0.65, 1] : [0, 0.35, 1] as any}
-                style={[styles.container, { height, [position]: 0 }]}
-                pointerEvents="none"
-            />
-        );
-    }
-
-    // ── iOS: 6 large overlapping blur zones ──────────────────────────────────
-    // Each zone covers ~50% of height and overlaps heavily with neighbors.
-    // This makes the blur transition gradual with no visible edges.
-    const ZONES = 100;
-    const zoneHeight = height * 0.05; // each zone is 50% of total height
-
+    // High-density jittered zones provide smoothing without banding
+    // Reduced from 24 to 12 on Android to prevent GPU overload / black screens
+    const ZONES = isAndroid ? 12 : 100;
+    const zoneHeight = height * (isAndroid ? 0.2 : 0.05);
+    
     const blurZones = Array.from({ length: ZONES }).map((_, i) => {
-        const progress = i / (ZONES - 1); // 0 to 1
-
-        // Position: evenly distributed
-        const zoneTop = isBottom
+        const progress = i / (ZONES - 1);
+        // Horizontal Lines Fix: Jitter the position slightly to break the harmonic staircase pattern
+        const jitter = isAndroid ? (i % 2 === 0 ? 0.4 : -0.4) : 0;
+        const zoneTop = (isBottom
             ? progress * (height - zoneHeight)
-            : (1 - progress) * (height - zoneHeight);
-
-        // Intensity: ramps up with eased curve
-        const eased = progress * progress; // quadratic ease-in
-        const zoneIntensity = isBottom
-            ? intensity * eased
-            : intensity * eased;
-
-        // Opacity: also ramps for smoother blend
-        const zoneOpacity = isBottom
-            ? Math.max(0.05, eased)
-            : Math.max(0.05, eased);
-
-        return { top: zoneTop, intensity: zoneIntensity, opacity: zoneOpacity };
+            : (1 - progress) * (height - zoneHeight)) + jitter;
+            
+        const eased = Math.pow(progress, 3.5);
+        return { 
+            top: zoneTop, 
+            intensity: intensity * eased, 
+            opacity: isAndroid ? Math.max(0.35, eased) : Math.max(0.12, eased) 
+        };
     });
 
-    // Smooth dark gradient overlay (16 stops, smoothstep)
-    const STOPS = 16;
+    // High-fidelity gradient mask — 32 stops for seamless blending
+    const STOPS = 32;
     const gradColors: string[] = [];
     const gradLocs: number[] = [];
     for (let i = 0; i <= STOPS; i++) {
         const t = i / STOPS;
         const e = t * t * (3 - 2 * t);
-        const alpha = isBottom ? e * 0.6 : (1 - e) * 0.6;
+        const alpha = isBottom ? e * maxAlpha : (1 - e) * maxAlpha;
         gradColors.push(`rgba(${base},${alpha.toFixed(3)})`);
         gradLocs.push(t);
     }
@@ -87,12 +63,13 @@ function ProgressiveBlur({
             style={[styles.container, { height, [position]: 0 }]}
             pointerEvents="none"
         >
-            {/* Blur zones — large & overlapping */}
-            {blurZones.map((zone, i) => (
+            {!isAndroid && blurZones.map((zone, i) => (
                 <BlurView
                     key={i}
                     intensity={zone.intensity}
                     tint={tint}
+                    experimentalBlurMethod="none"
+                    blurReductionFactor={isAndroid ? 4 : 4}
                     style={{
                         position: 'absolute',
                         left: 0,
@@ -104,7 +81,7 @@ function ProgressiveBlur({
                 />
             ))}
 
-            {/* Dark gradient on top — smooths everything out */}
+            {/* Gradient overlay smooths edges */}
             <LinearGradient
                 colors={gradColors as any}
                 locations={gradLocs as any}

@@ -10,6 +10,7 @@ import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { Alert } from 'react-native';
 import { useApp } from '../context/AppContext';
 import { SoulAvatar } from '../components/SoulAvatar';
+import { SUPPORT_SHARED_TRANSITIONS } from '../constants/sharedTransitions';
 import Animated, {
     FadeIn,
     FadeOut,
@@ -158,8 +159,10 @@ export default function ProfileScreen() {
                         <Pressable onPress={handleEditProfile} style={styles.avatarPressable}>
                             {currentUser.avatar ? (
                                 <AnimatedImage
-                                    sharedTransitionTag="profile-avatar"
-                                    sharedTransitionStyle={profileTransition}
+                                    {...(SUPPORT_SHARED_TRANSITIONS ? {
+                                        sharedTransitionTag: "profile-avatar",
+                                        sharedTransitionStyle: profileTransition,
+                                    } : {})}
                                     source={{ uri: currentUser.avatar.startsWith('http') ? currentUser.avatar : `https://xuipxbyvsawhuldopvjn.supabase.co/storage/v1/object/public/avatars/${currentUser.avatar}` }}
                                     style={StyleSheet.absoluteFill}
                                     contentFit="cover"

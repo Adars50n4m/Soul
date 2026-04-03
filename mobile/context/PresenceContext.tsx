@@ -126,11 +126,8 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       subscription.remove();
       if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
       supabase.removeChannel(channel);
-      if (currentUser?.id) {
-        updateOwnStatus(false);
-      }
     };
-  }, [currentUser?.id, fetchInitialPresence, startHeartbeat, stopHeartbeat, updateOwnStatus]);
+  }, [currentUser?.id, fetchInitialPresence]); 
 
   const getPresence = useCallback((userId: string): PresenceState => {
     return presenceMap[userId] || { isOnline: false, lastSeen: null };

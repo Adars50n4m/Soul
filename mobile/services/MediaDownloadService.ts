@@ -10,6 +10,7 @@ import * as Crypto from 'expo-crypto';
 import { offlineService } from './LocalDBService';
 import { MediaStatus } from '../types';
 import { soulFolderService } from './SoulFolderService';
+import { proxySupabaseUrl } from '../config/api';
 
 // OLD flat cache — kept for backward compatibility during migration
 const LEGACY_MEDIA_DIR = `${FileSystem.documentDirectory}media_cache`;
@@ -28,6 +29,7 @@ export interface DownloadResult {
   localUri?: string;
   error?: string;
   fileSize?: number;
+  messageId?: string;
 }
 
 /**
@@ -126,16 +128,12 @@ export async function downloadMedia(
       remoteUrl
     );
     
-    // Ensure the target folder exists
-    await ensureMediaDir(inferredType, isSent);
-    
-    // Check if we already have this file downloaded (by message ID in DB)
+    // Check if we already have this file downloaded
     const existingUri = await offlineService.getMediaDownload(messageId);
     if (existingUri) {
       const exists = await localFileExists(existingUri);
       if (exists) {
-        console.log('[MediaDownload] Already downloaded:', existingUri);
-        return { success: true, localUri: existingUri };
+        return { success: true, localUri: existingUri, messageId };
       }
     }
     
@@ -143,8 +141,7 @@ export async function downloadMedia(
     await offlineService.updateMediaStatus(messageId, 'downloading');
     
     // Download the file to organized path
-    console.log('[MediaDownload] Starting download:', remoteUrl);
-    console.log('[MediaDownload] Destination:', destPath);
+    console.log(`[MediaDownload] Starting download for msg ${messageId}:`, remoteUrl);
     
     const downloadResult = await FileSystem.downloadAsync(
       remoteUrl,
@@ -375,3 +372,99 @@ export const mediaDownloadService = {
   formatBytes,
   getLocalMediaUri
 };
+/**
+ * Syncs a contact's avatar to local storage if it's new or updated.
+ */
+export async function syncAvatar(
+  contactId: string,
+  remoteUrl: string | null,
+  serverUpdatedAt?: string
+): Promise<string | null> {
+  if (!remoteUrl || (remoteUrl.startsWith('file://'))) return null;
+  const resolvedRemoteUrl = proxySupabaseUrl(remoteUrl);
+
+  try {
+    const contact = await offlineService.getContact(contactId);
+    const localUri = contact?.localAvatarUri;
+    const lastUpdatedAt = contact?.avatarUpdatedAt;
+
+    // 1. If we have it locally and the timestamp matches, we're done.
+    if (localUri && lastUpdatedAt === serverUpdatedAt) {
+      const exists = await localFileExists(localUri);
+      if (exists) return localUri;
+    }
+
+    // 2. Download to Soul/Media/Soul Profile Photos/
+    const destination = soulFolderService.getDestinationPath('profile_photo', false, resolvedRemoteUrl, contactId);
+
+    // Guard: Ensure resolvedRemoteUrl is a valid URL and not an empty string
+    if (!resolvedRemoteUrl || typeof resolvedRemoteUrl !== 'string' || !resolvedRemoteUrl.trim().startsWith('http')) {
+      console.warn(`[MediaDownload] Skipping avatar sync for ${contactId}: invalid URL "${resolvedRemoteUrl}"`);
+      return null;
+    }
+
+    // Ensure directory exists
+    await soulFolderService.init();
+
+    console.log(`[MediaDownload] Syncing Avatar for ${contactId}. Destination: ${destination}`);
+    const result = await FileSystem.downloadAsync(resolvedRemoteUrl, destination);
+
+    if (result.status === 200) {
+      // Update local database with the new path and timestamp
+      await offlineService.updateContactAvatar(contactId, result.uri, serverUpdatedAt || new Date().toISOString());
+      console.log(`[MediaDownload] DP synced: ${result.uri}`);
+      return result.uri;
+    }
+
+    return localUri || null;
+  } catch (error) {
+    console.error(`[MediaDownload] syncAvatar failed for ${contactId}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Downloads a status media file to organized storage.
+ */
+export async function downloadStatusMedia(status: {
+  id: string;
+  userId: string;
+  mediaKey?: string;
+  mediaType: string;
+  mediaLocalPath?: string;
+  mediaUrl?: string; // Signed URL
+}): Promise<string | null> {
+  if (status.mediaLocalPath) {
+    const exists = await localFileExists(status.mediaLocalPath);
+    if (exists) return status.mediaLocalPath;
+  }
+
+  const url = status.mediaUrl;
+  if (!url) return null;
+
+  try {
+    await soulFolderService.init();
+    
+    // Path: Soul/Media/.Statuses/STT-YYYYMMDD-ID.ext
+    const destPath = soulFolderService.getDestinationPath('status' as any, false, url, status.id);
+
+    console.log(`[MediaDownload] Downloading Status ${status.id} from ${url}`);
+    const result = await FileSystem.downloadAsync(url, destPath);
+
+    if (result.status === 200) {
+      // Update DB
+      const db = await getDb();
+      await db.runAsync(
+        'UPDATE cached_statuses SET media_local_path = ? WHERE id = ?',
+        [result.uri, status.id]
+      );
+      console.log(`[MediaDownload] Status ${status.id} saved to ${result.uri}`);
+      return result.uri;
+    }
+  } catch (err) {
+    console.error(`[MediaDownload] downloadStatusMedia failed for ${status.id}:`, err);
+  }
+  return null;
+}
+
+import { getDb } from './LocalDBService';

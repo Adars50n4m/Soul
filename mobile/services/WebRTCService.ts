@@ -1,24 +1,49 @@
-import { Platform } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { callService, CallSignal } from './CallService';
 import * as ENV from '../config/env';
 
-// Safe imports for WebRTC to prevent crashes in Expo Go
+// Safe imports for WebRTC core modules.
+// Importing the root package eagerly also loads RTCView, which can fail in
+// builds where the video view manager is unavailable even if core calling works.
 let RTCPeerConnection: any;
 let RTCSessionDescription: any;
 let RTCIceCandidate: any;
 let mediaDevices: any;
 let MediaStream: any;
+let webRTCCoreLoadError: string | null = null;
+let webRTCNativeModule: any = null;
+let webRTCNativeReady = false;
 
 try {
-    const webrtc = require('react-native-webrtc');
-    RTCPeerConnection = webrtc.RTCPeerConnection;
-    RTCSessionDescription = webrtc.RTCSessionDescription;
-    RTCIceCandidate = webrtc.RTCIceCandidate;
-    mediaDevices = webrtc.mediaDevices;
-    MediaStream = webrtc.MediaStream;
-} catch (e) {
-    console.log('[WebRTCService] Native modules not available');
+    webRTCNativeModule = (NativeModules as any)?.WebRTCModule ?? null;
+    webRTCNativeReady =
+        !!webRTCNativeModule &&
+        typeof webRTCNativeModule.peerConnectionInit === 'function' &&
+        typeof webRTCNativeModule.getUserMedia === 'function';
+    if (!webRTCNativeReady) {
+        webRTCCoreLoadError =
+            'WebRTC native module missing in this build. Rebuild Android/iOS dev client after prebuild.';
+        console.log('[WebRTCService] WebRTC native module unavailable:', {
+            hasModule: !!webRTCNativeModule,
+            hasPeerConnectionInit: typeof webRTCNativeModule?.peerConnectionInit === 'function',
+            hasGetUserMedia: typeof webRTCNativeModule?.getUserMedia === 'function',
+        });
+    }
+} catch (e: any) {
+    webRTCCoreLoadError = e?.message || 'unknown-native-module-error';
+    console.log('[WebRTCService] Failed to inspect WebRTC native module:', webRTCCoreLoadError);
+}
+
+try {
+    RTCPeerConnection = require('react-native-webrtc/lib/commonjs/RTCPeerConnection').default;
+    RTCSessionDescription = require('react-native-webrtc/lib/commonjs/RTCSessionDescription').default;
+    RTCIceCandidate = require('react-native-webrtc/lib/commonjs/RTCIceCandidate').default;
+    mediaDevices = require('react-native-webrtc/lib/commonjs/MediaDevices').default;
+    MediaStream = require('react-native-webrtc/lib/commonjs/MediaStream').default;
+} catch (e: any) {
+    webRTCCoreLoadError = webRTCCoreLoadError || e?.message || 'unknown';
+    console.log('[WebRTCService] Native modules not available:', webRTCCoreLoadError);
 }
 
 // STUN/TURN servers for NAT traversal
@@ -33,17 +58,22 @@ try {
 //   2. Open Relay Project by Metered (free TURN — works on 4G/5G cross-network, no signup)
 //   3. ENV-configured TURN (for production self-hosted / paid upgrade)
 //
-const ICE_SERVERS: any[] = [
-  // ── STUN servers (fast, direct connection attempt first) ──────────────────
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
+const CUSTOM_TURN_SERVERS: any[] = [
+  ...(ENV.TURN_SERVER && ENV.TURN_SERVER.length > 10 && !ENV.TURN_SERVER.includes('yourdomain') ? [{
+    urls: ['turn:' + ENV.TURN_SERVER],
+    username: ENV.TURN_USERNAME,
+    credential: ENV.TURN_PASSWORD
+  }] : []),
+  ...(ENV.TURN_SERVER_2 && ENV.TURN_SERVER_2.length > 10 && !ENV.TURN_SERVER_2.includes('backup-turn') ? [{
+    urls: ['turn:' + ENV.TURN_SERVER_2],
+    username: ENV.TURN_USERNAME_2,
+    credential: ENV.TURN_PASSWORD_2
+  }] : []),
+];
 
-  // ── Free TURN servers (Open Relay Project) ────────────────────────────────
-  // Re-ordered to prioritize 443 and TURNS (TLS) as Port 80 is often blocked.
+const OPEN_RELAY_TURN_SERVERS: any[] = [
   {
-    urls: 'turns:openrelay.metered.ca:443',  // TLS — highest priority relay
+    urls: 'turns:openrelay.metered.ca:443',
     username: 'openrelayproject',
     credential: 'openrelayproject',
   },
@@ -62,21 +92,22 @@ const ICE_SERVERS: any[] = [
     username: 'openrelayproject',
     credential: 'openrelayproject',
   },
-
-  // ── Production TURN Server (upgrade to your own for scale) ────────────────
-  ...(ENV.TURN_SERVER && ENV.TURN_SERVER.length > 10 && !ENV.TURN_SERVER.includes('yourdomain') ? [{
-    urls: ['turn:' + ENV.TURN_SERVER],
-    username: ENV.TURN_USERNAME,
-    credential: ENV.TURN_PASSWORD
-  }] : []),
-
-  // ── Backup Production TURN ────────────────────────────────────────────────
-  ...(ENV.TURN_SERVER_2 && ENV.TURN_SERVER_2.length > 10 && !ENV.TURN_SERVER_2.includes('backup-turn') ? [{
-    urls: ['turn:' + ENV.TURN_SERVER_2],
-    username: ENV.TURN_USERNAME_2,
-    credential: ENV.TURN_PASSWORD_2
-  }] : []),
 ];
+
+const ICE_SERVERS: any[] = [
+  // Prefer your own TURN first for reliability and predictable capacity.
+  ...CUSTOM_TURN_SERVERS,
+  // Free TURN fallback.
+  ...OPEN_RELAY_TURN_SERVERS,
+  // STUN (used when direct path is available).
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
+
+const HAS_CUSTOM_TURN =
+    CUSTOM_TURN_SERVERS.length > 0;
 
 type CallType = 'audio' | 'video';
 type CallState = 'idle' | 'ringing' | 'connecting' | 'connected' | 'ended';
@@ -110,6 +141,35 @@ class WebRTCService {
     private connectionWatchdog: NodeJS.Timeout | null = null;
     private trackMonitorTimer: NodeJS.Timeout | null = null;
     private lastDisconnectTime: number = 0;
+    private lastRecoveryAttemptAt: number = 0;
+    private readonly RECOVERY_COOLDOWN_MS = 12000;
+
+    isAvailable(): boolean {
+        return webRTCNativeReady
+            && !!RTCPeerConnection
+            && !!RTCSessionDescription
+            && !!RTCIceCandidate
+            && !!mediaDevices
+            && !!MediaStream;
+    }
+
+    getAvailabilityError(): string {
+        if (!webRTCNativeReady) {
+            return webRTCCoreLoadError
+                || 'WebRTC native module missing in current binary. Build a dev client with react-native-webrtc linked.';
+        }
+        return webRTCCoreLoadError || 'WebRTC core modules are unavailable in the current build.';
+    }
+
+    private ensureTurnReadinessOrThrow(): void {
+        if (ENV.CALL_REQUIRE_CUSTOM_TURN && !HAS_CUSTOM_TURN) {
+            const message =
+                'Calling is blocked: custom TURN server is not configured. Set EXPO_PUBLIC_TURN_SERVER/USERNAME/PASSWORD.';
+            console.error('[WebRTCService] ' + message);
+            this.broadcast('onError', message);
+            throw new Error(message);
+        }
+    }
 
     /**
      * Add a listener for WebRTC events
@@ -205,6 +265,13 @@ class WebRTCService {
         }
 
         try {
+            if (!this.isAvailable()) {
+                const message = this.getAvailabilityError();
+                this.broadcast('onError', message);
+                throw new Error(message);
+            }
+            this.ensureTurnReadinessOrThrow();
+
             console.log('[WebRTCService] Starting call as Initiator');
             this.isInitiator = true;
             this.setState('ringing');
@@ -260,6 +327,8 @@ class WebRTCService {
      */
     async answerCall(callType: CallType, offer: RTCSessionDescriptionInit): Promise<void> {
         try {
+            this.ensureTurnReadinessOrThrow();
+
             if (this.peerConnection && this.peerConnection.signalingState !== 'stable') {
                 console.log('[WebRTCService] Ignoring offer: signalingState is not stable:', this.peerConnection.signalingState);
                 return;
@@ -488,6 +557,84 @@ class WebRTCService {
     }
 
     /**
+     * Switch call media mode between audio and video during an active call.
+     * This keeps the same room/session and triggers renegotiation.
+     */
+    async switchCallType(nextType: CallType): Promise<void> {
+        if (nextType === this.callType) return;
+
+        console.log(`[WebRTCService] Switching call mode: ${this.callType} -> ${nextType}`);
+
+        if (!this.peerConnection) {
+            this.callType = nextType;
+            if (!this.localStream) {
+                await this.prepareCall(nextType);
+            }
+            return;
+        }
+
+        if (nextType === 'video') {
+            if (!mediaDevices?.getUserMedia) {
+                throw new Error(this.getAvailabilityError());
+            }
+
+            if (!this.localStream) {
+                this.callType = 'video';
+                await this.getMediaStream();
+            } else {
+                const existingVideo = this.localStream.getVideoTracks();
+                if (existingVideo.length === 0) {
+                    const camStream = await mediaDevices.getUserMedia({
+                        audio: false,
+                        video: { facingMode: 'user' },
+                    });
+                    const videoTracks = camStream?.getVideoTracks?.() || [];
+                    for (const track of videoTracks) {
+                        track.enabled = true;
+                        try { this.localStream.addTrack(track); } catch (_) {}
+                        try { this.peerConnection.addTrack(track, this.localStream); } catch (_) {}
+                    }
+                } else {
+                    existingVideo.forEach((track: any) => { track.enabled = true; });
+                }
+            }
+        } else {
+            // Downgrade to audio: remove local video tracks and related senders
+            if (this.localStream) {
+                const videoTracks = this.localStream.getVideoTracks();
+                for (const track of videoTracks) {
+                    try { track.enabled = false; } catch (_) {}
+                    try { track.stop(); } catch (_) {}
+                    try { this.localStream.removeTrack(track); } catch (_) {}
+                }
+            }
+
+            try {
+                const senders = this.peerConnection.getSenders?.() || [];
+                for (const sender of senders) {
+                    const senderTrack = sender?.track;
+                    if (senderTrack?.kind === 'video') {
+                        try { await sender.replaceTrack(null); } catch (_) {}
+                        try { this.peerConnection.removeTrack(sender); } catch (_) {}
+                    }
+                }
+            } catch (error) {
+                console.warn('[WebRTCService] Failed to remove video sender during audio downgrade:', error);
+            }
+        }
+
+        this.callType = nextType;
+        this.broadcast('onLocalStream', this.localStream);
+
+        // Trigger renegotiation from this side if we're in a stable state.
+        if (this.peerConnection.signalingState === 'stable') {
+            await this.createOffer();
+        } else {
+            console.log(`[WebRTCService] Skipping immediate renegotiation, signalingState=${this.peerConnection.signalingState}`);
+        }
+    }
+
+    /**
      * Switch camera (front/back)
      */
     async switchCamera(): Promise<void> {
@@ -520,6 +667,10 @@ class WebRTCService {
         let timer: NodeJS.Timeout | null = null;
         try {
             console.log('Getting media stream for', this.callType);
+
+            if (!mediaDevices?.getUserMedia) {
+                throw new Error(this.getAvailabilityError());
+            }
             
             // Mark as attempted so we don't try again and cause a double 8-second delay
             this.mediaStreamAttempted = true;
@@ -625,12 +776,17 @@ class WebRTCService {
     }
 
     private async createPeerConnection(): Promise<void> {
+        if (!webRTCNativeReady) {
+            throw new Error(this.getAvailabilityError());
+        }
         const config: any = {
             iceServers: ICE_SERVERS,
             // FIX #13: Explicitly set sdpSemantics for better Android/modern-WebRTC compatibility
             sdpSemantics: 'unified-plan',
             // OPTIMIZATION: pre-fetch candidates to speed up initial connection by 1-2s
-            iceCandidatePoolSize: 10
+            iceCandidatePoolSize: 10,
+            // Optional hardening for restrictive carrier networks.
+            iceTransportPolicy: ENV.CALL_FORCE_RELAY ? 'relay' : 'all'
         };
 
         if (!RTCPeerConnection) {
@@ -638,7 +794,17 @@ class WebRTCService {
             throw new Error('WebRTC engine not available. You are likely using Expo Go. Please use a Development Build.');
         }
 
-        this.peerConnection = new RTCPeerConnection(config);
+        try {
+            this.peerConnection = new RTCPeerConnection(config);
+        } catch (pcError: any) {
+            const msg = String(pcError?.message || pcError || 'unknown');
+            if (msg.includes('peerConnectionInit') || msg.includes('null')) {
+                throw new Error(
+                    'WebRTC native module is not initialized in this app build. Please rebuild dev client (expo prebuild + expo run:android/ios).'
+                );
+            }
+            throw pcError;
+        }
 
         // UNIFIED PLAN TRACK MANAGEMENT
         // With 'unified-plan', we use addTrack to link tracks to streams correctly.
@@ -1010,6 +1176,14 @@ class WebRTCService {
                             }
                         });
                     } catch (e) {}
+
+                    const now = Date.now();
+                    if (now - this.lastRecoveryAttemptAt >= this.RECOVERY_COOLDOWN_MS) {
+                        this.lastRecoveryAttemptAt = now;
+                        this.attemptRecovery().catch((e) => {
+                            console.warn('[WebRTCService] Recovery trigger from monitor failed:', e);
+                        });
+                    }
                 }
             }
         }, 5000); 
@@ -1025,10 +1199,17 @@ class WebRTCService {
                 return;
             }
             
-            // Strategy: ICE Restart
-            // In modern WebRTC, we create a new offer with { iceRestart: true }
-            if (this.isInitiator) {
-                console.log('[WebRTCService] Initiating ICE Restart (creating new offer)...');
+            if (typeof this.peerConnection.restartIce === 'function') {
+                try {
+                    this.peerConnection.restartIce();
+                    console.log('[WebRTCService] restartIce() invoked');
+                } catch (e) {
+                    console.warn('[WebRTCService] restartIce() failed:', e);
+                }
+            }
+
+            // Controlled renegotiation with ICE restart.
+            if (this.peerConnection.signalingState === 'stable') {
                 const offerOptions = {
                     iceRestart: true,
                     offerToReceiveAudio: true,
@@ -1038,8 +1219,7 @@ class WebRTCService {
                 await this.peerConnection.setLocalDescription(offer);
                 callService.sendOffer(offer);
             } else {
-                console.log('[WebRTCService] Waiting for Initiator to restart ICE...');
-                // Callee usually waits, but can also trigger negotiationneeded
+                console.log(`[WebRTCService] Skipping recovery offer, signalingState=${this.peerConnection.signalingState}`);
             }
             
             console.log('[WebRTCService] Recovery attempt initiated. Waiting for reconnection...');

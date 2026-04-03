@@ -1,3 +1,5 @@
+// MUST be first import — patches console.error to suppress connection-limit red overlays
+import '../services/WebSocketErrorHandler';
 import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -221,9 +223,10 @@ function RootContent() {
           contentStyle: { backgroundColor: '#000' },
         }} />
         <Stack.Screen name="profile-edit" options={{
-          presentation: 'card',
+          presentation: 'transparentModal',
           animation: 'none',
-          gestureEnabled: true,
+          gestureEnabled: false,
+          contentStyle: { backgroundColor: 'transparent' },
         }} />
         <Stack.Screen name="profile" options={{
           animation: 'fade',
@@ -232,6 +235,8 @@ function RootContent() {
         <Stack.Screen name="profile/[id]" options={{
           animation: 'none',
           headerShown: false,
+          gestureEnabled: true,
+          contentStyle: { backgroundColor: '#000' },
         }} />
         <Stack.Screen name="theme" options={{
           animation: 'ios_from_right',

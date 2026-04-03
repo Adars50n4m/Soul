@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { BlurView } from 'expo-blur';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
     useWindowDimensions, Platform, Alert, AppState, ActivityIndicator
@@ -7,6 +6,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Camera } from 'expo-camera';
 import { Audio as ExpoAudio } from 'expo-av';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter, useNavigation } from 'expo-router';
 import GlassView from '../components/ui/GlassView';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
@@ -29,37 +29,63 @@ import { useKeepAwake } from 'expo-keep-awake';
 import { SoulAvatar } from '../components/SoulAvatar';
 import { normalizeId } from '../utils/idNormalization';
 
-// Safe require for WebRTC to prevent Expo Go crashes
-const getWebRTCModules = () => {
+// Load video renderers separately from the signaling/media service so audio
+// calls can still work even if the RTC view manager is unavailable.
+const getVideoRenderModules = () => {
     try {
-        // Only try to require if we are not in Expo Go (checked by constants or just try/catch)
-        const webrtc = require('react-native-webrtc');
+        const RTCViewModule = require('react-native-webrtc/lib/commonjs/RTCView');
+        const RTCPIPViewModule = require('react-native-webrtc/lib/commonjs/RTCPIPView');
         return {
-            RTCView: webrtc.RTCView,
-            RTCPIPView: webrtc.RTCPIPView,
-            startIOSPIP: webrtc.startIOSPIP,
-            stopIOSPIP: webrtc.stopIOSPIP,
-            MediaStream: webrtc.MediaStream,
-            webRTCService: require('../services/WebRTCService').webRTCService
+            RTCView: RTCViewModule.default,
+            RTCPIPView: RTCPIPViewModule.default,
+            startIOSPIP: RTCPIPViewModule.startIOSPIP,
+            stopIOSPIP: RTCPIPViewModule.stopIOSPIP,
         };
-    } catch (e) {
-        console.log('[CallScreen] Native WebRTC not available (Expo Go)');
-        return { RTCView: null, RTCPIPView: null, startIOSPIP: null, stopIOSPIP: null, MediaStream: null, webRTCService: null };
+    } catch (e: any) {
+        console.log('[CallScreen] RTC video renderer not available:', e?.message || 'unknown');
+        return { RTCView: null, RTCPIPView: null, startIOSPIP: null, stopIOSPIP: null };
     }
 };
 
-const webrtcModules = getWebRTCModules();
-const RTCView = webrtcModules.RTCView;
-const RTCPIPView = webrtcModules.RTCPIPView;
+const getWebRTCService = () => {
+    try {
+        return require('../services/WebRTCService').webRTCService;
+    } catch (e: any) {
+        console.log('[CallScreen] WebRTC service not available:', e?.message || 'unknown');
+        return null;
+    }
+};
+
+const videoRenderModules = getVideoRenderModules();
+const RTCView = videoRenderModules.RTCView;
+const RTCPIPView = videoRenderModules.RTCPIPView;
 const RemoteVideoComponent = RTCPIPView || RTCView; // Use PIP-enhanced view if available
-const startIOSPIP = webrtcModules.startIOSPIP;
-const stopIOSPIP = webrtcModules.stopIOSPIP;
-const webRTCService = webrtcModules.webRTCService;
+const startIOSPIP = videoRenderModules.startIOSPIP;
+const stopIOSPIP = videoRenderModules.stopIOSPIP;
+const webRTCService = getWebRTCService();
 
 
 
 // CallState type
 type CallState = 'idle' | 'ringing' | 'connecting' | 'connected' | 'ended';
+
+const hexToRgba = (color: string, alpha: number): string => {
+    if (!color || !color.startsWith('#')) {
+        return `rgba(255, 106, 136, ${alpha})`;
+    }
+    let hex = color.replace('#', '');
+    if (hex.length === 3) {
+        hex = hex.split('').map((c) => `${c}${c}`).join('');
+    }
+    const int = Number.parseInt(hex, 16);
+    if (Number.isNaN(int)) {
+        return `rgba(255, 106, 136, ${alpha})`;
+    }
+    const r = (int >> 16) & 255;
+    const g = (int >> 8) & 255;
+    const b = int & 255;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
 
 export default function CallScreen() {
     const insets = useSafeAreaInsets();
@@ -149,12 +175,42 @@ export default function CallScreen() {
     const uiConnected = wasConnected || isActuallyConnected || (!!hasRemoteTracks && activeCall?.isAccepted);
     // const [isMuted, setIsMuted] = useState(false); // Managed by activeCall
     const [isSpeaker, setIsSpeaker] = useState(false);
+    const [isEdgeGlowEnabled, setIsEdgeGlowEnabled] = useState(false);
 
     // Picture-in-Picture (Android) State
-    const androidPipState = ExpoPip.useIsInPip();
-    const androidIsInPipMode = Platform.OS === 'android' ? androidPipState.isInPipMode : false;
+    // NOTE: We intentionally avoid ExpoPip.useIsInPip() because some builds where
+    // expo-pip is unavailable throw "addListener of null" from its internal hook.
+    const [androidIsInPipMode, setAndroidIsInPipMode] = useState(false);
     const [iosIsInPipMode, setIosIsInPipMode] = useState(false);
     const [showDiagnostics, setShowDiagnostics] = useState(false); // For user verification
+    const canRenderVideo = !!RTCView && !!RemoteVideoComponent;
+    const edgeGlowPulse = useSharedValue(0);
+    const edgeGlowStrong = useMemo(() => hexToRgba(activeTheme?.accent || '#FF6A88', 0.65), [activeTheme?.accent]);
+    const edgeGlowSoft = useMemo(() => hexToRgba(activeTheme?.accent || '#FF6A88', 0), [activeTheme?.accent]);
+    const canUseExpoPip = useMemo(() => {
+        const pip: any = ExpoPip;
+        return !!pip
+            && typeof pip.enterPipMode === 'function'
+            && typeof pip.setPictureInPictureParams === 'function';
+    }, []);
+
+    useEffect(() => {
+        if (isEdgeGlowEnabled && isVideo && uiConnected) {
+            edgeGlowPulse.value = withRepeat(
+                withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.quad) }),
+                -1,
+                true
+            );
+        } else {
+            edgeGlowPulse.value = withTiming(0, { duration: 220, easing: Easing.out(Easing.quad) });
+        }
+    }, [edgeGlowPulse, isEdgeGlowEnabled, isVideo, uiConnected]);
+
+    useEffect(() => {
+        if (!isVideo && isEdgeGlowEnabled) {
+            setIsEdgeGlowEnabled(false);
+        }
+    }, [isVideo, isEdgeGlowEnabled]);
 
     // Track if we are in PiP manually via AppState for iOS UI treatment
     useEffect(() => {
@@ -170,19 +226,29 @@ export default function CallScreen() {
                         }
                         timeout = setTimeout(() => setIosIsInPipMode(true), 150);
                     } else if (Platform.OS === 'android') {
-                        try { 
-                            ExpoPip.enterPipMode({ 
-                                width: Math.floor(width), 
-                                height: Math.floor(height),
-                                autoEnterEnabled: true 
-                            }); 
-                        } catch (e) { console.warn('ExpoPip error:', e); }
+                        if (!canUseExpoPip) {
+                            console.log('[CallScreen] Android PiP unavailable in this build.');
+                        } else {
+                            try {
+                                ExpoPip.enterPipMode({
+                                    width: Math.floor(width),
+                                    height: Math.floor(height),
+                                    autoEnterEnabled: true
+                                });
+                                setAndroidIsInPipMode(true);
+                            } catch (e) {
+                                console.warn('ExpoPip error:', e);
+                                setAndroidIsInPipMode(false);
+                            }
+                        }
                     }
                 }
             } else if (nextAppState === 'active') {
                 if (Platform.OS === 'ios') {
                     setIosIsInPipMode(false);
                     if (stopIOSPIP) try { stopIOSPIP(); } catch (e) {}
+                } else if (Platform.OS === 'android') {
+                    setAndroidIsInPipMode(false);
                 }
             }
         });
@@ -190,7 +256,7 @@ export default function CallScreen() {
             if (timeout) clearTimeout(timeout);
             subscription.remove();
         };
-    }, [activeCall?.type, activeCall?.isAccepted, width, height]);
+    }, [activeCall?.type, activeCall?.isAccepted, width, height, canUseExpoPip]);
 
     const isInPipMode = Platform.OS === 'android' ? androidIsInPipMode : iosIsInPipMode;
 
@@ -252,6 +318,11 @@ export default function CallScreen() {
             toggleVideo();
         }
     }, [toggleVideo]);
+
+    const handleToggleEdgeGlow = useCallback(() => {
+        if (!isVideo) return;
+        setIsEdgeGlowEnabled((prev) => !prev);
+    }, [isVideo]);
 
     const handleToggleSpeaker = useCallback(async () => {
         const next = !isSpeaker;
@@ -336,6 +407,10 @@ export default function CallScreen() {
         flex: 1,
     }));
 
+    const edgeGlowStyle = useAnimatedStyle(() => ({
+        opacity: edgeGlowPulse.value,
+    }));
+
     // Request Permissions on Mount
     useEffect(() => {
         (async () => {
@@ -391,6 +466,10 @@ export default function CallScreen() {
 
         const initCall = async () => {
             try {
+                if (!webRTCService?.isAvailable?.()) {
+                    throw new Error(webRTCService?.getAvailabilityError?.() || 'WebRTC service is unavailable in this build.');
+                }
+
                 // 1. Setup multi-listener callbacks
                 const callbacks = {
                     onStateChange: (state: CallState) => {
@@ -495,8 +574,20 @@ export default function CallScreen() {
             } catch (e: any) {
                 console.warn('WebRTC initialization failed:', e);
                 console.warn('Error Stack:', e?.stack);
+                const message = String(e?.message || e || 'unknown');
+                const isOptionalNativeListenerIssue =
+                    message.toLowerCase().includes('addlistener')
+                    && message.toLowerCase().includes('null');
+
+                if (isOptionalNativeListenerIssue) {
+                    // Do not hard-end the call for optional native listener glitches
+                    // (for example when PiP module is missing in this build).
+                    console.warn('[CallScreen] Non-fatal native listener issue during init. Skipping forced end.');
+                    return;
+                }
+
                 Alert.alert("Call Failed", "Could not initialize WebRTC connection.");
-                handleEndCall(`init-failed: ${e?.message || 'unknown'}`);
+                handleEndCall(`init-failed: ${message}`);
             }
         };
 
@@ -540,19 +631,19 @@ export default function CallScreen() {
 
         // Enable PIP Auto-Enter for ALL Calls (Android)
         // This ensures that moving to home screen during a call triggers native PiP
-        if (activeCall.isAccepted && Platform.OS === 'android') {
-            try {
-                ExpoPip.setPictureInPictureParams({
-                    autoEnterEnabled: true,
-                    // Provide aspect ratio hints
-                    width: Math.floor(width),
+            if (activeCall.isAccepted && Platform.OS === 'android' && canUseExpoPip) {
+                try {
+                    ExpoPip.setPictureInPictureParams({
+                        autoEnterEnabled: true,
+                        // Provide aspect ratio hints
+                        width: Math.floor(width),
                     height: Math.floor(width * 1.5)
                 });
             } catch (e) {
                 console.log('Failed to set PIP params:', e);
             }
         }
-    }, [activeCall, navigation, router, width]);
+    }, [activeCall, navigation, router, width, canUseExpoPip]);
 
     // Timer - only start if call is connected AND accepted
     useEffect(() => {
@@ -681,7 +772,7 @@ export default function CallScreen() {
                         {/* 1. Background Media Layer */}
                         <View style={[StyleSheet.absoluteFill, { backgroundColor: '#111' }]}>
                             {/* PRIORITY A: Remote Video Stream */}
-                            {(isVideo && remoteStream && activeCall.isAccepted && !activeCall.remoteVideoOff) ? (
+                            {(isVideo && canRenderVideo && remoteStream && activeCall.isAccepted && !activeCall.remoteVideoOff) ? (
                                 <RemoteVideoComponent
                                     key={`remote-video-v${remoteStreamUpdate}`}
                                     ref={rtcPipRef}
@@ -704,6 +795,35 @@ export default function CallScreen() {
                             <View style={[styles.overlay, { zIndex: 1 }]} />
                         </View>
 
+                        {isEdgeGlowEnabled && isVideo && (
+                            <Animated.View pointerEvents="none" style={[styles.edgeGlowContainer, edgeGlowStyle]}>
+                                <LinearGradient
+                                    colors={[edgeGlowStrong, edgeGlowSoft]}
+                                    start={{ x: 0.5, y: 0 }}
+                                    end={{ x: 0.5, y: 1 }}
+                                    style={[styles.edgeGlowStrip, styles.edgeGlowTop]}
+                                />
+                                <LinearGradient
+                                    colors={[edgeGlowStrong, edgeGlowSoft]}
+                                    start={{ x: 0.5, y: 1 }}
+                                    end={{ x: 0.5, y: 0 }}
+                                    style={[styles.edgeGlowStrip, styles.edgeGlowBottom]}
+                                />
+                                <LinearGradient
+                                    colors={[edgeGlowStrong, edgeGlowSoft]}
+                                    start={{ x: 0, y: 0.5 }}
+                                    end={{ x: 1, y: 0.5 }}
+                                    style={[styles.edgeGlowStrip, styles.edgeGlowLeft]}
+                                />
+                                <LinearGradient
+                                    colors={[edgeGlowStrong, edgeGlowSoft]}
+                                    start={{ x: 1, y: 0.5 }}
+                                    end={{ x: 0, y: 0.5 }}
+                                    style={[styles.edgeGlowStrip, styles.edgeGlowRight]}
+                                />
+                            </Animated.View>
+                        )}
+
                         {/* Video Toggled Off Overlay (Remote Side) */}
                         {isVideo && activeCall.remoteVideoOff && (
                             <View style={[StyleSheet.absoluteFill, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)' }]}>
@@ -722,7 +842,7 @@ export default function CallScreen() {
                             {/* Diagnostics Overlay (Toggled via long press on status) */}
                             {showDiagnostics && (
                                 <View style={styles.diagnosticsContainer}>
-                                    <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+                                    <GlassView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
                                     <Text style={styles.diagnosticTitle}>Soul Diagnostics</Text>
                                     
                                     <View style={styles.diagnosticRow}>
@@ -827,7 +947,7 @@ export default function CallScreen() {
                             {isVideo && (
                                 <GestureDetector gesture={panGesture}>
                                     <Animated.View style={[styles.selfVideoContainer, selfVideoStyle]}>
-                                        {localStream && !activeCall.isVideoOff ? (
+                                        {localStream && !activeCall.isVideoOff && RTCView ? (
                                             <RTCView
                                                 streamURL={typeof localStream.toURL === 'function' ? localStream.toURL() : localStream}
                                                 style={styles.selfVideo}
@@ -865,31 +985,43 @@ export default function CallScreen() {
                                         </View>
                                     </View>
                                 ) : (
-                                    <View style={styles.controlsRow}>
-                                        <Pressable style={[styles.controlBtn, activeCall.isMuted && styles.controlBtnActive]} onPress={handleToggleMute}>
-                                            <MaterialIcons name={activeCall.isMuted ? "mic-off" : "mic"} size={28} color={activeCall.isMuted ? "#000" : "white"} />
-                                        </Pressable>
-
-                                        {isVideo && (
-                                            <Pressable style={[styles.controlBtn, activeCall.isVideoOff && styles.controlBtnActive]} onPress={handleToggleVideo}>
-                                                <MaterialIcons name={activeCall.isVideoOff ? "videocam-off" : "videocam"} size={28} color={activeCall.isVideoOff ? "#000" : "white"} />
+                                    <>
+                                        <View style={styles.controlsRow}>
+                                            <Pressable style={[styles.controlBtn, isVideo && styles.controlBtnActive]} onPress={handleToggleVideo}>
+                                                <MaterialIcons name={isVideo ? "videocam" : "videocam-off"} size={22} color={isVideo ? "#000" : "white"} />
                                             </Pressable>
-                                        )}
 
-                                        <Pressable style={[styles.controlBtn, isSpeaker && styles.controlBtnActive]} onPress={handleToggleSpeaker}>
-                                            <MaterialIcons name={isSpeaker ? "volume-up" : "volume-down"} size={28} color={isSpeaker ? "#000" : "white"} />
-                                        </Pressable>
-
-                                        {isVideo && (
-                                            <Pressable style={styles.controlBtn} onPress={handleSwitchCamera}>
-                                                <Ionicons name="camera-reverse" size={28} color="white" />
+                                            <Pressable
+                                                style={[
+                                                    styles.controlBtn,
+                                                    isEdgeGlowEnabled && styles.controlBtnActive,
+                                                    !isVideo && styles.controlBtnDisabled,
+                                                ]}
+                                                onPress={handleToggleEdgeGlow}
+                                                disabled={!isVideo}
+                                            >
+                                                <Ionicons name="sparkles" size={20} color={isEdgeGlowEnabled ? "#000" : "white"} />
                                             </Pressable>
-                                        )}
 
-                                        <Pressable style={[styles.controlBtn, styles.endCallBtn]} onPress={handleEndCall}>
-                                            <MaterialIcons name="call-end" size={36} color="white" />
-                                        </Pressable>
-                                    </View>
+                                            <Pressable style={[styles.controlBtn, activeCall.isMuted && styles.controlBtnActive]} onPress={handleToggleMute}>
+                                                <MaterialIcons name={activeCall.isMuted ? "mic-off" : "mic"} size={24} color={activeCall.isMuted ? "#000" : "white"} />
+                                            </Pressable>
+
+                                            <Pressable style={[styles.controlBtn, isSpeaker && styles.controlBtnActive]} onPress={handleToggleSpeaker}>
+                                                <MaterialIcons name={isSpeaker ? "volume-up" : "volume-down"} size={24} color={isSpeaker ? "#000" : "white"} />
+                                            </Pressable>
+
+                                            {isVideo && (
+                                                <Pressable style={styles.controlBtn} onPress={handleSwitchCamera}>
+                                                    <Ionicons name="camera-reverse" size={24} color="white" />
+                                                </Pressable>
+                                            )}
+
+                                            <Pressable style={[styles.controlBtn, styles.endCallBtn]} onPress={handleEndCall}>
+                                                <MaterialIcons name="call-end" size={30} color="white" />
+                                            </Pressable>
+                                        </View>
+                                    </>
                                 )}
                             </GlassView>
                         </View>
@@ -975,6 +1107,37 @@ const styles = StyleSheet.create({
     overlay: {
         ...StyleSheet.absoluteFillObject,
         backgroundColor: 'rgba(0,0,0,0.3)',
+    },
+    edgeGlowContainer: {
+        ...StyleSheet.absoluteFillObject,
+        zIndex: 4,
+    },
+    edgeGlowStrip: {
+        position: 'absolute',
+    },
+    edgeGlowTop: {
+        top: 0,
+        left: 0,
+        right: 0,
+        height: 60,
+    },
+    edgeGlowBottom: {
+        bottom: 0,
+        left: 0,
+        right: 0,
+        height: 70,
+    },
+    edgeGlowLeft: {
+        top: 0,
+        bottom: 0,
+        left: 0,
+        width: 36,
+    },
+    edgeGlowRight: {
+        top: 0,
+        bottom: 0,
+        right: 0,
+        width: 36,
     },
     remoteVideo: {
         flex: 1,
@@ -1096,16 +1259,19 @@ const styles = StyleSheet.create({
     },
     controlsRow: {
         flexDirection: 'row',
-        justifyContent: 'space-evenly',
+        justifyContent: 'space-between',
         alignItems: 'center',
     },
     controlBtn: {
-        width: 54,
-        height: 54,
-        borderRadius: 27,
+        width: 46,
+        height: 46,
+        borderRadius: 23,
         backgroundColor: 'rgba(255,255,255,0.1)',
         justifyContent: 'center',
         alignItems: 'center',
+    },
+    controlBtnDisabled: {
+        opacity: 0.45,
     },
     controlBtnActive: {
         backgroundColor: 'rgba(255,255,255,0.9)',
@@ -1137,9 +1303,9 @@ const styles = StyleSheet.create({
     },
     endCallBtn: {
         backgroundColor: '#ef4444',
-        width: 64,
-        height: 64,
-        borderRadius: 32,
+        width: 58,
+        height: 58,
+        borderRadius: 29,
     },
     incomingAction: {
         alignItems: 'center',

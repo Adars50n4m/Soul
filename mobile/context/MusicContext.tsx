@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules, Platform, AppState } from 'react-native';
 // We import types only to avoid side-effects if the native module is missing
 import type { Song, MusicState } from '../types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -186,7 +186,18 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         musicSyncService.initialize(currentUser.id, (remoteState) => {
             // Sync logic...
         });
-        return () => musicSyncService.cleanup();
+
+        // When app comes to foreground, reset retry cap so MusicSync can reconnect
+        const sub = AppState.addEventListener('change', (state) => {
+            if (state === 'active') {
+                musicSyncService.retryNow();
+            }
+        });
+
+        return () => {
+            sub.remove();
+            musicSyncService.cleanup();
+        };
     }, [currentUser]);
 
     const playSong = useCallback(async (song: Song, broadcast = true) => {

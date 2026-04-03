@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 18;
+const DB_TARGET_VERSION = 27;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -574,6 +574,7 @@ async function migration_v18(db: any): Promise<void> {
           id             TEXT PRIMARY KEY NOT NULL, -- local UUID
           local_uri      TEXT NOT NULL,
           media_type     TEXT NOT NULL,
+          media_key      TEXT,
           caption        TEXT,
           created_at     INTEGER NOT NULL,
           retry_count    INTEGER DEFAULT 0,
@@ -600,15 +601,338 @@ async function migration_v18(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v19 — Add offline avatar caching to contacts
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v19(db: any): Promise<void> {
+    const safeAlter = async (sql: string) => {
+        try { await db.execAsync(sql); } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration helper WARN v19:`, msg);
+            }
+        }
+    };
+    
+    // Track local file system path for user's profile picture
+    await safeAlter(`ALTER TABLE contacts ADD COLUMN local_avatar_uri TEXT;`);
+    
+    // Store the server's updated_at timestamp to detect when a new DP needs downloading
+    await safeAlter(`ALTER TABLE contacts ADD COLUMN avatar_updated_at TEXT;`);
+    
+    console.log('[SQLite] Migration v19: Added local_avatar_uri and avatar_updated_at to contacts');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v20 — Add offline avatar support to status user cache
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v20 — Add offline avatar support to status user cache
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v20(db: any): Promise<void> {
+    const safeAlter = async (sql: string) => {
+        try { await db.execAsync(sql); } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration helper WARN v20:`, msg);
+            }
+        }
+    };
+    
+    await safeAlter(`ALTER TABLE cached_users ADD COLUMN local_avatar_uri TEXT;`);
+    console.log('[SQLite] Migration v20: Added local_avatar_uri to cached_users');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v21(db: any): Promise<void> {
+    const safeAlter = async (sql: string) => {
+        try { await db.execAsync(sql); } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration helper WARN v21:`, msg);
+            }
+        }
+    };
+    
+    await safeAlter(`ALTER TABLE pending_uploads ADD COLUMN local_uri TEXT;`);
+    await safeAlter(`ALTER TABLE pending_uploads ADD COLUMN media_key TEXT;`);
+    
+    console.log('[SQLite] Migration v21: Added missing columns to pending_uploads');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v22 — Robust Schema Fix (Ensure all columns exist)
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v22(db: any): Promise<void> {
+    const safeAlter = async (sql: string) => {
+        try { await db.execAsync(sql); } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration helper WARN v22:`, msg);
+            }
+        }
+    };
+    
+    // 1. Recreate the pending_uploads table from scratch to guarantee schema.
+    await db.execAsync(`DROP TABLE IF EXISTS pending_uploads;`);
+    await db.execAsync(`
+        CREATE TABLE pending_uploads (
+          id             TEXT PRIMARY KEY NOT NULL,
+          local_uri      TEXT NOT NULL,
+          media_type     TEXT NOT NULL,
+          media_key      TEXT,
+          caption        TEXT,
+          created_at     INTEGER NOT NULL,
+          retry_count    INTEGER DEFAULT 0,
+          upload_status  TEXT DEFAULT 'pending'
+        );
+    `);
+    
+    // 2. Ensure other tables are robustly patched
+    await safeAlter(`ALTER TABLE contacts ADD COLUMN local_avatar_uri TEXT;`);
+    await safeAlter(`ALTER TABLE contacts ADD COLUMN avatar_updated_at TEXT;`);
+    await safeAlter(`ALTER TABLE cached_users ADD COLUMN local_avatar_uri TEXT;`);
+    
+    console.log('[SQLite] Migration v22: Robust schema repair complete');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v23 — Add media_type to pending_uploads if missing
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v23(db: any): Promise<void> {
+    const safeAlter = async (sql: string) => {
+        try { await db.execAsync(sql); } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration helper WARN v23:`, msg);
+            }
+        }
+    };
+    
+    await safeAlter(`ALTER TABLE pending_uploads ADD COLUMN media_type TEXT NOT NULL DEFAULT 'image';`);
+    
+    console.log('[SQLite] Migration v23: Added media_type to pending_uploads');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v24 — Add mediaUrl to cached_statuses
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v24(db: any): Promise<void> {
+    const safeAlter = async (sql: string) => {
+        try { await db.execAsync(sql); } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+                console.warn(`[SQLite] Migration helper WARN v24:`, msg);
+            }
+        }
+    };
+    
+    await safeAlter(`ALTER TABLE cached_statuses ADD COLUMN mediaUrl TEXT;`);
+    
+    console.log('[SQLite] Migration v24: Added mediaUrl to cached_statuses');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v25 — Canonicalize cached_statuses user column (userId -> user_id)
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v25(db: any): Promise<void> {
+    const existingTable = await db.getFirstAsync(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cached_statuses' LIMIT 1;"
+    ) as any;
+
+    // Fresh installs should still end with the canonical table shape.
+    if (!existingTable) {
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS cached_statuses (
+          id                TEXT PRIMARY KEY NOT NULL,
+          user_id           TEXT NOT NULL,
+          media_local_path  TEXT,
+          media_key         TEXT,
+          media_type        TEXT CHECK(media_type IN ('image', 'video')),
+          caption           TEXT,
+          duration          INTEGER DEFAULT 5,
+          expires_at        INTEGER NOT NULL,
+          is_viewed         INTEGER DEFAULT 0,
+          is_mine           INTEGER DEFAULT 0,
+          created_at        INTEGER NOT NULL,
+          cached_at         INTEGER DEFAULT (strftime('%s', 'now')),
+          mediaUrl          TEXT
+        );
+      `);
+      await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_cached_statuses_user ON cached_statuses(user_id);`);
+      await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_cached_statuses_expires ON cached_statuses(expires_at);`);
+      console.log('[SQLite] Migration v25: Created canonical cached_statuses table');
+      return;
+    }
+
+    const columns = await db.getAllAsync('PRAGMA table_info(cached_statuses);') as any[];
+    const columnNames = new Set((columns || []).map((c: any) => String(c.name)));
+
+    const hasSnakeUserId = columnNames.has('user_id');
+    const hasCamelUserId = columnNames.has('userId');
+
+    // Already canonical and no legacy conflicting column: keep data as-is.
+    if (hasSnakeUserId && !hasCamelUserId) {
+      console.log('[SQLite] Migration v25: cached_statuses already canonical');
+      return;
+    }
+
+    const pickExpr = (candidates: string[], fallback: string): string => {
+      for (const candidate of candidates) {
+        if (columnNames.has(candidate)) {
+          return `"${candidate}"`;
+        }
+      }
+      return fallback;
+    };
+
+    const userIdExpr = hasSnakeUserId && hasCamelUserId
+      ? `COALESCE("user_id", "userId")`
+      : hasSnakeUserId
+        ? `"user_id"`
+        : hasCamelUserId
+          ? `"userId"`
+          : `NULL`;
+
+    const mediaLocalExpr = pickExpr(['media_local_path', 'mediaLocalPath'], 'NULL');
+    const mediaKeyExpr = pickExpr(['media_key', 'mediaKey'], 'NULL');
+    const mediaTypeExpr = pickExpr(['media_type', 'mediaType'], "'image'");
+    const captionExpr = pickExpr(['caption'], 'NULL');
+    const durationExpr = pickExpr(['duration'], '5');
+    const expiresAtExpr = pickExpr(
+      ['expires_at', 'expiresAt'],
+      "CAST((strftime('%s','now') + 86400) * 1000 AS INTEGER)"
+    );
+    const isViewedExpr = pickExpr(['is_viewed', 'isViewed'], '0');
+    const isMineExpr = pickExpr(['is_mine', 'isMine'], '0');
+    const createdAtExpr = pickExpr(['created_at', 'createdAt'], "CAST(strftime('%s','now') * 1000 AS INTEGER)");
+    const cachedAtExpr = pickExpr(['cached_at', 'cachedAt'], "strftime('%s','now')");
+    const mediaUrlExpr = pickExpr(['mediaUrl', 'media_url'], 'NULL');
+
+    await db.execAsync('BEGIN IMMEDIATE TRANSACTION;');
+    try {
+      await db.execAsync('ALTER TABLE cached_statuses RENAME TO cached_statuses_legacy_v25;');
+
+      await db.execAsync(`
+        CREATE TABLE cached_statuses (
+          id                TEXT PRIMARY KEY NOT NULL,
+          user_id           TEXT NOT NULL,
+          media_local_path  TEXT,
+          media_key         TEXT,
+          media_type        TEXT CHECK(media_type IN ('image', 'video')),
+          caption           TEXT,
+          duration          INTEGER DEFAULT 5,
+          expires_at        INTEGER NOT NULL,
+          is_viewed         INTEGER DEFAULT 0,
+          is_mine           INTEGER DEFAULT 0,
+          created_at        INTEGER NOT NULL,
+          cached_at         INTEGER DEFAULT (strftime('%s', 'now')),
+          mediaUrl          TEXT
+        );
+      `);
+
+      await db.execAsync(`
+        INSERT OR REPLACE INTO cached_statuses (
+          id, user_id, media_local_path, media_key, media_type, caption,
+          duration, expires_at, is_viewed, is_mine, created_at, cached_at, mediaUrl
+        )
+        SELECT
+          "id",
+          ${userIdExpr},
+          ${mediaLocalExpr},
+          ${mediaKeyExpr},
+          ${mediaTypeExpr},
+          ${captionExpr},
+          ${durationExpr},
+          ${expiresAtExpr},
+          ${isViewedExpr},
+          ${isMineExpr},
+          ${createdAtExpr},
+          ${cachedAtExpr},
+          ${mediaUrlExpr}
+        FROM cached_statuses_legacy_v25
+        WHERE ${userIdExpr} IS NOT NULL AND TRIM(${userIdExpr}) != '';
+      `);
+
+      await db.execAsync('DROP TABLE cached_statuses_legacy_v25;');
+      await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_cached_statuses_user ON cached_statuses(user_id);`);
+      await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_cached_statuses_expires ON cached_statuses(expires_at);`);
+      await db.execAsync('COMMIT;');
+
+      console.log('[SQLite] Migration v25: Rebuilt cached_statuses with canonical user_id');
+    } catch (e) {
+      await db.execAsync('ROLLBACK;');
+      throw e;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v26 — Deep Audit & Force-Add media_key column
+// Ensures consistency across cached_statuses and pending_uploads
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v26(db: any): Promise<void> {
+    const safeAlter = async (table: string, column: string, type: string, defVal?: string) => {
+        try {
+            await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${type} ${defVal ? 'DEFAULT ' + defVal : ''};`);
+            console.log(`[SQLite] Migration v26: Added ${column} to ${table}`);
+        } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (msg.includes('duplicate column name') || msg.includes('already exists')) {
+                // Table already has the column, which is what we want.
+                return;
+            }
+            console.warn(`[SQLite] Migration v26 helper WARN for ${table}.${column}:`, msg);
+        }
+    };
+
+    // 1. Audit cached_statuses
+    await safeAlter('cached_statuses', 'media_key', 'TEXT');
+    
+    // 2. Audit pending_uploads
+    await safeAlter('pending_uploads', 'media_key', 'TEXT');
+
+    console.log('[SQLite] Migration v26: Schema audit & repair complete');
+}
+
+
+// Helper to safely add a column if it doesn't exist
+async function safeAddColumn(db: any, table: string, column: string, type: string, defVal?: string): Promise<void> {
+    try {
+        // We use a safe check by trying to select the column first or checking table_info
+        const info = await db.getAllAsync(`PRAGMA table_info(${table});`);
+        const exists = (info as any[]).some(col => col.name === column);
+        if (!exists) {
+            console.log(`[SQLite] Repair: Adding missing column ${column} to ${table}`);
+            await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${type} ${defVal ? 'DEFAULT ' + defVal : ''};`);
+        }
+    } catch (e: any) {
+        const msg = e?.message || String(e);
+        if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+            console.warn(`[SQLite] Repair helper WARN for ${table}.${column}:`, msg);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
-  // --- REPAIR BLOCK REMOVED ---
-  // The repair logic is now moved into the version-gated migration_v16 to prevent app boot hangs.
+  console.log('[!!! DATABASE !!!] MIGRATE_DB called.');
+  
+  // ── EMERGENCY REPAIR ────────────────────────────────────────────────────────
+  // Sometimes migrations fail to detect version drift. We force check the 
+  // most critical column causing the current crashes.
+  try {
+    console.log('[!!! DATABASE !!!] Running Emergency Repair Check...');
+    await safeAddColumn(db, 'cached_statuses', 'media_key', 'TEXT');
+    await safeAddColumn(db, 'pending_uploads', 'media_key', 'TEXT');
+    console.log('[!!! DATABASE !!!] Emergency Repair Check Complete.');
+  } catch (repairErr) {
+    console.warn('[!!! DATABASE !!!] Emergency Repair failed (ignoring):', repairErr);
+  }
 
   let currentVersion = await getCurrentVersion(db);
   console.log(
-    `[SQLite] DB version: ${currentVersion}, target: ${DB_TARGET_VERSION}`
+    `[!!! DATABASE !!!] DB version: ${currentVersion}, target: ${DB_TARGET_VERSION}`
   );
 
   if (currentVersion >= DB_TARGET_VERSION) {
@@ -643,6 +967,15 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
         case 16: await migration_v16(db); break;
         case 17: await migration_v17(db); break;
         case 18: await migration_v18(db); break;
+        case 19: await migration_v19(db); break;
+        case 20: await migration_v20(db); break;
+        case 21: await migration_v21(db); break;
+        case 22: await migration_v22(db); break;
+        case 23: await migration_v23(db); break;
+        case 24: await migration_v24(db); break;
+        case 25: await migration_v25(db); break;
+        case 26: await migration_v26(db); break;
+        case 27: /* placeholder */ break;
         default:
           console.error(`[SQLite] No migration logic for v${nextVersion}!`);
       }

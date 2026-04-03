@@ -12,12 +12,17 @@ export interface PlaybackState {
 
 type PlaybackUpdateCallback = (state: PlaybackState) => void;
 
+const MAX_RETRIES = 3;
+
 class MusicSyncService {
     private onUpdate: PlaybackUpdateCallback | null = null;
     private userId: string | null = null;
     private partnerId: string | null = null;
     private isInitialized: boolean = false;
     private channel: RealtimeChannel | null = null;
+    private retryCount: number = 0;
+    private retryTimeout: NodeJS.Timeout | null = null;
+    private errorHandled: boolean = false;
 
     initialize(userId: string, callback: PlaybackUpdateCallback, partnerId?: string): void {
         this.userId = userId;
@@ -25,24 +30,49 @@ class MusicSyncService {
         this.partnerId = partnerId || null;
         this.isInitialized = true;
 
+        // DON'T connect if there's no partner — no one to sync with
+        if (!this.partnerId) {
+            console.log('[MusicSync] No partner set — skipping Realtime connection (saves a slot)');
+            return;
+        }
+
         this.setupBroadcastListener();
     }
 
-    private setupBroadcastListener(): void {
-        if (!this.userId) return;
+    /** Call when partner changes (e.g. opening a chat with someone) */
+    setPartner(partnerId: string): void {
+        if (this.partnerId === partnerId) return;
+        this.partnerId = partnerId;
+        this.retryCount = 0;
+        if (this.isInitialized) {
+            this.setupBroadcastListener();
+        }
+    }
 
-        // Cleanup previous
-        if (this.channel) {
-            this.channel.unsubscribe();
+    private setupBroadcastListener(): void {
+        if (!this.userId || !this.partnerId) return;
+
+        if (this.retryTimeout) {
+            clearTimeout(this.retryTimeout);
+            this.retryTimeout = null;
         }
 
-        // We use a shared channel for the "room" (current pair of users)
-        // For simplicity in SoulSync, we can use a channel named after the user pair
-        // Sort IDs to ensure both users join the same channel name
-        const ids = [this.userId, this.partnerId].filter(Boolean).sort();
-        const channelName = ids.length > 1 ? `music_sync_${ids[0]}_${ids[1]}` : `music_sync_${this.userId}`;
-        
-        console.log(`[MusicSync] Initializing Supabase Broadcast on channel: ${channelName}`);
+        if (this.channel) {
+            try { supabase.removeChannel(this.channel); } catch (_) {}
+            this.channel = null;
+        }
+
+        if (this.retryCount >= MAX_RETRIES) {
+            console.log(`[MusicSync] Paused after ${MAX_RETRIES} failures. Will retry on foreground.`);
+            return;
+        }
+
+        this.errorHandled = false;
+
+        const ids = [this.userId, this.partnerId].sort();
+        const channelName = `music_sync_${ids[0]}_${ids[1]}`;
+
+        console.log(`[MusicSync] Connecting: ${channelName} (attempt ${this.retryCount + 1}/${MAX_RETRIES})`);
 
         this.channel = supabase.channel(channelName, {
             config: { broadcast: { self: false } },
@@ -50,32 +80,57 @@ class MusicSyncService {
 
         this.channel.on('broadcast', { event: 'playback_update' }, ({ payload }) => {
             const state = payload as PlaybackState;
-            
-            // Only sync if the update is from our partner and meant for us
             if (this.userId && state.updatedBy !== this.userId) {
-                // If partnerId is set, only accept from them
-                if (this.partnerId && state.updatedBy !== this.partnerId) {
-                    return;
-                }
-                
-                console.log('[MusicSync] Received remote update:', state.currentSong?.name);
+                if (this.partnerId && state.updatedBy !== this.partnerId) return;
                 this.onUpdate?.(state);
             }
         });
 
-        if (this.channel) {
-            this.channel.subscribe((status) => {
-                console.log(`[MusicSync] Broadcast status: ${status}`);
-                if (status === 'TIMED_OUT' || status === 'CLOSED') {
-                    console.log('[MusicSync] Attempting to reconnect channel...');
-                    setTimeout(() => {
-                        if (this.isInitialized) {
-                            this.setupBroadcastListener();
-                        }
-                    }, 5000);
+        const thisChannel = this.channel;
+
+        this.channel.subscribe((status) => {
+            // Ignore callbacks from channels we already replaced
+            if (thisChannel !== this.channel) return;
+
+            if (status === 'SUBSCRIBED') {
+                console.log(`[MusicSync] ✅ Connected`);
+                this.retryCount = 0;
+                this.errorHandled = false;
+                return;
+            }
+
+            // Only handle the FIRST error event per channel (Supabase fires CLOSED 100+ times)
+            if (this.errorHandled) return;
+            this.errorHandled = true;
+
+            console.log(`[MusicSync] Channel ${status} — will retry later`);
+
+            if (this.channel) {
+                try { supabase.removeChannel(this.channel); } catch (_) {}
+                this.channel = null;
+            }
+
+            this.retryCount++;
+            if (this.retryCount >= MAX_RETRIES) {
+                console.log(`[MusicSync] Paused. Will retry on foreground.`);
+                return;
+            }
+
+            const delay = Math.min(5000 * Math.pow(2, this.retryCount), 60000);
+            console.log(`[MusicSync] Retry ${this.retryCount}/${MAX_RETRIES} in ${delay / 1000}s`);
+
+            this.retryTimeout = setTimeout(() => {
+                if (this.isInitialized && !this.channel) {
+                    this.setupBroadcastListener();
                 }
-            });
-        }
+            }, delay);
+        });
+    }
+
+    retryNow(): void {
+        if (!this.isInitialized || this.channel || !this.partnerId) return;
+        this.retryCount = 0;
+        this.setupBroadcastListener();
     }
 
     broadcastUpdate(state: Partial<PlaybackState>): void {
@@ -94,25 +149,28 @@ class MusicSyncService {
             type: 'broadcast',
             event: 'playback_update',
             payload: fullState,
-        }).then((status) => {
-            if (status !== 'ok') console.error('[MusicSync] Broadcast status:', status);
-        });
+        }).catch(() => {});
     }
 
     getConnectionStatus(): 'disconnected' | 'connecting' | 'connected' {
-        // Since Supabase Realtime is multiplexed, if supabase is connected, we're likely "connected"
-        return this.isInitialized ? 'connected' : 'disconnected';
+        return this.channel ? 'connected' : 'disconnected';
     }
 
     cleanup(): void {
+        this.isInitialized = false;
+        this.errorHandled = true;
+        if (this.retryTimeout) {
+            clearTimeout(this.retryTimeout);
+            this.retryTimeout = null;
+        }
         if (this.channel) {
-            this.channel.unsubscribe();
+            try { supabase.removeChannel(this.channel); } catch (_) {}
             this.channel = null;
         }
         this.onUpdate = null;
         this.userId = null;
         this.partnerId = null;
-        this.isInitialized = false;
+        this.retryCount = 0;
     }
 }
 

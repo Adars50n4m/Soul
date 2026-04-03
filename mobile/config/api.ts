@@ -131,11 +131,16 @@ export function proxySupabaseUrl(url: string | null | undefined): string {
     }
 
     // Handle R2 keys (new)
-    // Keys like 'user-id-timestamp.jpg' or 'avatars/uuid.jpg'
-    if (!url.includes(':') && !url.startsWith('http')) {
-        const publicBase = R2_CONFIG.PUBLIC_URL?.replace(/\/$/, '');
+    // Keys like 'user-id-timestamp.jpg' or 'avatars/uuid.jpg' or 'uploads/uuid.jpg'
+    if (!url.includes(':') && !url.startsWith('/') && !url.startsWith('http')) {
+        const publicBase = R2_CONFIG.PUBLIC_URL && !R2_CONFIG.PUBLIC_URL.includes('XXXXXXXXXXXX')
+            ? R2_CONFIG.PUBLIC_URL.replace(/\/$/, '')
+            : R2_CONFIG.WORKER_URL?.replace(/\/$/, ''); // Fallback to worker if public URL missing
+
         if (publicBase) {
-            return `${publicBase}/${url}`;
+            // Ensure we don't double slash
+            const cleanUrl = url.startsWith('/') ? url.substring(1) : url;
+            return `${publicBase}/${cleanUrl}`;
         }
     }
 

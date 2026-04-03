@@ -20,8 +20,9 @@ import Animated, {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { useApp } from '../../context/AppContext';
 import { MusicPlayerOverlay } from '../../components/MusicPlayerOverlay';
+import { SUPPORT_SHARED_TRANSITIONS } from '../../constants/sharedTransitions';
 
-const ENABLE_SHARED_TRANSITIONS = Platform.OS === 'ios';
+const ENABLE_SHARED_TRANSITIONS = SUPPORT_SHARED_TRANSITIONS;
 
 
 // Sanitize song title - remove metadata like "(From ...)" or "[Album Name]"

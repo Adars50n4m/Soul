@@ -16,6 +16,7 @@ import GlassView from '../../components/ui/GlassView';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as Clipboard from 'expo-clipboard';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
@@ -34,18 +35,18 @@ import { getMessageMediaItems, sanitizeSongTitle } from '../../utils/chatUtils';
 import Animated, {
     useSharedValue,
     useAnimatedStyle,
-    withSpring,
     withTiming,
     withDelay,
     withRepeat,
     withSequence,
-    SharedTransition,
     interpolate,
     interpolateColor,
     Extrapolation,
     Easing,
     FadeInDown,
     FadeOutDown,
+    FadeIn,
+    FadeOut,
 } from 'react-native-reanimated';
 import 'react-native-gesture-handler';
 
@@ -60,30 +61,26 @@ import { MediaPickerSheet } from '../../components/MediaPickerSheet';
 import { MediaPreviewModal } from '../../components/MediaPreviewModal';
 import { storageService } from '../../services/StorageService';
 import { EnhancedMediaViewer } from '../../components/EnhancedMediaViewer';
+import {
+    PROFILE_AVATAR_SHARED_TRANSITION,
+    PROFILE_AVATAR_TRANSITION_TAG,
+    SUPPORT_PROFILE_AVATAR_SHARED_TRANSITION,
+    SUPPORT_SHARED_TRANSITIONS,
+} from '../../constants/sharedTransitions';
 import { Contact, Message } from '../../types';
 import { ResizeMode, Video, Audio } from 'expo-av';
 import Svg, { Defs, LinearGradient as SvgLinearGradient, Path, Stop } from 'react-native-svg';
 
 const IS_IOS = Platform.OS === 'ios';
-const ENABLE_SHARED_TRANSITIONS = true;
-const ENABLE_INNER_SHARED_TRANSITIONS = true;
+const ENABLE_SHARED_TRANSITIONS = SUPPORT_SHARED_TRANSITIONS;
+const ENABLE_INNER_SHARED_TRANSITIONS = SUPPORT_SHARED_TRANSITIONS;
+const MEDIA_GROUP_MARKER = '__MEDIA_GROUP_V1__:';
 const IOS_KEYBOARD_SAFE_ADJUST = 0; 
 const HEADER_PILL_TOP = 62;
 const LIST_PILL_HEIGHT = 72;
 const LIST_PILL_RADIUS = 36;
 const MORPH_IN_OUT_DURATION = 520;
 const MORPH_OUT_HANDOFF = Math.round(MORPH_IN_OUT_DURATION * 0.82);
-
-const morphTransition = SharedTransition.custom((values) => {
-    'worklet';
-    return {
-        width: withSpring(values.targetWidth, { damping: 15, stiffness: 150 }),
-        height: withSpring(values.targetHeight, { damping: 15, stiffness: 150 }),
-        originX: withSpring(values.targetOriginX, { damping: 15, stiffness: 150 }),
-        originY: withSpring(values.targetOriginY, { damping: 15, stiffness: 150 }),
-        borderRadius: withSpring(values.targetBorderRadius, { damping: 15, stiffness: 150 }),
-    };
-});
 
 type ChatMediaItem = {
     url: string;
@@ -416,12 +413,12 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     }, [onBack, navigation]);
 
     const [replyingTo, setReplyingTo] = useState<any>(null);
+    const [editingMessage, setEditingMessage] = useState<Message | null>(null);
     const [selectedContextMessage, setSelectedContextMessage] = useState<{ msg: any, layout: any } | null>(null);
     const [showMusicPlayer, setShowMusicPlayer] = useState(false);
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
     const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
-	
     const isNavigatingRef = useRef(false);
 
     // Animate OUT — butter smooth unified morph back to pill
@@ -508,6 +505,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
     // Refs
     const flatListRef = useRef<any>(null);
+    const profileAvatarRef = useRef<View>(null);
     const hasScrolledInitial = useRef(false);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     // Derived State
@@ -523,6 +521,30 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         }
         return undefined;
     }, [contacts, id]);
+
+    const openProfileWithMorph = useCallback(() => {
+        const pushProfile = (origin?: { x: number; y: number; width: number; height: number }) => {
+            router.push({
+                pathname: `/profile/${stringId}` as any,
+                params: origin
+                    ? {
+                        avatarX: Math.round(origin.x).toString(),
+                        avatarY: Math.round(origin.y).toString(),
+                        avatarW: Math.round(origin.width).toString(),
+                        avatarH: Math.round(origin.height).toString(),
+                      }
+                    : undefined,
+            });
+        };
+
+        profileAvatarRef.current?.measure((x, y, width, height, pageX, pageY) => {
+            if (!width || !height) {
+                pushProfile();
+                return;
+            }
+            pushProfile({ x: pageX, y: pageY, width, height });
+        });
+    }, [router, stringId]);
 
     // FIX: Use contact.id (UUID) for message lookup, not the raw id param
     const messageKey = contact?.id || id || '';
@@ -552,7 +574,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         if (unreadIds.length > 0) {
             chatService.markMessagesAsRead(unreadIds);
         }
-    }, [chatMessages]);
+    }, [chatMessages.length]);
 
     // Toggle inline sharing options above the composer
     const toggleOptions = () => {
@@ -894,6 +916,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     useEffect(() => {
         return () => {
             if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
             // Stop any active recording when unmounting
             if (recordingRef.current) {
                 recordingRef.current.stopAndUnloadAsync().catch(() => {});
@@ -974,6 +997,21 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         const content = inputText.trim();
         setInputText('');
 
+        if (editingMessage) {
+            const nextMedia = editingMessage.media
+                ? {
+                    ...editingMessage.media,
+                    caption: content || undefined,
+                }
+                : undefined;
+            updateMessage(id as string, editingMessage.id, {
+                text: content,
+                media: nextMedia as any,
+            });
+            setEditingMessage(null);
+            return;
+        }
+
         // FIX: Use messageKey (UUID) for sending messages
         const replyToId = replyingTo ? replyingTo.id : undefined;
         sendChatMessage(messageKey, content, undefined, replyToId);
@@ -990,9 +1028,58 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const handleAction = (action: string) => {
         if (selectedContextMessage && id) {
             if (action === 'delete') {
-                deleteMessage(id, selectedContextMessage.msg.id);
+                const mediaItems = getMessageMediaItems(selectedContextMessage.msg);
+                const isGroupedMedia = mediaItems.length > 1;
+                Alert.alert(
+                    isGroupedMedia ? 'Delete Media Group' : 'Delete Message',
+                    isGroupedMedia
+                        ? `Delete this media group (${mediaItems.length} items)?`
+                        : 'Delete this message?',
+                    [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                            text: 'Delete',
+                            style: 'destructive',
+                            onPress: () => deleteMessage(id, selectedContextMessage.msg.id),
+                        },
+                    ]
+                );
             } else if (action === 'reply') {
+                setEditingMessage(null);
                 setReplyingTo(selectedContextMessage.msg);
+            } else if (action === 'copy') {
+                const sourceText =
+                    selectedContextMessage.msg.text ||
+                    selectedContextMessage.msg.media?.caption ||
+                    '';
+                if (!sourceText) {
+                    Alert.alert('Copy', 'No text to copy in this message.');
+                } else {
+                    Clipboard.setStringAsync(sourceText).catch(() => {});
+                }
+            } else if (action === 'copy_time') {
+                const ts = selectedContextMessage.msg.timestamp
+                    ? new Date(selectedContextMessage.msg.timestamp).toLocaleString()
+                    : '';
+                if (ts) Clipboard.setStringAsync(ts).catch(() => {});
+            } else if (action === 'forward') {
+                const forwardText =
+                    selectedContextMessage.msg.text ||
+                    selectedContextMessage.msg.media?.caption ||
+                    '[Media]';
+                setEditingMessage(null);
+                setReplyingTo(null);
+                setInputText(`↪ ${forwardText}`);
+            } else if (action === 'star') {
+                updateMessage(id as string, selectedContextMessage.msg.id, { isStarred: true } as any);
+            } else if (action === 'unstar') {
+                updateMessage(id as string, selectedContextMessage.msg.id, { isStarred: false } as any);
+            } else if (action === 'edit') {
+                if (selectedContextMessage.msg.sender !== 'me') return;
+                const baseText = selectedContextMessage.msg.text || selectedContextMessage.msg.media?.caption || '';
+                setReplyingTo(null);
+                setEditingMessage(selectedContextMessage.msg as any);
+                setInputText(baseText);
             } else if (action === 'pin') {
                 // Future Implementation
             } else if (action === 'forward') {
@@ -1013,6 +1100,24 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             setTimeout(() => setHighlightedMessageId(null), 1500);
         }
     }, [reversedMessages]);
+
+
+
+    const unreadIncomingIds = useMemo(
+        () => reversedMessages.filter((m: any) => m.sender === 'them' && m.status !== 'read').map((m: any) => m.id),
+        [reversedMessages]
+    );
+
+    const jumpToFirstUnread = useCallback(() => {
+        if (!unreadIncomingIds.length) return;
+        const targetId = unreadIncomingIds[0];
+        const index = reversedMessages.findIndex((m: any) => m.id === targetId);
+        if (index !== -1) {
+            flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.4 });
+            setHighlightedMessageId(targetId);
+            setTimeout(() => setHighlightedMessageId(null), 1500);
+        }
+    }, [reversedMessages, unreadIncomingIds]);
 
     const handleSelectToggle = useCallback((msgId: string) => {
         setSelectedMessageIds(prev => {
@@ -1143,6 +1248,16 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         }
     }, [id, chatMessages, updateMessage]);
 
+    const handleRetryMessage = useCallback(async (msgId: string) => {
+        if (!id) return;
+        try {
+            await chatService.retryMessage(msgId);
+            updateMessage(id as string, msgId, { status: 'pending' } as any);
+        } catch (e) {
+            Alert.alert('Retry Failed', 'Could not retry this message.');
+        }
+    }, [id, updateMessage]);
+
     const renderMessage = useCallback(({ item }: { item: any }) => (
         <MessageBubble
             msg={item}
@@ -1161,8 +1276,9 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             onQuotePress={handleQuotePress}
             uploadProgress={uploadProgressTracker?.[item.id]}
             onMediaDownload={handleMediaDownload}
+            onRetry={handleRetryMessage}
         />
-    ), [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle, uploadProgressTracker, handleMediaDownload]);
+    ), [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle, uploadProgressTracker, handleMediaDownload, handleRetryMessage]);
     
     const renderCollectionItem = useCallback(({ item, index }: { item: any, index: number }) => (
         <Pressable
@@ -1272,9 +1388,9 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const handleSendMedia = async (mediaList: { uri: string; type: 'image'|'video'|'audio'|'file'; name?: string }[], caption?: string) => {
         if (!mediaList || mediaList.length === 0 || !id) return;
         try {
+            const preparedItems: any[] = [];
             for (let i = 0; i < mediaList.length; i++) {
                 const item = mediaList[i];
-                
                 let thumbnail: string | undefined = undefined;
                 try {
                     if (item.type === 'image') {
@@ -1285,23 +1401,38 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                         );
                         thumbnail = `data:image/jpeg;base64,${manipResult.base64}`;
                     }
-                    // For videos, in a real app we'd extract a frame. 
-                    // For now, we'll skip or use a generic video icon as thumbnail if needed.
                 } catch (thumbErr) {
                     console.warn('[ChatScreen] Thumbnail generation failed:', thumbErr);
                 }
 
-                const media: Message['media'] = {
-                    type: item.type === 'file' ? 'file' : item.type as any,
-                    url: '', // will be set by ChatService after background upload
-                    caption: i === 0 ? caption || undefined : undefined,
+                preparedItems.push({
+                    type: item.type === 'file' ? 'file' : item.type,
+                    url: '',
+                    localFileUri: item.uri,
                     thumbnail,
-                    name: item.name
-                } as any;
-                const msgText = i === 0 ? (caption || '') : '';
+                    name: item.name,
+                });
+            }
 
-                // Instantly send to local UI and background queue
-                await sendChatMessage(messageKey,msgText, media, undefined, item.uri);
+            const isGrouped = preparedItems.length > 1;
+            if (isGrouped) {
+                const media: Message['media'] = {
+                    type: 'image',
+                    url: '',
+                    caption: caption || undefined,
+                    thumbnail: `${MEDIA_GROUP_MARKER}${JSON.stringify(preparedItems)}`,
+                } as any;
+                await sendChatMessage(messageKey, caption || '', media, undefined, preparedItems[0].localFileUri);
+            } else {
+                const single = preparedItems[0];
+                const media: Message['media'] = {
+                    type: single.type as any,
+                    url: '',
+                    caption: caption || undefined,
+                    thumbnail: single.thumbnail,
+                    name: single.name,
+                } as any;
+                await sendChatMessage(messageKey, caption || '', media, undefined, single.localFileUri);
             }
             setMediaPreview(null);
         } catch (error: any) {
@@ -1320,6 +1451,30 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     return (
         <View style={styles.container} pointerEvents={isFocused ? 'auto' : 'none'}>
             <StatusBar barStyle="light-content" />
+            
+            {/* Offline Connectivity Banner */}
+            {(!connectivity.isDeviceOnline || !connectivity.isServerReachable) && (
+              <Animated.View 
+                entering={FadeIn} 
+                exiting={FadeOut}
+                style={{
+                  backgroundColor: 'rgba(239, 68, 68, 0.9)', 
+                  paddingVertical: 4,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  position: 'absolute',
+                  top: Platform.OS === 'ios' ? 100 : 80, // Position below header
+                  left: 20,
+                  right: 20,
+                  borderRadius: 12,
+                  zIndex: 9999,
+                  borderWidth: 1,
+                  borderColor: 'rgba(255, 255, 255, 0.2)',
+                }}
+              >
+                <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700', letterSpacing: 1.2 }}>OFFLINE MODE</Text>
+              </Animated.View>
+            )}
 
             {/* Screen Background — always solid black so there's never a transparent flash */}
             <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000', zIndex: -1 }]} />
@@ -1372,6 +1527,23 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                     </View>
                                 </Animated.View>
                             )}
+                        {/* Edit Preview */}
+                        {editingMessage && (
+                            <GlassView intensity={35} tint="dark" style={styles.replyPreview} >
+                                <View style={styles.replyContent}>
+                                    <MaterialIcons name="edit" size={16} color={activeTheme.primary} style={{ marginRight: 8 }} />
+                                    <View style={styles.replyTextContainer}>
+                                        <Text style={[styles.replySender, { color: activeTheme.primary }]}>Editing message</Text>
+                                        <Text numberOfLines={1} style={styles.replyText}>
+                                            {editingMessage.text || editingMessage.media?.caption || 'Media caption'}
+                                        </Text>
+                                    </View>
+                                    <Pressable onPress={() => setEditingMessage(null)}>
+                                        <MaterialIcons name="close" size={18} color="rgba(255,255,255,0.7)" />
+                                    </Pressable>
+                                </View>
+                            </GlassView>
+                        )}
                         {/* Reply Preview */}
                         {replyingTo && (() => {
                             const mediaItems = getMessageMediaItems(replyingTo);
@@ -1524,8 +1696,6 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                     </Animated.View>
                                 </Animated.View>
                             )}
-
-
                         </View>
                         </Animated.View>
                     </View>
@@ -1589,19 +1759,21 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
                             <Animated.View>
                                 <Pressable 
+                                    ref={profileAvatarRef}
+                                    collapsable={false}
                                     style={styles.avatarWrapper} 
-                                    onPress={() => {
-                                        router.push(`/profile/${stringId}` as any);
-                                    }}
+                                    onPress={openProfileWithMorph}
                                 >
                                     <SoulAvatar
                                         uri={contact?.avatar}
+                                        localUri={contact?.localAvatarUri}
                                         size={40}
                                         avatarType={contact?.avatarType}
                                         teddyVariant={contact?.teddyVariant}
                                         isOnline={contact?.id ? getPresence(contact.id).isOnline : false}
-                                        sharedTransitionTag="avatar-universal-morph"
-                                        sharedTransitionStyle={morphTransition}
+                                        sharedTransitionTag={PROFILE_AVATAR_TRANSITION_TAG}
+                                        sharedTransitionStyle={PROFILE_AVATAR_SHARED_TRANSITION}
+                                        allowExperimentalSharedTransition={SUPPORT_PROFILE_AVATAR_SHARED_TRANSITION}
                                         style={[
                                             contact?.stories && contact.stories.length > 0 && {
                                                 borderWidth: 2,
@@ -1725,6 +1897,17 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             )}
 
 
+            {!!unreadIncomingIds.length && (
+                <Pressable style={styles.unreadJumpBtn} onPress={jumpToFirstUnread}>
+                    <GlassView intensity={45} tint="dark" style={styles.unreadJumpPill}>
+                        <MaterialIcons name="south" size={14} color="#fff" />
+                        <Text style={styles.unreadJumpText}>Unread</Text>
+                    </GlassView>
+                </Pressable>
+            )}
+
+
+
             <MediaPickerSheet
                 visible={showMediaPicker}
                 onClose={() => setShowMediaPicker(false)}
@@ -1839,6 +2022,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 onReply={() => {
                     if (mediaViewer) {
                         const msg = chatMessages.find((m: any) => m.id === mediaViewer.messageId);
+                        setEditingMessage(null);
                         if (msg) setReplyingTo(msg);
                         setMediaViewer(null);
                         setSelectedMediaLayout(null);
@@ -1852,7 +2036,16 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                         addReaction(id, mediaViewer.messageId, emoji);
                     }
                 }}
-                onEdit={() => Alert.alert('Edit', 'Media editing will be available soon.')}
+                onEdit={() => {
+                    if (!mediaViewer) return;
+                    const msg = chatMessages.find((m: any) => m.id === mediaViewer.messageId);
+                    if (!msg || msg.sender !== 'me') return;
+                    setReplyingTo(null);
+                    setEditingMessage(msg as any);
+                    setInputText(msg.text || msg.media?.caption || '');
+                    setMediaViewer(null);
+                    setSelectedMediaLayout(null);
+                }}
                 onShare={() => Alert.alert('Share', 'External sharing will be available soon.')}
             />
 
@@ -2395,5 +2588,104 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
         backgroundColor: '#BC002A',
         marginLeft: 6,
+    },
+    searchBarWrap: {
+        position: 'absolute',
+        top: HEADER_PILL_TOP + HEADER_PILL_HEIGHT + 10,
+        left: 16,
+        right: 16,
+        zIndex: 999,
+    },
+    searchBar: {
+        minHeight: 42,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)',
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 10,
+        gap: 6,
+    },
+    searchInput: {
+        flex: 1,
+        color: '#fff',
+        fontSize: 14,
+        paddingVertical: 8,
+    },
+    searchCount: {
+        color: 'rgba(255,255,255,0.7)',
+        fontSize: 11,
+    },
+    searchNavBtn: {
+        width: 24,
+        height: 24,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    unreadJumpBtn: {
+        position: 'absolute',
+        right: 18,
+        bottom: 128,
+        zIndex: 900,
+    },
+    unreadJumpPill: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        borderRadius: 14,
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.12)',
+    },
+    unreadJumpText: {
+        color: '#fff',
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    starredOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 20,
+    },
+    starredPanel: {
+        width: '100%',
+        maxHeight: '70%',
+        borderRadius: 18,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.12)',
+        padding: 14,
+    },
+    starredHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 10,
+    },
+    starredTitle: {
+        color: '#fff',
+        fontSize: 17,
+        fontWeight: '700',
+    },
+    starredEmpty: {
+        color: 'rgba(255,255,255,0.6)',
+        textAlign: 'center',
+        marginTop: 20,
+    },
+    starredItem: {
+        paddingVertical: 10,
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(255,255,255,0.08)',
+    },
+    starredText: {
+        color: '#fff',
+        fontSize: 14,
+        marginBottom: 4,
+    },
+    starredTime: {
+        color: 'rgba(255,255,255,0.55)',
+        fontSize: 11,
     },
 });

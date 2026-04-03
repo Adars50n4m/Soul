@@ -18,7 +18,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Video, ResizeMode } from 'expo-av';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { BlurView } from 'expo-blur';
+import GlassView from '../components/ui/GlassView';
 import { statusService } from '../services/StatusService';
 import { useApp } from '../context/AppContext';
 import { UserStatusGroup } from '../types';
@@ -325,7 +325,7 @@ export default function ViewStatusScreen() {
 
                 {/* Viewers Modal */}
                 <Modal visible={showViewers} animationType="slide" transparent>
-                    <BlurView intensity={90} tint="dark" style={styles.modal}>
+                    <GlassView intensity={90} tint="dark" style={styles.modal}>
                         <View style={styles.modalHeader}>
                             <Text style={styles.modalTitle}>Viewed By</Text>
                             <Pressable onPress={() => setShowViewers(false)}>
@@ -340,7 +340,7 @@ export default function ViewStatusScreen() {
                                 </View>
                             ))}
                         </ScrollView>
-                    </BlurView>
+                    </GlassView>
                 </Modal>
             </Animated.View>
         </GestureHandlerRootView>

@@ -24,12 +24,52 @@ export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
         detectSessionInUrl: false,
     },
     global: {
-        fetch: (url: RequestInfo | URL, options?: RequestInit) => {
-            // Rewrite direct Supabase HTTP calls → proxy URL (bypasses Jio/Airtel blocks)
-            // But ONLY for HTTP — WebSocket URLs are never passed to fetch()
+        fetch: async (url: RequestInfo | URL, options?: any) => {
             const urlString = typeof url === 'string' ? url : url.toString();
+            
+            // Logic to rewrite direct Supabase URL to match the Proxy Worker subdomain
+            // Example: https://xxx.supabase.co -> https://soulsync-supabase-proxy.adarshark.workers.dev
             const proxied = urlString.replace(Env.SUPABASE_URL, Env.SUPABASE_PROXY_URL);
-            return fetch(proxied, options);
+            
+            try {
+                // TRY PROXY FIRST (Avoid ISP blocks)
+                // We use a shorter internal timeout to avoid hanging on a slow proxy
+                const controller = new AbortController();
+                // 8s proxy cutoff (reduced from 15s to be more responsive in mobile environments)
+                const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+                const response = await fetch(proxied, {
+                    ...options,
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                return response;
+            } catch (proxyError: any) {
+                const isTimeout = proxyError.name === 'AbortError' || proxyError.message?.includes('aborted');
+                
+                // If it's a known network failure (e.g. device is offline), log it simply as "Offline" rather than a full WARN.
+                const isOffline = proxyError.message?.includes('Network request failed');
+                
+                if (isOffline) {
+                    console.log(`[Supabase Connectivity] Device appear offline. Attempting direct fallback...`);
+                } else {
+                    console.warn(`[Supabase Connectivity] Proxy ${isTimeout ? 'timed out' : 'failed'}: ${proxyError.message}. Falling back directly.`);
+                }
+                
+                try {
+                    // Try Direct Fallback (might be blocked by carrier, but worth a try)
+                    // We remove any signal that might have been aborted by the proxy try
+                    const fallbackOptions = { ...options };
+                    delete fallbackOptions.signal;
+
+                    return await fetch(urlString, fallbackOptions);
+                } catch (directError: any) {
+                    // CRITICAL FIX: Use console.warn instead of console.error to prevent RedBox in React Native.
+                    // "Network request failed" is a common transient issue in mobile apps and shouldn't crash development.
+                    console.warn('[Supabase Connectivity] Both proxy and direct fetch failed:', directError.message);
+                    throw directError;
+                }
+            }
         },
     },
     realtime: {
