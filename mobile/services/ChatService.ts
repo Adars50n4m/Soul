@@ -369,59 +369,103 @@ class ChatService {
   }
 
   private async sendMessageToSupabase(message: QueuedMessage): Promise<void> {
-    if (!this.userId) return;
+    const senderId = this.userId;
+    if (!senderId) return;
     this.sendingIds.add(message.id);
 
     try {
+      // Hard stop: don't retry forever — mark as permanently failed
+      if (message.retryCount >= MAX_TOTAL_RETRIES) {
+        console.warn(`[ChatService] Message ${message.id} exceeded max retries (${MAX_TOTAL_RETRIES}), marking permanently failed`);
+        await offlineService.markMessageAsFailed(message.id, 'Max retries exceeded');
+        this.onStatusUpdate?.(message.id, 'failed');
+        this.sendingIds.delete(message.id);
+        return;
+      }
+
+      // Idempotency guard: skip if this message was already sent (e.g. Realtime arrived first)
+      const existing = await offlineService.getMessageById(message.id);
+      if (existing && (existing.status === 'sent' || existing.status === 'delivered' || existing.status === 'read')) {
+        this.sendingIds.delete(message.id);
+        return;
+      }
+
       let finalMediaUrl = message.media?.url;
       let mediaType = message.media?.type ?? null;
       let mediaThumbnail = message.media?.thumbnail ?? null;
       let mediaDuration = message.media?.duration ?? null;
 
+      // ── STEP 1: Upload media (best-effort, don't block message send) ──
       const groupedItems = decodeGroupedItems(message.media?.thumbnail);
+      let uploadSucceeded = false;
+
       if (groupedItems.length > 0) {
         const uploadedItems: GroupMediaItem[] = [];
-        for (const item of groupedItems) {
+        const totalItems = groupedItems.length;
+        for (let gi = 0; gi < totalItems; gi++) {
+          const item = groupedItems[gi];
           let uploadedUrl = item.url || '';
           if (!uploadedUrl && item.localFileUri) {
-            uploadedUrl = await storageService.uploadImage(item.localFileUri, 'chat-media', this.userId, (progress) => {
-              this.onUploadProgressCb?.(message.id, progress);
-            }) || '';
+            try {
+              let aborted = false;
+              uploadedUrl = await storageService.uploadImage(item.localFileUri, 'chat-media', senderId, (progress) => {
+                if (aborted) return; // Guard: progress callback can fire after abort
+                try {
+                  const overallProgress = (gi + progress) / totalItems;
+                  this.onUploadProgressCb?.(message.id, overallProgress);
+                } catch (_) {}
+              }) || '';
+            } catch (uploadErr: any) {
+              // Suppress — upload failure is non-fatal, message will send without media
+            }
           }
           uploadedItems.push({
             ...item,
-            url: uploadedUrl,
-            localFileUri: undefined,
+            url: uploadedUrl || '',
+            localFileUri: item.localFileUri, // Keep local URI for retry
           });
         }
 
-        finalMediaUrl = uploadedItems[0]?.url || finalMediaUrl;
-        mediaType = uploadedItems[0]?.type || mediaType;
-        mediaDuration = uploadedItems[0]?.duration || mediaDuration;
-        mediaThumbnail = encodeGroupedItems(uploadedItems);
+        uploadSucceeded = uploadedItems.some(i => !!i.url);
+        if (uploadSucceeded) {
+          finalMediaUrl = uploadedItems.find(i => !!i.url)?.url || finalMediaUrl;
+          mediaType = uploadedItems[0]?.type || mediaType;
+          mediaDuration = uploadedItems[0]?.duration || mediaDuration;
+          // Strip localFileUri from items that uploaded successfully
+          mediaThumbnail = encodeGroupedItems(uploadedItems.map(i => ({
+            ...i,
+            localFileUri: i.url ? undefined : i.localFileUri,
+          })));
+        }
       } else if (message.localFileUri && !finalMediaUrl && message.media) {
-        finalMediaUrl = await storageService.uploadImage(message.localFileUri, 'chat-media', this.userId, (progress) => {
-          this.onUploadProgressCb?.(message.id, progress);
-        }) || undefined;
+        try {
+          finalMediaUrl = await storageService.uploadImage(message.localFileUri, 'chat-media', senderId, (progress) => {
+            try { this.onUploadProgressCb?.(message.id, progress); } catch (_) {}
+          }) || undefined;
+          if (finalMediaUrl) uploadSucceeded = true;
+        } catch (_) {
+          // Suppress — upload failure is non-fatal
+        }
       }
+
       if (finalMediaUrl) await offlineService.updateMessageMediaUrl(message.id, finalMediaUrl);
 
-      const expiresAt = new Date(Date.now() + 300000).toISOString();
-
+      // ── STEP 2: Send message to Supabase (always, even if upload failed) ──
+      // If upload failed, send without media URL. The message text still reaches the receiver.
+      // Media can be retried later via the pending sync queue.
       const { data, error } = await supabase
         .from('messages')
         .insert({
           id:            message.id.startsWith('temp_') ? undefined : message.id,
-          sender:        this.userId,
+          sender:        senderId,
           receiver:      message.chatId,
           text:          message.text,
           media_type:    mediaType,
           media_url:     finalMediaUrl          ?? null,
           media_caption: message.media?.caption ?? null,
-          media_thumbnail: mediaThumbnail,
+          media_thumbnail: uploadSucceeded ? mediaThumbnail : null, // Don't send local URIs to server
           reply_to_id:   message.replyTo        ?? null,
           created_at:    message.timestamp,
-          expires_at:    expiresAt,
           media_duration: mediaDuration,
         })
         .select()
@@ -440,15 +484,17 @@ class ChatService {
 
       try {
         await supabase.functions.invoke('send-message-push', {
-          body: { receiverId: message.chatId, senderId: this.userId, senderName: this.senderName, text: message.text, messageId: serverId },
+          body: { receiverId: message.chatId, senderId: senderId, senderName: this.senderName, text: message.text, messageId: serverId },
         });
       } catch (_) {}
 
     } catch (error: any) {
+      const errMsg = error?.message ?? 'Network error';
+      console.warn(`[ChatService] Message ${message.id} send failed (attempt ${message.retryCount + 1}):`, errMsg);
       const newRetryCount = message.retryCount + 1;
-      await offlineService.updateMessageRetry(message.id, newRetryCount, error?.message ?? 'Network error');
+      await offlineService.updateMessageRetry(message.id, newRetryCount, errMsg);
       if (newRetryCount >= MAX_RETRY_COUNT) {
-        await offlineService.markMessageAsFailed(message.id, error?.message ?? 'Max retries exceeded');
+        await offlineService.markMessageAsFailed(message.id, errMsg);
         this.onStatusUpdate?.(message.id, 'failed');
       }
     } finally {
@@ -548,6 +594,8 @@ class ChatService {
             await FileSystem.copyAsync({ from: localUri, to: destPath });
             finalLocalUri = destPath;
             console.log(`[ChatService] Media moved to local Sent folder: ${destPath}`);
+            // WhatsApp-style: also register in device gallery under "Soul Images Sent" / "Soul Videos Sent"
+            soulFolderService.saveToDeviceGallery(destPath, media.type as any, true).catch(() => {});
         } catch (e) {
             console.warn('[ChatService] Failed to move media to Sent folder:', e);
         }
