@@ -291,21 +291,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         
         const startInit = Date.now();
         
-        // --- NEW: Block until Database Migration is verified ---
-        getDb().then(() => {
+        // --- NEW: Block until Database Migration is verified (with 5s fail-safe) ---
+        const dbPromise = getDb().then(() => {
             console.log(`[AuthContext] Database ready after ${Date.now() - startInit}ms`);
+            return true;
+        });
+
+        const dbTimeout = new Promise<boolean>((resolve) => {
+            setTimeout(() => {
+                console.warn(`[AuthContext] Database initialization HUNG after 5s - continuing without DB for now`);
+                resolve(false);
+            }, 5000);
+        });
+
+        Promise.race([dbPromise, dbTimeout]).then(() => {
+            console.log(`[AuthContext] DB phase complete after ${Date.now() - startInit}ms, starting session check...`);
             
             const sessionPromise = supabase.auth.getSession();
             const timeoutPromise = new Promise<null>((resolve) => {
                 timeoutId = setTimeout(() => {
-                    console.log(`[AuthContext] Session check timed out after ${Date.now() - startInit}ms, continuing anyway`);
+                    console.log(`[AuthContext] Session check TIMED OUT after ${Date.now() - startInit}ms, continuing to UI...`);
                     resolve(null);
                 }, 10000);
             });
 
             return Promise.race([sessionPromise, timeoutPromise]);
         }).then((sessionResult: any) => {
-            console.log(`[AuthContext] Session race complete after ${Date.now() - startInit}ms`);
+            console.log(`[AuthContext] Initialization complete after ${Date.now() - startInit}ms. Setting isReady=true`);
             if (!isMounted) return;
             clearTimeout(timeoutId);
 

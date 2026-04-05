@@ -91,21 +91,24 @@ async function ensureDatabaseMigration(): Promise<void> {
 }
 
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
+  console.log('[SQLite] LocalDBService: starting ensureDatabaseMigration');
   await ensureDatabaseMigration();
 
-  console.log('[SQLite] LocalDBService getting database instance...');
+  console.log('[SQLite] LocalDBService: getting database instance from dbManager...');
   const db = await dbManager.getDatabase({
     name: DB_NAME,
     migrations: async (dbInstance) => {
-        console.log('[SQLite] LocalDBService triggering MIGRATE_DB...');
+        console.log('[SQLite] LocalDBService: triggering MIGRATE_DB...');
         await MIGRATE_DB(dbInstance);
+        console.log('[SQLite] LocalDBService: MIGRATE_DB complete');
     },
     onOpen: async (db) => {
+      console.log('[SQLite] LocalDBService: database onOpen triggered');
       // Setup periodic WAL checkpoint to prevent data loss on crash
       setupWalCheckpoint(db);
     }
   });
-  console.log('[SQLite] LocalDBService database instance acquired.');
+  console.log('[SQLite] LocalDBService: database instance acquired successfully');
   return db;
 }
 

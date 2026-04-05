@@ -1,3 +1,4 @@
+console.log('[HomeIndex] Module executing...');
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -1077,13 +1078,6 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
     }
   }, [isRefreshing, refreshLocalCache]);
 
-  const scrollHandler = useAnimatedScrollHandler({
-    onScroll: (event) => {
-      const y = event.contentOffset.y;
-      scrollPosition.value = y;
-      runOnJS(handleScrollMotionRaw)(y);
-    },
-  });
 
   const renderHeader = useCallback(() => (
     <View style={styles.homeHeaderWrapper}>
@@ -1128,8 +1122,10 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
               scrollEnabled={!isRefreshing}
               showsVerticalScrollIndicator={false}
               onScroll={(e) => {
-                scrollHandler(e);
-                onPullScroll(e);
+                const y = e.nativeEvent?.contentOffset?.y ?? 0;
+                scrollPosition.value = y;
+                if (typeof handleScrollMotionRaw === 'function') handleScrollMotionRaw(y);
+                if (typeof onPullScroll === 'function') onPullScroll(e);
               }}
               scrollEventThrottle={16}
             />

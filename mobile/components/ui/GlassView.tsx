@@ -13,41 +13,37 @@ export interface GlassViewProps extends ViewProps {
 
 const IS_ANDROID = Platform.OS === 'android';
 
-const FALLBACK_COLORS: Record<string, string> = {
-    dark: 'rgba(20, 20, 30, 0.75)',
-    light: 'rgba(255, 255, 255, 0.2)',
-    default: 'rgba(30, 30, 40, 0.65)',
+// Tint applied as a separate View layer (NOT through expo-blur's tint prop)
+// This avoids the glow/additive blending artifact on Android
+const TINT_BG: Record<string, string> = {
+    dark: 'rgba(10, 10, 16, 0.55)',
+    light: 'rgba(255, 255, 255, 0.12)',
+    default: 'rgba(15, 15, 22, 0.45)',
 };
 
-const TINT_OVERLAY: Record<string, string> = {
-    dark: 'rgba(10, 10, 18, 0.3)',
-    light: 'rgba(255, 255, 255, 0.06)',
-    default: 'rgba(20, 20, 30, 0.2)',
+// Fallback if blur crashes
+const FALLBACK_BG: Record<string, string> = {
+    dark: 'rgba(18, 18, 26, 0.72)',
+    light: 'rgba(255, 255, 255, 0.18)',
+    default: 'rgba(25, 25, 35, 0.65)',
 };
 
-/**
- * Catches Android BlurView crashes and falls back to solid color.
- * This prevents the black screen issue on some Android devices.
- */
-class BlurErrorBoundary extends Component<
-    { fallbackColor: string; children: React.ReactNode },
-    { failed: boolean }
+// Global kill switch — one crash disables blur for ALL instances
+let blurDisabled = false;
+
+class BlurGuard extends Component<
+    { fallback: string; children: React.ReactNode },
+    { crashed: boolean }
 > {
-    state = { failed: false };
-
+    state = { crashed: false };
     static getDerivedStateFromError() {
-        return { failed: true };
+        blurDisabled = true;
+        return { crashed: true };
     }
-
-    componentDidCatch() {
-        // Silent — just switch to fallback
-    }
-
+    componentDidCatch() {}
     render() {
-        if (this.state.failed) {
-            return (
-                <View style={[StyleSheet.absoluteFill, { backgroundColor: this.props.fallbackColor }]} />
-            );
+        if (this.state.crashed) {
+            return <View style={[StyleSheet.absoluteFill, { backgroundColor: this.props.fallback }]} />;
         }
         return this.props.children;
     }
@@ -60,13 +56,16 @@ export const GlassView = ({
     children,
     ...rest
 }: GlassViewProps) => {
-    // Android: slightly reduced intensity to prevent rendering issues
-    const androidIntensity = Math.min(80, Math.round(intensity * 0.85));
-    const fallbackColor = FALLBACK_COLORS[tint] || FALLBACK_COLORS.dark;
+    const tintBg = TINT_BG[tint] || TINT_BG.dark;
+    const fallbackBg = FALLBACK_BG[tint] || FALLBACK_BG.dark;
+
+    // Android: minimal intensity to prevent blue tint/glow artifacts
+    // Max 15 — keeps blur subtle, no color artifacts
+    const androidBlur = Math.min(15, Math.round(intensity * 0.2));
 
     return (
         <View style={[styles.container, style]} {...rest}>
-            {/* iOS: native expo-blur — rock solid */}
+            {/* iOS: native blur — works perfectly */}
             {!IS_ANDROID && (
                 <BlurView
                     intensity={intensity}
@@ -75,24 +74,24 @@ export const GlassView = ({
                 />
             )}
 
-            {/* Android: real blur via dimezisBlurView, wrapped in error boundary */}
-            {IS_ANDROID && (
-                <BlurErrorBoundary fallbackColor={fallbackColor}>
+            {/* Android: real blur (low intensity, no tint) + separate color overlay */}
+            {IS_ANDROID && !blurDisabled && (
+                <BlurGuard fallback={fallbackBg}>
                     <BlurView
-                        intensity={androidIntensity}
-                        tint={tint}
-                        style={StyleSheet.absoluteFill}
+                        intensity={androidBlur}
+                        tint="dark"
+                        style={[StyleSheet.absoluteFill, { backgroundColor: 'transparent' }]}
                         experimentalBlurMethod="dimezisBlurView"
-                        blurReductionFactor={2}
+                        blurReductionFactor={10}
                     />
-                    {/* Tint overlay for glass color depth */}
-                    <View
-                        style={[
-                            StyleSheet.absoluteFill,
-                            { backgroundColor: TINT_OVERLAY[tint] || TINT_OVERLAY.dark }
-                        ]}
-                    />
-                </BlurErrorBoundary>
+                    {/* Color tint as separate layer — avoids additive blending glow */}
+                    <View style={[StyleSheet.absoluteFill, { backgroundColor: tintBg }]} />
+                </BlurGuard>
+            )}
+
+            {/* Android fallback if blur globally disabled */}
+            {IS_ANDROID && blurDisabled && (
+                <View style={[StyleSheet.absoluteFill, { backgroundColor: fallbackBg }]} />
             )}
 
             {children}

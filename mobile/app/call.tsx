@@ -101,6 +101,7 @@ export default function CallScreen() {
     const [remoteStreamUpdate, setRemoteStreamUpdate] = useState(0);
     const webrtcListenerRef = useRef<any>(null);
 
+    const isVideo = activeCall?.type === 'video';
     const [callState, setCallState] = useState<CallState>(() => {
         // If the call is already accepted (e.g. we re-entered this screen or 
         // the acceptor clicked "Accept" already), start in 'connecting'
@@ -309,7 +310,8 @@ export default function CallScreen() {
         } as any;
     }, [contacts, activeCall]);
 
-    const isVideo = activeCall?.type === 'video';
+    // isVideo moved up to solve TDZ
+
 
     const handleMinimize = useCallback(() => {
         isMinimizing.current = true;
@@ -750,10 +752,11 @@ export default function CallScreen() {
     // FIX: Prevent white screen by navigating away when call ends before rendering
     if (!activeCall || !contact) {
         return (
-            <View style={[styles.container, { backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }]}>
+            <View style={[styles.container, { backgroundColor: '#08080A', justifyContent: 'center', alignItems: 'center' }]}>
                 <StatusBar hidden />
                 <ActivityIndicator size="large" color="#BC002A" />
-                <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 16, marginTop: 10 }}>Ending Call...</Text>
+                <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 18, fontWeight: '700', marginTop: 24, letterSpacing: 1 }}>SOULSYNC</Text>
+                <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13, marginTop: 8 }}>{activeCall ? 'Initializing Secure Connection...' : 'Reconnecting to Call...'}</Text>
             </View>
         );
     }

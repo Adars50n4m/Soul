@@ -26,7 +26,7 @@ import type { IncomingCallPayload } from './NativeCallService';
 
 // ─── Feature Flag ────────────────────────────────────────────────────────────
 // Set to true AFTER installing the native modules and uncommenting the requires.
-const VOIP_PUSH_ENABLED = true;
+const VOIP_PUSH_ENABLED = false;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

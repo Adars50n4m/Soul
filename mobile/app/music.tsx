@@ -8,6 +8,7 @@ import { FlashList } from '@shopify/flash-list';
 
 import { useRouter, useNavigation } from 'expo-router';
 import GlassView from '../components/ui/GlassView';
+import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import Animated, { 
@@ -230,7 +231,7 @@ const ListHeader = memo(({
                             color={repeatMode !== 'off' ? '#ff0080' : 'rgba(255,255,255,0.3)'}
                         />
                     </Pressable>
-                    {currentSong && lyricsAvailable && (
+                    {currentSong && (
                         <Pressable onPress={onToggleLyrics} hitSlop={8}>
                             <MaterialIcons name="lyrics" size={20} color={showLyrics ? '#ff0080' : 'rgba(255,255,255,0.3)'} />
                         </Pressable>
@@ -541,6 +542,7 @@ export default function MusicScreen() {
                 } else {
                     setPage(prev => prev + 1);
                 }
+                setIsLoading(false);
             } else {
                 console.log('[Music] API returned success=false or no data');
                 if (isMountedRef.current) {
@@ -563,6 +565,7 @@ export default function MusicScreen() {
     }, [page]);
 
     const loadMore = () => {
+        if (activeTab !== 'music') return;
         if (!isLoading && hasMore && searchQuery.trim()) {
             searchSongs(searchQuery, false);
         }
@@ -687,19 +690,24 @@ export default function MusicScreen() {
         <View style={styles.container}>
             <StatusBar barStyle="light-content" />
             
-            {/* Combined Backdrop: Single layer of glass + subtle tint */}
+            {/* Combined Backdrop: Glass blur over chat screen — chat visible underneath */}
             <Animated.View style={[StyleSheet.absoluteFill, backdropBlurOpacity, { zIndex: 40 }]}>
-                <GlassView
-                    intensity={Platform.OS === 'android' ? 80 : 60}
-                    tint="dark"
-                    style={StyleSheet.absoluteFill}
-                />
-                <View
-                    style={[
-                        StyleSheet.absoluteFill,
-                        { backgroundColor: Platform.OS === 'android' ? 'rgba(0,0,0,0.75)' : 'rgba(0,0,0,0.3)' }
-                    ]}
-                />
+                {Platform.OS === 'android' ? (
+                    <>
+                        <BlurView
+                            intensity={25}
+                            tint="dark"
+                            style={[StyleSheet.absoluteFill, { backgroundColor: 'transparent' }]}
+                            experimentalBlurMethod="dimezisBlurView"
+                        />
+                        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.35)' }]} />
+                    </>
+                ) : (
+                    <>
+                        <GlassView intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
+                        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.3)' }]} />
+                    </>
+                )}
             </Animated.View>
 
             {/* Transparent Pressable to close the overlay with animation */}
@@ -730,7 +738,7 @@ export default function MusicScreen() {
                                 removeClippedSubviews={Platform.OS === 'android'}
                                 ListFooterComponent={
                                     <View style={{ paddingBottom: 120 }}>
-                                        {isLoading && songs.length > 0 && (
+                                        {isLoading && activeTab === 'music' && songs.length > 0 && (
                                             <ActivityIndicator color={MAGENTA} style={{ marginVertical: 20 }} />
                                         )}
                                         {/* Recommended Songs Section */}
@@ -763,8 +771,19 @@ export default function MusicScreen() {
                                         )}
                                     </View>
                                 }
-                                ListEmptyComponent={isLoading && songs.length === 0 ? (
+                                ListEmptyComponent={isLoading && activeTab === 'music' && songs.length === 0 ? (
                                     <ActivityIndicator color={MAGENTA} style={{ marginTop: 20 }} />
+                                ) : activeTab === 'queue' && queue.length === 0 ? (
+                                    <View style={{ alignItems: 'center', marginTop: 40 }}>
+                                        <MaterialIcons name="queue-music" size={40} color="rgba(255,255,255,0.1)" />
+                                        <Text style={{ color: 'rgba(255,255,255,0.25)', fontSize: 13, marginTop: 12 }}>Queue is empty</Text>
+                                        <Text style={{ color: 'rgba(255,255,255,0.12)', fontSize: 11, marginTop: 4 }}>Long press a song to add it</Text>
+                                    </View>
+                                ) : activeTab === 'favorites' && musicState.favorites.length === 0 ? (
+                                    <View style={{ alignItems: 'center', marginTop: 40 }}>
+                                        <MaterialIcons name="favorite-border" size={40} color="rgba(255,255,255,0.1)" />
+                                        <Text style={{ color: 'rgba(255,255,255,0.25)', fontSize: 13, marginTop: 12 }}>No favorites yet</Text>
+                                    </View>
                                 ) : null}
                             />
                         ) : null}

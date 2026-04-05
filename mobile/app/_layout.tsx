@@ -1,5 +1,4 @@
-// MUST be first import — patches console.error to suppress connection-limit red overlays
-import '../services/WebSocketErrorHandler';
+console.log('[LayoutLoad] Entry point loading...');
 import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -9,6 +8,7 @@ import { View, ActivityIndicator, Platform, AppState, Text, Pressable } from 're
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
+import { useFonts, DancingScript_700Bold } from '@expo-google-fonts/dancing-script';
 import { AppContext, AppProvider } from '../context/AppContext';
 import { PresenceProvider } from '../context/PresenceContext';
 import { backgroundSyncService } from '../services/BackgroundSyncService';
@@ -73,50 +73,34 @@ function RootContent() {
 
   // Handle Splash Screen hiding
   useEffect(() => {
-    // Init crash reporting first (captures all errors from this point)
-    const { crashReporting } = require('../services/CrashReportingService');
-    crashReporting.init();
-
+    console.log('[RootContent] Mounted');
     // Register background sync tasks
     backgroundSyncService.register();
     const cleanupListener = backgroundSyncService.setupListener();
 
-    // Start disappearing message cleanup timer
-    const { disappearingMessageService } = require('../services/DisappearingMessageService');
-    disappearingMessageService.start();
-
-    // Init screen security (Signal-style screenshot prevention)
-    const { screenSecurityService } = require('../services/ScreenSecurityService');
-    screenSecurityService.init();
-
-    // Start persistent job queue (Signal-style JobManager)
-    const { jobManager } = require('../services/JobManager');
-    jobManager.start();
-
     return () => {
         cleanupListener();
-        disappearingMessageService.stop();
     };
   }, []); // This useEffect runs once on mount for background sync setup
 
   useEffect(() => {
-    console.log('[RootLayout] isReady status:', isReady);
+    console.log(`[RootContent] isReady impact check: ${isReady}, Segments: ${segments.join('/')}`);
     if (isReady) {
-      console.log('[RootLayout] Hiding splash screen...');
+      console.log('[RootContent] Hiding splash screen...');
       SplashScreen.hideAsync().catch((err) => {
-        console.warn('[RootLayout] Error hiding splash screen:', err);
+        console.warn('[RootContent] Error hiding splash screen:', err);
       });
     }
     
-    // Safety timeout: if isReady is still false after 15 seconds, log a warning
+    // Safety timeout: if isReady is still false after 3 seconds, show skip button
     const timer = setTimeout(() => {
         if (!isReady) {
-            console.warn('[RootLayout] STILL NOT READY after 15s - offering emergency skip');
+            console.warn('[RootLayout] NOT READY after 3s - offering emergency skip');
             setShowSkip(true);
         }
-    }, 15000);
+    }, 3000);
     return () => clearTimeout(timer);
-  }, [isReady]); // This useEffect handles splash screen hiding based on isReady
+  }, [isReady, showSkip]); // Added showSkip to deps to ensure visibility updates
 
     useEffect(() => {
         if (!currentUser?.id) return;
@@ -298,6 +282,8 @@ function RootContent() {
 }
 
 export default function RootLayout() {
+  const [fontsLoaded] = useFonts({ DancingScript_700Bold });
+
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#000' }}>
       <SafeAreaProvider>

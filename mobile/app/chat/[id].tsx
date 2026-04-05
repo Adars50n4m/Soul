@@ -421,6 +421,42 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
     const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
     const isNavigatingRef = useRef(false);
+    const [topDateLabel, setTopDateLabel] = useState('');
+    
+    const formatDateLabel = useCallback((d: Date) => {
+        const today = new Date();
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+        if (d.toDateString() === today.toDateString()) return 'Today';
+        if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+        return d.toLocaleDateString(undefined, { 
+            weekday: 'long', 
+            month: 'short', 
+            day: 'numeric', 
+            year: d.getFullYear() !== today.getFullYear() ? 'numeric' : undefined 
+        });
+    }, []);
+
+    const onViewableItemsChanged = useCallback(({ viewableItems }: any) => {
+        // Guard: Only update if transition is ready and there's a message
+        if (isReady && viewableItems && viewableItems.length > 0) {
+            const topViewable = viewableItems[viewableItems.length - 1];
+            if (topViewable && topViewable.item && topViewable.item.timestamp) {
+                const dateLabel = formatDateLabel(new Date(topViewable.item.timestamp));
+                setTopDateLabel(prev => prev !== dateLabel ? dateLabel : prev);
+            }
+        }
+    }, [isReady, formatDateLabel]);
+
+    const onViewableItemsChangedRef = useRef(onViewableItemsChanged);
+    useEffect(() => { onViewableItemsChangedRef.current = onViewableItemsChanged; }, [onViewableItemsChanged]);
+
+    const viewabilityConfigCallbackPairs = useRef([
+        { 
+            viewabilityConfig: { itemVisiblePercentThreshold: 10, minimumViewTime: 0 }, 
+            onViewableItemsChanged: (info: any) => onViewableItemsChangedRef.current(info) 
+        }
+    ]);
 
     // Animate OUT — butter smooth unified morph back to pill
     const handleBack = useCallback(() => {
@@ -1339,16 +1375,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         // Date separator logic (inverted list: index 0 = newest)
         const msgDate = new Date(item.timestamp);
         const nextItem = reversedMessages[index + 1]; // older message
-        const showDateSeparator = !nextItem || new Date(nextItem.timestamp).toDateString() !== msgDate.toDateString();
-
-        const formatDateLabel = (d: Date) => {
-            const today = new Date();
-            const yesterday = new Date(today);
-            yesterday.setDate(yesterday.getDate() - 1);
-            if (d.toDateString() === today.toDateString()) return 'Today';
-            if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
-            return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: d.getFullYear() !== today.getFullYear() ? 'numeric' : undefined });
-        };
+        const showDateSeparator = nextItem && new Date(nextItem.timestamp).toDateString() !== msgDate.toDateString();
 
         return (
             <>
@@ -1397,7 +1424,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 )}
             </>
         );
-    }, [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle, uploadProgressTracker, handleMediaDownload, handleRetryMessage, pendingAnimationIds, handleQuotePress, highlightedMessageId, reversedMessages, firstUnreadId, unreadIncomingIds]);
+    }, [selectedContextMessage, chatMessages, contact?.name, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle, uploadProgressTracker, handleMediaDownload, handleRetryMessage, pendingAnimationIds, handleQuotePress, highlightedMessageId, reversedMessages, firstUnreadId, unreadIncomingIds, formatDateLabel]);
     
     const renderCollectionItem = useCallback(({ item, index }: { item: any, index: number }) => (
         <Pressable
@@ -1598,8 +1625,8 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                 {isReady && (
                     <View style={{ flex: 1 }}>
                         <Animated.View style={[{ flex: 1 }, messagesContainerAnimatedStyle]}>
-                            {/* Messages - Switched to FlatList for better inverted support on Fabric */}
-                            <Animated.FlatList
+                            {/* Messages - Switched to standard FlatList for stability with viewability tracking */}
+                            <FlatList
                                 ref={flatListRef as any}
                                 data={reversedMessages}
                                 keyExtractor={keyExtractor}
@@ -1609,8 +1636,12 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                 contentContainerStyle={styles.messagesContent}
                                 showsVerticalScrollIndicator={false}
                                 removeClippedSubviews={false}
-                                onScroll={(e: any) => { isNearBottomRef.current = e.nativeEvent.contentOffset.y < 150; }}
-                                scrollEventThrottle={200}
+                                onScroll={(e: any) => { 
+                                    const offset = e.nativeEvent.contentOffset.y;
+                                    isNearBottomRef.current = offset < 150; 
+                                }}
+                                scrollEventThrottle={16}
+                                viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairs.current}
                                  ListHeaderComponent={null}
                                 ListEmptyComponent={
                                     <View style={styles.emptyChat}>
@@ -1624,7 +1655,17 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
 
 
                             {/* Progressive Blur — Telegram/iOS style, works on Android too */}
-                            <ProgressiveBlur position="top" height={160} intensity={80} />
+                            <ProgressiveBlur position="top" height={160} intensity={60} />
+                            
+                            {/* Sticky Date Header (WhatsApp Style) */}
+                            {chatMessages && chatMessages.length > 0 && topDateLabel !== '' && (
+                                <View style={styles.stickyDateHeaderContainer} pointerEvents="none">
+                                    <View style={styles.stickyDateBubble}>
+                                        <Text style={styles.stickyDateText}>{topDateLabel}</Text>
+                                    </View>
+                                </View>
+                            )}
+
                             <ProgressiveBlur position="bottom" height={160} intensity={80} />
                         </Animated.View>
 
@@ -2014,7 +2055,10 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                 }
                             ]}
                         >
-                            <GlassView intensity={35} tint="dark" style={styles.callDropdownBlur} >
+                            <View style={[styles.callDropdownContent, { backgroundColor: Platform.OS === 'android' ? 'rgba(18, 16, 26, 0.95)' : 'rgba(18, 16, 26, 0.8)' }]}>
+                                {Platform.OS !== 'android' && (
+                                    <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill} />
+                                )}
                                 <Pressable style={styles.callDropdownItem} onPress={() => handleCall('audio')}>
                                     <View style={[styles.callDropdownIcon, { backgroundColor: 'rgba(34, 197, 94, 0.15)' }]}>
                                         <MaterialIcons name="call" size={20} color="#22c55e" />
@@ -2028,7 +2072,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                     </View>
                                     <Text style={styles.callDropdownText}>Video</Text>
                                 </Pressable>
-                            </GlassView>
+                            </View>
                         </RNAnimated.View>
                     </Pressable>
                 </View>
@@ -2311,6 +2355,28 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         marginTop: 16,
     },
+    stickyDateHeaderContainer: {
+        position: 'absolute',
+        top: 140, // Below header
+        left: 0,
+        right: 0,
+        alignItems: 'center',
+        zIndex: 80,
+    },
+    stickyDateBubble: {
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        borderRadius: 16,
+        paddingHorizontal: 16,
+        paddingVertical: 6,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.06)',
+    },
+    stickyDateText: {
+        color: 'rgba(255,255,255,0.6)',
+        fontSize: 11,
+        fontWeight: '700',
+        letterSpacing: 0.5,
+    },
     emptyChatHint: {
         color: 'rgba(255,255,255,0.2)',
         fontSize: 13,
@@ -2491,11 +2557,12 @@ const styles = StyleSheet.create({
         width: 140,
         borderRadius: 16,
         overflow: 'hidden',
-    },
-    callDropdownBlur: {
-        borderRadius: 16,
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.1)',
+        backgroundColor: 'rgba(18, 16, 26, 0.8)', // Fallback
+    },
+    callDropdownContent: {
+        borderRadius: 16,
         overflow: 'hidden',
     },
     callDropdownItem: {

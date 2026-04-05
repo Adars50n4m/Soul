@@ -2,7 +2,27 @@ import { supabase } from '../config/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import * as Crypto from 'expo-crypto';
 import { normalizeId } from '../utils/idNormalization';
-import { AppState } from 'react-native';
+import { AppState, Platform } from 'react-native';
+
+/**
+ * Safely remove a Supabase Realtime channel.
+ * On Android, removeChannel() sends a phx_leave WebSocket frame.
+ * If multiple removals + other bridge calls (AsyncStorage, timers) land
+ * in the same JS tick, the nested JSON in Phoenix protocol messages
+ * can corrupt the bridge batch → "Malformed calls from JS: field sizes
+ * are different". We defer removals on Android to isolate each one into
+ * its own bridge batch.
+ */
+function safeRemoveChannel(channel: RealtimeChannel, delayMs = 0): void {
+    const remove = () => {
+        try { supabase.removeChannel(channel); } catch (_) {}
+    };
+    if (Platform.OS === 'android' && delayMs >= 0) {
+        setTimeout(remove, delayMs);
+    } else {
+        remove();
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CALL SERVICE — Supabase Realtime Broadcast signaling
@@ -114,7 +134,7 @@ class CallService {
         // Clean up existing channel
         if (_personalChannel) {
             console.log('[CallService] Tearing down stale personal channel before re-init');
-            try { supabase.removeChannel(_personalChannel); } catch (_) {}
+            safeRemoveChannel(_personalChannel);
             _personalChannel = null;
             this.personalChannelSubscribed = false;
         }
@@ -203,7 +223,7 @@ class CallService {
         if (this._connectionLimitHit) return;
         
         if (_signalSubscription) {
-            try { supabase.removeChannel(_signalSubscription); } catch (_) {}
+            safeRemoveChannel(_signalSubscription);
         }
 
         console.log(`[CallService] 📡 DB fallback enabled for ${userId}`);
@@ -256,7 +276,7 @@ class CallService {
         const channelName = `call_user_${userId}`;
 
         if (_personalChannel) {
-            try { supabase.removeChannel(_personalChannel); } catch (_) {}
+            safeRemoveChannel(_personalChannel);
         }
 
         _personalChannel = supabase.channel(channelName, {
@@ -292,11 +312,11 @@ class CallService {
                     console.log('[CallService] Connection limit hit — all realtime paused until foreground');
                     // Clean up to free resources
                     if (_personalChannel) {
-                        try { supabase.removeChannel(_personalChannel); } catch (_) {}
+                        safeRemoveChannel(_personalChannel);
                         _personalChannel = null;
                     }
                     if (_signalSubscription) {
-                        try { supabase.removeChannel(_signalSubscription); } catch (_) {}
+                        safeRemoveChannel(_signalSubscription, 50);
                         _signalSubscription = null;
                     }
                     return; // Don't retry — wait for foreground
@@ -411,7 +431,7 @@ class CallService {
         // Clean up previous room channel completely
         if (_roomChannel) {
             console.log(`[CallService] Cleaning up old room channel before joining new one: ${this.currentRoomId}`);
-            supabase.removeChannel(_roomChannel);
+            safeRemoveChannel(_roomChannel);
             _roomChannel = null;
         }
 
@@ -675,7 +695,7 @@ class CallService {
         // Self-heal stale channels before using them
         if (targetChannel && ['closed', 'errored', 'leaving'].includes(targetChannel.state)) {
             _senderChannels.delete(channelName);
-            try { supabase.removeChannel(targetChannel); } catch (_) {}
+            safeRemoveChannel(targetChannel);
             targetChannel = undefined as any;
         }
 
@@ -732,7 +752,7 @@ class CallService {
                     if (targetChannel.state === 'closed' || targetChannel.state === 'errored' || targetChannel.state === 'leaving') {
                         console.warn(`[CallService] Sender channel error for ${recipientId}: ${targetChannel.state.toUpperCase()}`);
                         _senderChannels.delete(channelName);
-                        try { supabase.removeChannel(targetChannel); } catch (_) {}
+                        safeRemoveChannel(targetChannel);
                         clearTimeout(timeout);
                         resolve();
                         return;
@@ -747,7 +767,7 @@ class CallService {
                     } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
                         console.warn(`[CallService] Sender channel error for ${recipientId}: ${status}`);
                         _senderChannels.delete(channelName);
-                        try { supabase.removeChannel(targetChannel!); } catch (_) {}
+                        safeRemoveChannel(targetChannel!);
                         clearTimeout(timeout);
                         resolve();
                     }
@@ -936,17 +956,11 @@ class CallService {
             this.reconnectTimer = null;
         }
 
-        if (_roomChannel) {
-            console.log(`[CallService] Unsubscribing from room ${roomId}`);
-            try { supabase.removeChannel(_roomChannel); } catch (_) {}
-            _roomChannel = null;
-        }
-
         if (this.signalPollInterval) {
             clearInterval(this.signalPollInterval);
             this.signalPollInterval = null;
         }
-        
+
         if (this._fastPollInterval) {
             clearInterval(this._fastPollInterval);
             this._fastPollInterval = null;
@@ -954,23 +968,42 @@ class CallService {
 
         this.signalBuffer = [];
 
-        if (_signalSubscription) {
-            try { supabase.removeChannel(_signalSubscription); } catch (_) {}
-            _signalSubscription = null;
+        // Stagger channel removals to avoid Android bridge batch corruption.
+        // Each removeChannel() sends a phx_leave WebSocket frame; if they all
+        // land in the same bridge batch the nested Phoenix JSON can corrupt it.
+        let delay = 0;
+        const STAGGER = Platform.OS === 'android' ? 60 : 0;
+
+        if (_roomChannel) {
+            console.log(`[CallService] Unsubscribing from room ${roomId}`);
+            safeRemoveChannel(_roomChannel, delay);
+            _roomChannel = null;
+            delay += STAGGER;
         }
 
-        // Cleanup pool
+        if (_signalSubscription) {
+            safeRemoveChannel(_signalSubscription, delay);
+            _signalSubscription = null;
+            delay += STAGGER;
+        }
+
+        // Cleanup sender channel pool
         console.log(`[CallService] 🧹 Cleaning up ${_senderChannels.size} sender channels`);
-        _senderChannels.forEach((ch, name) => {
-            try { supabase.removeChannel(ch); } catch (_) {}
+        _senderChannels.forEach((ch) => {
+            safeRemoveChannel(ch, delay);
+            delay += STAGGER;
         });
         _senderChannels.clear();
 
         // Clear processed signal IDs
         this.processedSignalIds.clear();
-        
-        // Clear persisted state
-        this.clearPersistedCallState();
+
+        // Clear persisted state — defer on Android to avoid batching with channel removals
+        if (Platform.OS === 'android') {
+            setTimeout(() => this.clearPersistedCallState(), delay + STAGGER);
+        } else {
+            this.clearPersistedCallState();
+        }
     }
 
     private async persistCallState(): Promise<void> {
