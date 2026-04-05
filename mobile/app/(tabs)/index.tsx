@@ -15,7 +15,6 @@ import {
   TextInput,
   Modal,
   ActivityIndicator,
-  PanResponder,
 } from 'react-native';
 import { Svg, Circle } from 'react-native-svg';
 import { FlashList } from '@shopify/flash-list';
@@ -25,6 +24,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import GlassView from '../../components/ui/GlassView';
 import ConnectionBanner from '../../components/ConnectionBanner';
+import { SoulPullToRefresh } from '../../components/ui/SoulPullToRefresh';
 import { MaterialIcons } from '@expo/vector-icons';
 import Animated, {
   useSharedValue,
@@ -70,10 +70,6 @@ import { SUPPORT_SHARED_TRANSITIONS } from '../../constants/sharedTransitions';
 const DEFAULT_AVATAR = '';
 const ENABLE_SHARED_TRANSITIONS = SUPPORT_SHARED_TRANSITIONS;
 const HOME_MORPH_DURATION = 480;
-const PULL_MAX_DISTANCE = 160;
-const PULL_REFRESH_TRIGGER = 85;
-const PULL_LOCK_DISTANCE = 80;
-const PULL_SPRING = { damping: 20, stiffness: 180, mass: 0.8 } as const;
 
 const resolveStatusAssetUri = async (asset: ImagePicker.ImagePickerAsset): Promise<string> => {
   let resolvedUri = asset.uri;
@@ -481,7 +477,6 @@ export default function HomeScreen() {
   const [statusMediaPreview, setStatusMediaPreview] = useState<{ uri: string; type: 'image' | 'video' } | null>(null);
   const [isNoteModalVisible, setIsNoteModalVisible] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [refreshHint, setRefreshHint] = useState('Pull to refresh');
   const [chatFilter, setChatFilter] = useState<'all' | 'unread'>('all');
   const [pinnedChatIds, setPinnedChatIds] = useState<string[]>([]);
   const [mutedChatIds, setMutedChatIds] = useState<string[]>([]);
@@ -512,14 +507,8 @@ export default function HomeScreen() {
   const statusRailOpacity = useSharedValue(0); // Start at 0, fade in when ready/focused
   const statusRailOffset = useSharedValue(0);
   const homeMorphProgress = useSharedValue(0);
-  const pullDownPosition = useSharedValue(0);
   const scrollPosition = useSharedValue(0);
-  const isReadyToRefresh = useSharedValue(false);
-  const refreshSpin = useSharedValue(0);
-  const refreshingProgress = useSharedValue(0);
   const statusRefs = useRef<Record<string, any>>({});
-  const readyHintRef = useRef(false);
-  const smoothPull = useDerivedValue(() => withSpring(pullDownPosition.value, PULL_SPRING), [pullDownPosition]);
   const statusRailAnimStyle = useAnimatedStyle(() => ({
     opacity: statusRailOpacity.value,
     transform: [{ translateY: statusRailOffset.value }],
@@ -529,7 +518,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
   const baseTranslateY = interpolate(homeMorphProgress.value, [0, 1], [0, 45], Extrapolation.IDENTITY);
   return {
     transform: [
-      { translateY: baseTranslateY + smoothPull.value },
+      { translateY: baseTranslateY },
       { scale: interpolate(homeMorphProgress.value, [0, 1], [1, 0.92], Extrapolation.IDENTITY) },
     ] as any,
     opacity: Platform.OS === 'android'
@@ -538,107 +527,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
   };
 });
 
-  const refreshContainerStyle = useAnimatedStyle(() => ({
-    height: smoothPull.value,
-    opacity: interpolate(smoothPull.value, [0, 20, PULL_LOCK_DISTANCE], [0, 0.35, 1], Extrapolation.CLAMP),
-  }));
 
-  const refreshPillStyle = useAnimatedStyle(() => {
-    const readyProgress = interpolate(
-      smoothPull.value,
-      [PULL_REFRESH_TRIGGER - 18, PULL_REFRESH_TRIGGER + 12],
-      [0, 1],
-      Extrapolation.CLAMP
-    );
-
-    const idleToPull = interpolate(
-      smoothPull.value,
-      [0, PULL_LOCK_DISTANCE, PULL_MAX_DISTANCE],
-      [-44, 0, 2],
-      Extrapolation.CLAMP
-    );
-
-    const refreshingBob = isRefreshing
-      ? Math.sin(refreshSpin.value * Math.PI * 2) * 1.7
-      : 0;
-
-    return {
-      transform: [
-        { translateY: idleToPull + refreshingBob },
-        {
-          scale:
-            interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [0.9, 1], Extrapolation.CLAMP)
-            + readyProgress * 0.02,
-        },
-      ] as any,
-      opacity: interpolate(smoothPull.value, [0, 20, PULL_LOCK_DISTANCE], [0, 0.62, 1], Extrapolation.CLAMP),
-    };
-  });
-
-  const refreshRingStyle = useAnimatedStyle(() => {
-    const pullProgress = interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [0, 1], Extrapolation.CLAMP);
-    const pulse = isRefreshing
-      ? (Math.sin(refreshSpin.value * Math.PI * 4) + 1) / 2 // Faster pulse during refresh
-      : 0;
-
-    return {
-      opacity: 0.2 + pullProgress * 0.45 + (isRefreshing ? 0.25 : 0),
-      transform: [{ scale: 0.75 + pullProgress * 0.35 + pulse * 0.08 }] as any,
-      borderWidth: interpolate(pullProgress, [0, 1], [1.2, 1.8], Extrapolation.CLAMP),
-      borderColor: interpolateColor(
-        pullProgress + (isRefreshing ? 1 : 0),
-        [0, 1, 2],
-        ['rgba(255,255,255,0.2)', 'rgba(59,130,246,0.8)', 'rgba(188,0,42,1)']
-      ) as string,
-    };
-  });
-
-  const refreshIconStyle = useAnimatedStyle(() => {
-    const pullScale = interpolate(
-      smoothPull.value,
-      [0, PULL_LOCK_DISTANCE],
-      [0.45, 1],
-      Extrapolation.CLAMP
-    );
-    const pullRotation = interpolate(
-      smoothPull.value,
-      [0, PULL_MAX_DISTANCE],
-      [0, 360],
-      Extrapolation.CLAMP
-    );
-    const refreshingRotation = refreshSpin.value * 360;
-
-    return {
-      opacity: interpolate(refreshingProgress.value, [0, 0.45], [1, 0], Extrapolation.CLAMP),
-      transform: [
-        { scale: interpolate(refreshingProgress.value, [0, 0.5], [pullScale, 0.2], Extrapolation.CLAMP) },
-        { rotate: `${pullRotation + refreshingRotation}deg` },
-        { perspective: 1000 },
-        { rotateY: `${interpolate(refreshingProgress.value, [0, 1], [0, 180])}deg` }
-      ] as any,
-    };
-  });
-
-  const refreshTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(smoothPull.value, [10, PULL_LOCK_DISTANCE], [0, 1], Extrapolation.CLAMP),
-    transform: [{ translateY: interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [8, 0], Extrapolation.CLAMP) }] as any,
-  }));
-
-  const refreshHintStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(smoothPull.value, [30, PULL_LOCK_DISTANCE], [0, 0.95], Extrapolation.CLAMP),
-    transform: [{ translateY: interpolate(smoothPull.value, [0, PULL_LOCK_DISTANCE], [10, 0], Extrapolation.CLAMP) }] as any,
-  }));
-
-  const refreshLogoStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(refreshingProgress.value, [0.35, 0.75], [0, 1], Extrapolation.CLAMP),
-    transform: [
-      {
-        scale: interpolate(refreshingProgress.value, [0, 1], [0.6, 1], Extrapolation.CLAMP),
-      },
-      { perspective: 1000 },
-      { rotateY: `${interpolate(refreshingProgress.value, [0, 1], [-180, 0])}deg` }
-    ] as any,
-  }));
 
   const homeBackdropAnimatedStyle = useAnimatedStyle(() => ({
     opacity: homeMorphProgress.value * 0.11,
@@ -742,25 +631,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
     return unsubscribe;
   }, [homeMorphProgress, statusRailOpacity]);
 
-  useEffect(() => {
-    refreshingProgress.value = withTiming(isRefreshing ? 1 : 0, {
-      duration: isRefreshing ? 150 : 110,
-      easing: Easing.out(Easing.cubic),
-    });
 
-    if (isRefreshing) {
-      refreshSpin.value = 0;
-      refreshSpin.value = withRepeat(
-        withTiming(1, { duration: 980, easing: Easing.linear }),
-        -1,
-        false
-      );
-      return;
-    }
-
-    cancelAnimation(refreshSpin);
-    refreshSpin.value = withTiming(0, { duration: 120 });
-  }, [isRefreshing, refreshSpin, refreshingProgress]);
 
   const contactStatusGroupsMap = useMemo(() => {
     const map = new Map<string, any>();
@@ -1193,79 +1064,18 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
   const triggerRefresh = useCallback(async () => {
     if (isRefreshing) return;
     setIsRefreshing(true);
-    setRefreshHint('Syncing chats...');
     
     // Premium Haptic: Successful start
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-    const startedAt = Date.now();
     try {
-      await Promise.resolve(refreshLocalCache());
+      await refreshLocalCache();
     } catch (error) {
       console.warn('[HomeScreen] refreshLocalCache failed:', error);
     } finally {
-      const elapsed = Date.now() - startedAt;
-      const minVisibleDuration = 900;
-      if (elapsed < minVisibleDuration) {
-        await new Promise((resolve) => setTimeout(resolve, minVisibleDuration - elapsed));
-      }
       setIsRefreshing(false);
-      setRefreshHint('Pull to refresh');
-      readyHintRef.current = false;
-      pullDownPosition.value = withSpring(0, PULL_SPRING);
     }
-  }, [isRefreshing, refreshLocalCache, pullDownPosition]);
-
-  const onPanRelease = useCallback(() => {
-    const shouldRefresh = isReadyToRefresh.value;
-    pullDownPosition.value = withSpring(shouldRefresh ? PULL_LOCK_DISTANCE : 0, PULL_SPRING);
-
-    if (shouldRefresh) {
-      isReadyToRefresh.value = false;
-      void triggerRefresh();
-      return;
-    }
-
-    setRefreshHint('Pull to refresh');
-    readyHintRef.current = false;
-  }, [isReadyToRefresh, pullDownPosition, triggerRefresh]);
-
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gestureState) => {
-          if (isRefreshing) return false;
-          const isPullingDown = gestureState.dy > 0 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
-          return scrollPosition.value <= 0 && isPullingDown;
-        },
-        onPanResponderMove: (_, gestureState) => {
-          const dragY = Math.max(gestureState.dy, 0);
-          const resistedPull =
-            dragY <= PULL_REFRESH_TRIGGER
-              ? dragY * 0.94
-              : PULL_REFRESH_TRIGGER * 0.94 + (dragY - PULL_REFRESH_TRIGGER) * 0.42;
-          const nextPull = Math.min(PULL_MAX_DISTANCE, resistedPull);
-          pullDownPosition.value = nextPull;
-          const nextReady = nextPull >= PULL_REFRESH_TRIGGER;
-          isReadyToRefresh.value = nextReady;
-
-          if (nextReady !== readyHintRef.current) {
-            readyHintRef.current = nextReady;
-            setRefreshHint(nextReady ? 'Release to sync' : 'Pull to refresh');
-            
-            // Premium Haptic: Threshold crossed
-            if (nextReady) {
-              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-            } else {
-              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            }
-          }
-        },
-        onPanResponderRelease: onPanRelease,
-        onPanResponderTerminate: onPanRelease,
-      }),
-    [isRefreshing, scrollPosition, pullDownPosition, isReadyToRefresh, onPanRelease]
-  );
+  }, [isRefreshing, refreshLocalCache]);
 
   const scrollHandler = useAnimatedScrollHandler({
     onScroll: (event) => {
@@ -1303,39 +1113,29 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
       
       <ConnectionBanner connectivity={connectivity} mode="inline" />
 
-      <Animated.View pointerEvents="none" style={[styles.refreshContainer, refreshContainerStyle]}>
-        <Animated.View style={[styles.refreshPill, refreshPillStyle]}>
-          <Animated.View style={[styles.refreshRing, refreshRingStyle]} />
-          <Animated.View style={[styles.refreshLogoWrap, refreshLogoStyle]}>
-            <Image source={require('../../assets/images/logo.jpg')} style={styles.refreshLogo} />
+      <SoulPullToRefresh onRefresh={triggerRefresh}>
+        {({ onScroll: onPullScroll }) => (
+          <Animated.View
+            style={[styles.homeContent, homeContentAnimatedStyle]}
+          >
+            <Animated.FlatList
+              data={filteredVisibleContacts}
+              keyExtractor={keyExtractor}
+              renderItem={renderItem}
+              ListHeaderComponent={renderHeader}
+              contentContainerStyle={styles.listContent}
+              bounces={false}
+              scrollEnabled={!isRefreshing}
+              showsVerticalScrollIndicator={false}
+              onScroll={(e) => {
+                scrollHandler(e);
+                onPullScroll(e);
+              }}
+              scrollEventThrottle={16}
+            />
           </Animated.View>
-          <Animated.View style={refreshIconStyle}>
-            <MaterialIcons name="autorenew" size={18} color="#fff" />
-          </Animated.View>
-          <Animated.Text style={[styles.refreshPillTitle, refreshTitleStyle]}>Soul</Animated.Text>
-          <Animated.Text style={[styles.refreshPillSubtitle, refreshHintStyle]}>{refreshHint}</Animated.Text>
-        </Animated.View>
-      </Animated.View>
-
-      <Animated.View pointerEvents="none" style={[styles.homeMorphBackdrop, homeBackdropAnimatedStyle]} />
-      <Animated.View
-        pointerEvents={isRefreshing ? 'none' : 'auto'}
-        style={[styles.homeContent, homeContentAnimatedStyle]}
-        {...panResponder.panHandlers}
-      >
-        <Animated.FlatList
-          data={filteredVisibleContacts}
-          keyExtractor={keyExtractor}
-          renderItem={renderItem}
-          ListHeaderComponent={renderHeader}
-          contentContainerStyle={styles.listContent}
-          bounces={!isRefreshing}
-          scrollEnabled={!isRefreshing}
-          showsVerticalScrollIndicator={false}
-          onScroll={scrollHandler}
-          scrollEventThrottle={16}
-        />
-      </Animated.View>
+        )}
+      </SoulPullToRefresh>
 
       <MediaPreviewModal
         visible={!!statusMediaPreview}
@@ -1374,63 +1174,6 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  refreshContainer: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 108 : 86,
-    left: 0,
-    right: 0,
-    zIndex: 1600,
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
-  refreshPill: {
-    width: 180,
-    height: 92,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingTop: 4,
-    gap: 1,
-  },
-  refreshRing: {
-    position: 'absolute',
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    borderWidth: 1.4,
-  },
-  refreshLogoWrap: {
-    position: 'absolute',
-    top: 7,
-  },
-  refreshLogo: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-  },
-  refreshPillTitle: {
-    color: '#fff',
-    marginTop: 18,
-    fontSize: 15,
-    fontWeight: '800',
-    letterSpacing: 0.45,
-    textTransform: 'uppercase',
-    textShadowColor: 'rgba(0,0,0,0.55)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
-  },
-  refreshPillSubtitle: {
-    color: 'rgba(255,255,255,0.72)',
-    fontSize: 10.5,
-    fontWeight: '600',
-    letterSpacing: 0.2,
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
-  },
-  homeMorphBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#000',
-  },
   homeContent: {
     flex: 1,
   },
