@@ -48,6 +48,7 @@ import Animated, {
     Easing,
     FadeInDown,
     FadeOutDown,
+    runOnJS,
 } from 'react-native-reanimated';
 import 'react-native-gesture-handler';
 
@@ -82,6 +83,9 @@ const LIST_PILL_HEIGHT = 72;
 const LIST_PILL_RADIUS = 36;
 const MORPH_IN_OUT_DURATION = 520;
 const MORPH_OUT_HANDOFF = Math.round(MORPH_IN_OUT_DURATION * 0.82);
+const BACK_BTN_SIZE = 54;
+const BACK_BTN_GAP = 8;
+const MAIN_PILL_LEFT = 16 + BACK_BTN_SIZE + BACK_BTN_GAP;
 
 type ChatMediaItem = {
     url: string;
@@ -292,6 +296,7 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         isMorphEntry ? Math.max(0, sourceY - HEADER_PILL_TOP) : 0
     );
     const headerPillProgress = useSharedValue(isMorphEntry ? 0 : 1);
+    const selectionModeProgress = useSharedValue(0);
 
     const inputAreaAnimatedStyle = useAnimatedStyle(() => ({
         transform: [{ translateY: -keyboardOffset.value }],
@@ -301,17 +306,33 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         paddingBottom: keyboardOffset.value,
     }));
 
-    const headerAccessoryAnimatedStyle = useAnimatedStyle(() => ({
-        opacity: headerAccessoryOpacity.value,
-    }));
+    const headerAccessoryAnimatedStyle = useAnimatedStyle(() => {
+        const progress = headerAccessoryOpacity.value;
+        return {
+            opacity: interpolate(progress, [0, 0.4, 1], [0, 0, 1], Extrapolation.CLAMP),
+            transform: [
+                { 
+                    translateX: interpolate(
+                        progress,
+                        [0, 1],
+                        [-24, 0],
+                        Extrapolation.CLAMP
+                    ) 
+                },
+                {
+                    scale: interpolate(
+                        progress,
+                        [0, 1],
+                        [0.85, 1],
+                        Extrapolation.CLAMP
+                    )
+                }
+            ] as any,
+        };
+    });
 
     const backgroundMorphAnimatedStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(
-            backgroundMorphProgress.value,
-            [0, 1],
-            [0, 1],
-            Extrapolation.CLAMP
-        ),
+        opacity: backgroundMorphProgress.value,
         transform: [
             {
                 translateY: interpolate(
@@ -332,21 +353,29 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         ] as any,
     }));
 
-    const headerMorphAnimatedStyle = useAnimatedStyle(() => ({
-        transform: [{ translateY: headerPillOffsetY.value }],
-        height: interpolate(
-            headerPillProgress.value,
-            [0, 1],
-            [LIST_PILL_HEIGHT, HEADER_PILL_HEIGHT],
-            Extrapolation.CLAMP
-        ),
-        borderRadius: interpolate(
-            headerPillProgress.value,
-            [0, 1],
-            [LIST_PILL_RADIUS, HEADER_PILL_RADIUS],
-            Extrapolation.CLAMP
-        ),
-    }));
+    const headerMorphAnimatedStyle = useAnimatedStyle(() => {
+        const progress = headerPillProgress.value;
+        const selProgress = selectionModeProgress.value;
+        
+        return {
+            transform: [
+                { translateY: headerPillOffsetY.value },
+                { translateX: interpolate(selProgress, [0, 1], [0, -(MAIN_PILL_LEFT - 16)], Extrapolation.CLAMP) }
+            ] as any,
+            height: interpolate(
+                progress,
+                [0, 1],
+                [LIST_PILL_HEIGHT, HEADER_PILL_HEIGHT],
+                Extrapolation.CLAMP
+            ),
+            borderRadius: interpolate(
+                progress,
+                [0, 1],
+                [LIST_PILL_RADIUS, HEADER_PILL_RADIUS],
+                Extrapolation.CLAMP
+            ),
+        };
+    });
 
     useEffect(() => {
         if (isMorphEntry) {
@@ -357,14 +386,19 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             headerPillProgress.value = withTiming(1, {
                 duration: MORPH_IN_OUT_DURATION,
                 easing: Easing.bezier(0.22, 1, 0.36, 1),
+            }, (finished) => {
+                if (finished) {
+                    runOnJS(setAnimationFinished)(true);
+                }
             });
             backgroundMorphProgress.value = withTiming(1, {
                 duration: MORPH_IN_OUT_DURATION,
                 easing: Easing.bezier(0.22, 1, 0.36, 1),
             });
+            // Separately timed entry for back button to create separation effect
             headerAccessoryOpacity.value = withDelay(
-                180,
-                withTiming(1, { duration: 180, easing: Easing.out(Easing.cubic) })
+                80,
+                withTiming(1, { duration: 250, easing: Easing.out(Easing.cubic) })
             );
             return;
         }
@@ -422,6 +456,14 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
     const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
     const isNavigatingRef = useRef(false);
     const [topDateLabel, setTopDateLabel] = useState('');
+    const [animationFinished, setAnimationFinished] = useState(!isMorphEntry);
+
+    useEffect(() => {
+        selectionModeProgress.value = withTiming(selectionMode ? 1 : 0, {
+            duration: 350,
+            easing: Easing.bezier(0.22, 1, 0.36, 1),
+        });
+    }, [selectionMode]);
     
     const formatDateLabel = useCallback((d: Date) => {
         const today = new Date();
@@ -482,7 +524,8 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
         // OUT = reverse of IN (same easing + same duration + same path).
         if (isMorphEntry && sourceY !== undefined) {
             chatTransitionState.setPhase('returning');
-            headerAccessoryOpacity.value = withTiming(0, { duration: 120 });
+            // Fade out accessory slightly slower for smoother merge
+            headerAccessoryOpacity.value = withTiming(0, { duration: 180 });
             backgroundMorphProgress.value = withTiming(0, {
                 duration: MORPH_IN_OUT_DURATION,
                 easing: Easing.bezier(0.22, 1, 0.36, 1),
@@ -615,10 +658,13 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
             return;
         }
 
-        initializeChatSession?.(id);
-        fetchOtherUserProfile?.(id);
+        const task = InteractionManager.runAfterInteractions(() => {
+            initializeChatSession?.(id);
+            fetchOtherUserProfile?.(id);
+        });
 
         return () => {
+            task.cancel();
             cleanupChatSession?.(id);
         };
     }, [cleanupChatSession, id, currentUser?.id, initializeChatSession, fetchOtherUserProfile, isFocused]);
@@ -1865,39 +1911,55 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                  inside an opacity:0 view, the morph target is invisible → black flash.
             */}
             <View style={[StyleSheet.absoluteFill, { zIndex: 2 }]} pointerEvents="box-none">
-                {/* The Morph Target: Dedicated view with matching tag for shared transition */}
+                {/* 
+                    UNIFIED HEADER WRAPPER 
+                    This is the single Shared Transition target for the pill shape.
+                    By nesting the glass blur and content inside it, we ensure they 
+                    never desync or jitter during the transition.
+                */}
                 <Animated.View
-                    style={[styles.headerPill, headerMorphAnimatedStyle, { 
-                        position: 'absolute', 
-                        top: HEADER_PILL_TOP, 
-                        left: 16, 
-                        right: 16, 
-                        height: HEADER_PILL_HEIGHT, 
-                        backgroundColor: 'rgba(15, 15, 20, 0.4)', 
-                        borderRadius: HEADER_PILL_RADIUS, 
-                        zIndex: 0,
-                        borderWidth: 1,
-                        borderColor: 'rgba(255, 255, 255, 0.22)'
-                    }]}
-                />
-
-                {/* Liquid-glass blur layer (exactly like bottom input pill) */}
-                <Animated.View
-                    pointerEvents="none"
-                    style={[styles.headerGlass, headerMorphAnimatedStyle, { position: 'absolute', top: HEADER_PILL_TOP, left: 16, right: 16, height: HEADER_PILL_HEIGHT, borderRadius: HEADER_PILL_RADIUS, zIndex: 1 }]}
+                    {...(ENABLE_SHARED_TRANSITIONS ? { sharedTransitionTag: `pill-${contact?.id || id}` } : {})}
+                    style={[
+                        styles.headerPill, 
+                        headerMorphAnimatedStyle, 
+                        { 
+                            position: 'absolute', 
+                            top: HEADER_PILL_TOP, 
+                            left: MAIN_PILL_LEFT,
+                            right: 0, 
+                            backgroundColor: 'rgba(15, 15, 20, 0.4)', 
+                            borderRadius: HEADER_PILL_RADIUS, 
+                            zIndex: 10,
+                            borderWidth: 1,
+                            borderColor: 'rgba(255, 255, 255, 0.22)',
+                            overflow: 'hidden'
+                        }
+                    ]}
+                    pointerEvents="box-none"
+                    {...(!animationFinished ? { renderToHardwareTextureAndroid: true } : {})}
                 >
-                    <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill}  />
-                    {/* Music progress glow — tap to seek */}
+                    {/* Liquid-glass blur layer (internalized) */}
+                    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                        {animationFinished ? (
+                            <Animated.View entering={FadeInDown.duration(400)} style={StyleSheet.absoluteFill}>
+                                <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill}  />
+                            </Animated.View>
+                        ) : (
+                            <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(15, 15, 20, 0.65)' }]} />
+                        )}
+                    </View>
+
+                    {/* Music progress glow (internalized) */}
                     {musicState?.currentSong && musicProgress > 0 && (
                         <Pressable
                             onPress={(e) => {
                                 const tapX = e.nativeEvent.locationX;
-                                const width = e.nativeEvent.target ? SCREEN_WIDTH - 32 : SCREEN_WIDTH - 32;
+                                const width = SCREEN_WIDTH - MAIN_PILL_LEFT - 16;
                                 const percent = Math.max(0, Math.min(tapX / width, 1));
                                 const dur = (musicState.currentSong?.duration || 240) * 1000;
                                 seekTo(percent * dur);
                             }}
-                            style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 10, justifyContent: 'flex-end', borderBottomLeftRadius: HEADER_PILL_RADIUS, borderBottomRightRadius: HEADER_PILL_RADIUS, overflow: 'hidden' }}
+                            style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 10, justifyContent: 'flex-end', overflow: 'hidden' }}
                         >
                             <View style={{
                                 width: `${musicProgress}%`,
@@ -1910,62 +1972,69 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                             }} />
                         </Pressable>
                     )}
-                </Animated.View>
 
-                    {/* Original Header Content - Rendered exactly over the morph bounds as an absolute overlay */}
-                    <Animated.View style={[styles.header, headerMorphAnimatedStyle, { position: 'absolute', top: HEADER_PILL_TOP, left: 16, right: 16, height: HEADER_PILL_HEIGHT, zIndex: 10 }]} pointerEvents="box-none">
+                    {/* Header Content — also internalized to follow the shared transition perfectly */}
+                    <View style={[styles.header, { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, height: '100%' }]} pointerEvents="box-none">
                         {selectionMode ? (
-                            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, width: '100%' }}>
+                            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16 }}>
                                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                    <Pressable onPress={() => { setSelectionMode(false); setSelectedMessageIds([]); }} style={{ marginRight: 24, padding: 4 }}>
+                                    <Pressable 
+                                        onPress={() => { setSelectionMode(false); setSelectedMessageIds([]); }}
+                                        style={({ pressed }) => [
+                                            { 
+                                                width: BACK_BTN_SIZE, 
+                                                height: BACK_BTN_SIZE, 
+                                                borderRadius: BACK_BTN_SIZE/2, 
+                                                backgroundColor: 'rgba(255, 255, 255, 0.1)', 
+                                                alignItems: 'center', 
+                                                justifyContent: 'center',
+                                                marginRight: 10,
+                                                opacity: pressed ? 0.7 : 1
+                                            }
+                                        ]}
+                                    >
                                         <MaterialIcons name="close" size={24} color="#ffffff" />
                                     </Pressable>
-                                    <Text style={{ color: '#fff', fontSize: 18, fontWeight: '600' }}>
-                                        {selectedMessageIds.length} Selected
-                                    </Text>
+                                    <View>
+                                        <Text style={{ color: '#fff', fontSize: 18, fontWeight: '600' }}>
+                                            {selectedMessageIds.length}
+                                        </Text>
+                                        <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12 }}>Selected</Text>
+                                    </View>
                                 </View>
                                 <Pressable onPress={handleDeleteSelected} style={{ padding: 4 }}>
                                     <MaterialIcons name="delete-outline" size={24} color="#ff4444" />
                                 </Pressable>
                             </View>
                         ) : (
-                          <>
-                            <Animated.View style={headerAccessoryAnimatedStyle}>
-                                <Pressable onPress={handleBack} style={styles.backButton}>
-                                    <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
-                                </Pressable>
-                            </Animated.View>
-
-                            <Animated.View>
-                                <Pressable 
-                                    ref={profileAvatarRef}
-                                    collapsable={false}
-                                    style={styles.avatarWrapper} 
-                                    onPress={openProfileWithMorph}
-                                >
-                                    <SoulAvatar
-                                        uri={contact?.avatar}
-                                        localUri={contact?.localAvatarUri}
-                                        size={40}
-                                        avatarType={contact?.avatarType}
-                                        teddyVariant={contact?.teddyVariant}
-                                        isOnline={contact?.id ? getPresence(contact.id).isOnline : false}
-                                        sharedTransitionTag={PROFILE_AVATAR_TRANSITION_TAG}
-                                        sharedTransitionStyle={PROFILE_AVATAR_SHARED_TRANSITION}
-                                        allowExperimentalSharedTransition={SUPPORT_PROFILE_AVATAR_SHARED_TRANSITION}
-                                        style={[
-                                            contact?.stories && contact.stories.length > 0 && {
-                                                borderWidth: 2,
-                                                borderColor: contact.stories.some(s => !s.seen) ? '#3b82f6' : 'rgba(255,255,255,0.4)',
-                                                padding: 2
-                                            }
-                                        ]}
-                                    />
-                                </Pressable>
-                            </Animated.View>
+                          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', paddingLeft: 0, paddingRight: -16 }}>
+                            <Pressable 
+                                ref={profileAvatarRef}
+                                collapsable={false}
+                                style={styles.avatarWrapper} 
+                                onPress={openProfileWithMorph}
+                            >
+                                <SoulAvatar
+                                    uri={contact?.avatar}
+                                    localUri={contact?.localAvatarUri}
+                                    size={44}
+                                    avatarType={contact?.avatarType}
+                                    teddyVariant={contact?.teddyVariant}
+                                    isOnline={contact?.id ? getPresence(contact.id).isOnline : false}
+                                    // Match list item tag for smooth flying
+                                    {...(ENABLE_INNER_SHARED_TRANSITIONS ? { sharedTransitionTag: `pill-avatar-${contact?.id || id}` } : {})}
+                                    style={[
+                                        contact?.stories && contact.stories.length > 0 && {
+                                            borderWidth: 2,
+                                            borderColor: contact.stories.some(s => !s.seen) ? '#3b82f6' : 'rgba(255,255,255,0.4)',
+                                            padding: 2
+                                        }
+                                    ]}
+                                />
+                            </Pressable>
 
                             <View style={styles.headerInfo}>
-                                <Animated.View>
+                                <Animated.View {...(ENABLE_INNER_SHARED_TRANSITIONS ? { sharedTransitionTag: `pill-name-${contact?.id || id}` } : {})}>
                                     <Text style={styles.contactName}>{contact?.name || '...'}</Text>
                                 </Animated.View>
                                 <Animated.View style={headerAccessoryAnimatedStyle}>
@@ -2001,26 +2070,61 @@ export default function SingleChatScreen({ user: propsUser, onBack, onBackStart,
                                 </Animated.View>
                             </View>
 
-                            <Animated.View style={headerAccessoryAnimatedStyle}>
-                                <Pressable style={styles.headerButton} onPress={() => router.push('/music')}>
-                                    {({ pressed }) => (
-                                        <MaterialIcons name={musicState?.isPlaying ? 'equalizer' : 'audiotrack'} size={20} color={musicState?.currentSong ? '#ff0080' : pressed ? activeTheme.primary : '#ffffff'} />
-                                    )}
-                                </Pressable>
-                            </Animated.View>
-
-                            <Animated.View style={headerAccessoryAnimatedStyle}>
-                                <View ref={callButtonRef} collapsable={false}>
-                                    <Pressable style={styles.headerButton} onPress={openCallModal}>
+                            <View style={{ flexDirection: 'row', gap: 10, marginLeft: 'auto' }}>
+                                <Animated.View style={headerAccessoryAnimatedStyle}>
+                                    <Pressable style={styles.headerButton} onPress={() => router.push('/music')}>
                                         {({ pressed }) => (
-                                            <MaterialIcons name="call" size={20} color={pressed ? activeTheme.primary : '#ffffff'} />
+                                            <MaterialIcons name={musicState?.isPlaying ? 'equalizer' : 'audiotrack'} size={22} color={musicState?.currentSong ? '#ff0080' : pressed ? activeTheme.primary : '#ffffff'} />
                                         )}
                                     </Pressable>
-                                </View>
-                            </Animated.View>
-                          </>
+                                </Animated.View>
+
+                                <Animated.View style={headerAccessoryAnimatedStyle}>
+                                    <View ref={callButtonRef} collapsable={false}>
+                                        <Pressable style={styles.headerButton} onPress={openCallModal}>
+                                            {({ pressed }) => (
+                                                <MaterialIcons name="call" size={22} color={pressed ? activeTheme.primary : '#ffffff'} />
+                                            )}
+                                        </Pressable>
+                                    </View>
+                                </Animated.View>
+                            </View>
+                          </View>
                         )}
+                    </View>
+                </Animated.View>
+
+                {/* Detached Back Button Circle */}
+                {!selectionMode && (
+                    <Animated.View 
+                        style={[
+                            headerAccessoryAnimatedStyle, 
+                            { 
+                                position: 'absolute', 
+                                top: HEADER_PILL_TOP + (HEADER_PILL_HEIGHT - BACK_BTN_SIZE) / 2, 
+                                left: 16, 
+                                width: BACK_BTN_SIZE, 
+                                height: BACK_BTN_SIZE, 
+                                borderRadius: BACK_BTN_SIZE/2, 
+                                backgroundColor: 'rgba(15, 15, 20, 0.4)', 
+                                zIndex: 20, 
+                                overflow: 'hidden',
+                                borderWidth: 1,
+                                borderColor: 'rgba(255, 255, 255, 0.22)',
+                                alignItems: 'center',
+                                justifyContent: 'center'
+                            }
+                        ]}
+                    >
+                        <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFill} />
+                        <Pressable 
+                            onPress={handleBack} 
+                            style={{ width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}
+                        >
+                            <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
+                        </Pressable>
                     </Animated.View>
+                )}
             </View>
 
             {/* Reaction Modal */}
@@ -2276,17 +2380,17 @@ const styles = StyleSheet.create({
     header: {
         flex: 1,
         backgroundColor: 'transparent',
-        paddingHorizontal: 16,
+        paddingLeft: 12,
+        paddingRight: 16,
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 12,
+        gap: 10,
     },
     backButton: {
         padding: 4,
     },
     avatarWrapper: {
         position: 'relative',
-        marginLeft: -4, 
     },
     avatar: {
         width: 42,
@@ -2307,7 +2411,7 @@ const styles = StyleSheet.create({
     },
     headerInfo: {
         flex: 1,
-        marginLeft: 8,
+        marginLeft: 7,
         justifyContent: 'center',
     },
     contactName: {
@@ -2323,6 +2427,7 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         letterSpacing: 0.5,
         textTransform: 'uppercase',
+        marginLeft: -2, // Pull closer to the dot
     },
     headerButton: {
         width: 44,
