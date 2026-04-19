@@ -19,6 +19,7 @@ import { IncomingCallModal } from '../components/IncomingCallModal';
 import { SecurityLockOverlay } from '../components/SecurityLockOverlay';
 import { Toaster } from '../components/ui/Toaster';
 import { SheetProvider } from 'react-native-sheet-transitions';
+import { CardioLoader } from '../components/ui/CardioLoader';
 
 
 // Error Boundary to catch rendering errors
@@ -291,12 +292,12 @@ function RootContent() {
         >
           {(!showSkip) ? (
             <>
-              <ActivityIndicator size="large" color={themeAccent} />
+              <CardioLoader size={60} stroke={4} speed={1.5} color={themeAccent} />
               <Text style={{ color: '#666', marginTop: 20, fontSize: 12 }}>Initializing Soul...</Text>
             </>
           ) : (
             <View style={{ padding: 40, alignItems: 'center' }}>
-              <ActivityIndicator size="large" color={themeAccent} />
+              <CardioLoader size={60} stroke={4} speed={1.5} color={themeAccent} />
               <Text style={{ color: '#fff', fontSize: 18, fontWeight: '600', marginTop: 30, textAlign: 'center' }}>Taking longer than usual...</Text>
               <Text style={{ color: '#999', fontSize: 14, marginTop: 10, textAlign: 'center', marginBottom: 40 }}>
                 We're having trouble connecting to the local database or sync server.

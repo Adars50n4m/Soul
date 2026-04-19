@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import {
   View,
   Pressable,
@@ -9,18 +9,29 @@ import {
   Platform,
   StatusBar,
   ActivityIndicator,
-  Animated,
   useWindowDimensions,
   Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { MaterialIcons, Ionicons, FontAwesome5 } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import { Video, ResizeMode } from 'expo-av';
 import { useApp } from '../context/AppContext';
 import * as ImagePicker from 'expo-image-picker';
 import Svg, { Path } from 'react-native-svg';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import { CropImageModal } from './CropImageModal';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSpring,
+  Easing,
+  SlideInDown,
+  SlideOutDown,
+  SlideInUp,
+  SlideOutUp,
+  ZoomIn,
+} from 'react-native-reanimated';
 
 interface MediaPreviewModalProps {
   visible: boolean;
@@ -89,11 +100,13 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const currentUri = currentMedia.uri;
   const currentType = currentMedia.type;
 
-  const fadeAnim = useMemo(() => new Animated.Value(0), []);
   const videoRef = useRef<Video>(null);
   const viewShotRef = useRef<View>(null);
   const { activeTheme } = useApp();
 
+  // Reanimated shared values for enter/exit
+  const containerOpacity = useSharedValue(0);
+  const containerScale = useSharedValue(0.92);
   // Tools states
   const [isDrawingMode, setIsDrawingMode] = useState(false);
   const [paths, setPaths] = useState<{ path: string; color: string; strokeWidth: number }[]>([]);
@@ -124,20 +137,21 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   useEffect(() => {
     if (visible) {
       StatusBar.setHidden(true);
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
+      containerOpacity.value = withTiming(1, { duration: 280, easing: Easing.out(Easing.cubic) });
+      containerScale.value = withSpring(1, { damping: 18, stiffness: 200, mass: 0.8 });
     } else {
       StatusBar.setHidden(false);
-      Animated.timing(fadeAnim, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
+      containerOpacity.value = withTiming(0, { duration: 180, easing: Easing.in(Easing.cubic) });
+      containerScale.value = withTiming(0.94, { duration: 180 });
     }
-  }, [visible]);
+  }, [visible, containerOpacity, containerScale]);
+
+  const animatedContainerStyle = useAnimatedStyle(() => ({
+    opacity: containerOpacity.value,
+    transform: [{ scale: containerScale.value }],
+  }));
+
+  // animatedBgStyle is no longer needed — outer bg is always solid black
 
   if (!visible) return null;
 
@@ -217,7 +231,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
         )));
       }
       setIsTrimming(false);
-    } catch (error) {
+    } catch {
       setIsTrimming(false);
       Alert.alert('Trim Failed', 'Could not trim video. Please try again.');
     }
@@ -299,21 +313,24 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   };
 
   return (
-    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.keyboardAvoid}
-      >
+    <View style={styles.container}>
+      <Animated.View style={[StyleSheet.absoluteFill, animatedContainerStyle]}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.keyboardAvoid}
+        >
         {/* Top Header Controls */}
-        <View style={styles.header}>
+        <Animated.View entering={SlideInUp.duration(300).springify().damping(18)} exiting={SlideOutUp.duration(200)} style={styles.header}>
           <Pressable style={styles.closeButton} onPress={handleClose} disabled={isUploading}>
             <MaterialIcons name="close" size={26} color="#fff" />
           </Pressable>
           
           <View style={styles.headerActions}>
-            <Pressable style={styles.iconButton} onPress={() => Alert.alert("Music", "Coming soon!")}>
-              <MaterialIcons name="music-note" size={24} color="#fff" />
-            </Pressable>
+            {mode === 'status' && (
+              <Pressable style={styles.iconButton} onPress={() => Alert.alert("Music", "Coming soon!")}>
+                <MaterialIcons name="music-note" size={24} color="#fff" />
+              </Pressable>
+            )}
             <Pressable style={[styles.iconButton, { opacity: currentType === 'video' ? 0.3 : 1 }]} onPress={handleCrop} disabled={isUploading || currentType === 'video'}>
               <MaterialIcons name="crop-rotate" size={24} color="#fff" />
             </Pressable>
@@ -341,7 +358,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
               </Pressable>
             )}
           </View>
-        </View>
+        </Animated.View>
 
         {/* Media Preview Area */}
         <View style={styles.mediaContainer}>
@@ -349,7 +366,9 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             <PanGestureHandler onGestureEvent={onGestureEvent} onHandlerStateChange={onHandlerStateChange} enabled={isDrawingMode}>
               <Animated.View style={StyleSheet.absoluteFill}>
                 <View ref={viewShotRef as any} collapsable={false} style={styles.viewShotCanvas}>
-                  <Image source={{ uri: currentUri }} style={styles.mediaImage} contentFit="contain" />
+                  <Animated.View entering={ZoomIn.duration(350).springify().damping(16)} style={styles.mediaImageWrapper}>
+                    <Image source={{ uri: currentUri }} style={styles.mediaImage} contentFit="contain" />
+                  </Animated.View>
                   
                   {/* Drawing & Text Canvas Overlays */}
                   {(paths.length > 0 || currentPath || textOverlays.length > 0) && (
@@ -392,7 +411,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             </PanGestureHandler>
           )}
           {currentType === 'video' && (
-            <View style={styles.videoWrapper}>
+            <Animated.View entering={ZoomIn.duration(350).springify().damping(16)} style={styles.videoWrapper}>
               <Video
                 ref={videoRef}
                 source={{ uri: currentUri }}
@@ -401,7 +420,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                 useNativeControls={true}
                 isLooping={false}
               />
-            </View>
+            </Animated.View>
           )}
           {currentType === 'audio' && (
             <View style={styles.audioPreview}>
@@ -445,12 +464,13 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
         </View>
 
         {/* Bottom Input Area */}
-        <View style={styles.bottomContainer}>
+        <Animated.View entering={SlideInDown.duration(300).springify().damping(18)} exiting={SlideOutDown.duration(200)} style={styles.bottomContainer}>
           <View style={styles.inputActionRow}>
+            <Pressable style={styles.galleryButton} onPress={handlePickGallery} disabled={isUploading}>
+              <MaterialIcons name="image" size={24} color="#fff" />
+            </Pressable>
+            
             <View style={styles.inputWrapper}>
-              <Pressable style={styles.captionIcon} onPress={handlePickGallery} disabled={isUploading}>
-                <MaterialIcons name="add-photo-alternate" size={24} color="#fff" />
-              </Pressable>
               <TextInput
                 style={styles.captionInput}
                 placeholder="Add a caption..."
@@ -475,17 +495,18 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
               )}
             </Pressable>
           </View>
-        </View>
+        </Animated.View>
       </KeyboardAvoidingView>
 
       {/* Crop Image Modal */}
-      <CropImageModal
-        visible={showCropModal}
-        imageUri={currentUri}
-        onClose={handleCropClose}
-        onCropComplete={handleCropComplete}
-      />
-    </Animated.View>
+        <CropImageModal
+          visible={showCropModal}
+          imageUri={currentUri}
+          onClose={handleCropClose}
+          onCropComplete={handleCropComplete}
+        />
+      </Animated.View>
+    </View>
   );
 };
 
@@ -549,9 +570,15 @@ const styles = StyleSheet.create({
   },
   mediaContainer: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
     backgroundColor: '#000',
+    padding: 12,
+  },
+  mediaImageWrapper: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
   },
   mediaImage: {
     width: '100%',
@@ -562,6 +589,8 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
     backgroundColor: '#000',
+    borderRadius: 24,
+    overflow: 'hidden',
   },
   canvasTextContainer: {
     position: 'absolute',
@@ -582,6 +611,8 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
     backgroundColor: '#000',
+    borderRadius: 24,
+    overflow: 'hidden',
   },
   audioPreview: {
     alignItems: 'center',
@@ -635,7 +666,18 @@ const styles = StyleSheet.create({
     minHeight: 56,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.15)',
-    marginRight: 14,
+    marginRight: 8,
+  },
+  galleryButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
   },
   captionIcon: {
     padding: 2,

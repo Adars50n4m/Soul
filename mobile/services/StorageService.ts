@@ -39,6 +39,13 @@ const isNetworkLikeError = (error: any): boolean => {
         || message.includes('Aborted');
 };
 
+const isMissingUploadRouteError = (error: any): boolean => {
+    const message = typeof error?.message === 'string' ? error.message : '';
+    return message.includes('status 404')
+        || message.includes('status 405')
+        || message.includes('Not found');
+};
+
 const inFlightUploads = new Map<string, Promise<string | null>>();
 
 export const storageService = {
@@ -185,7 +192,16 @@ export const storageService = {
             try {
                 if (!R2_CONFIG.USE_R2) {
                     console.log(`[StorageService] Using server proxy upload for ${bucket}/${folder}`);
-                    return await this.uploadViaServerProxy(localUri, bucket, folder, contentType, onProgress);
+                    try {
+                        return await this.uploadViaServerProxy(localUri, bucket, folder, contentType, onProgress);
+                    } catch (proxyError: any) {
+                        if (!R2_CONFIG.WORKER_URL || !isMissingUploadRouteError(proxyError)) {
+                            throw proxyError;
+                        }
+
+                        console.warn('[StorageService] Server upload route unavailable, falling back to R2 worker:', proxyError.message);
+                        return await r2StorageService.uploadImage(localUri, bucket, folder, onProgress, contentType);
+                    }
                 }
 
                 console.log(`[StorageService] Uploading to R2: ${bucket}/${folder}`);

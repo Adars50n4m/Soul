@@ -85,8 +85,8 @@ export default function AddStatusScreen() {
         <View style={styles.container}>
             <StatusBar hidden />
 
-            {/* Preview */}
-            <View style={StyleSheet.absoluteFill}>
+            {/* Preview Container with Padding to show rounded edges */}
+            <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000', padding: 8, paddingBottom: 100 }]}>
                 {media.type === 'video' ? (
                     <Video 
                         source={{ uri: media.uri }}
@@ -107,6 +107,9 @@ export default function AddStatusScreen() {
                         <Ionicons name="close" size={28} color="white" />
                     </Pressable>
                     <View style={styles.topTools}>
+                        <Pressable style={styles.iconButton} onPress={() => Alert.alert("Music", "Coming soon!")}>
+                            <MaterialIcons name="music-note" size={24} color="white" />
+                        </Pressable>
                         {media.type === 'image' && (
                             <Pressable style={styles.iconButton} onPress={() => setIsCropModalVisible(true)}>
                                 <MaterialIcons name="crop" size={24} color="white" />
@@ -130,6 +133,13 @@ export default function AddStatusScreen() {
                     entering={SlideInDown.springify()} 
                     style={styles.inputRow}
                 >
+                    <Pressable 
+                        onPress={handlePickMedia}
+                        style={styles.galleryButton}
+                    >
+                        <MaterialIcons name="image" size={24} color="white" />
+                    </Pressable>
+
                     <View style={styles.inputWrapper}>
                         <TextInput
                             style={styles.captionInput}
@@ -169,15 +179,23 @@ export default function AddStatusScreen() {
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#000' },
     blackCenter: { flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' },
-    fullScreen: { width: '100%', height: '100%' },
+    fullScreen: { width: '100%', height: '100%', borderRadius: 24, overflow: 'hidden' },
     topGradient: { position: 'absolute', top: 0, left: 0, right: 0, height: 120 },
     topBar: { flexDirection: 'row', justifyContent: 'space-between', paddingTop: 50, paddingHorizontal: 20 },
     topTools: { flexDirection: 'row', gap: 15 },
     iconButton: { padding: 8, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 20 },
     bottomContainer: { position: 'absolute', bottom: 0, width: '100%' },
     bottomGradient: { position: 'absolute', bottom: 0, width: '100%', height: 200 },
-    inputRow: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 20, paddingBottom: 40, gap: 12 },
+    inputRow: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 20, paddingBottom: 40, gap: 8 },
     inputWrapper: { flex: 1, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 25, minHeight: 50, paddingHorizontal: 20, justifyContent: 'center' },
     captionInput: { color: 'white', fontSize: 16, paddingVertical: 10 },
+    galleryButton: {
+        width: 48,
+        height: 48,
+        borderRadius: 24,
+        backgroundColor: 'rgba(255,255,255,0.15)',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
     sendButton: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center' }
 });

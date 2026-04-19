@@ -420,16 +420,6 @@ const AnimatedMoreMenu = ({ router, isSearching }: { router: any, isSearching: b
 
               <Pressable 
                 style={styles.moreMenuItemMorph}
-                onPress={() => { setExpanded(false); router.push('/search'); }}
-              >
-                <MaterialIcons name="search" size={20} color="#fff" style={styles.moreMenuIconMorph} />
-                <Text style={styles.moreMenuTextMorph}>Search</Text>
-              </Pressable>
-
-              <View style={styles.moreMenuDividerMorph} />
-
-              <Pressable 
-                style={styles.moreMenuItemMorph}
                 onPress={() => { setExpanded(false); /* Global Starred yet to be implemented */ }}
               >
                 <MaterialIcons name="star-outline" size={20} color="#fff" style={styles.moreMenuIconMorph} />
