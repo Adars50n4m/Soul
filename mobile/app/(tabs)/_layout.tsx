@@ -1,7 +1,6 @@
 import React, { useEffect } from 'react';
-import { Tabs } from 'expo-router';
+import { Tabs, usePathname, useRouter } from 'expo-router';
 import { View, Pressable, StyleSheet, useWindowDimensions, Platform } from 'react-native';
-import Svg, { Defs, RadialGradient, Stop, Ellipse } from 'react-native-svg';
 import GlassView from '../../components/ui/GlassView';
 import { Ionicons } from '@expo/vector-icons';
 import { hapticService } from '../../services/HapticService';
@@ -38,7 +37,7 @@ const TabIcon = ({ name, focused, size = 26 }: { name: string; focused: boolean;
     } else {
       scale.value = withSpring(1, { damping: 15 });
     }
-  }, [focused]);
+  }, [focused, scale]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
@@ -62,11 +61,21 @@ const TabIcon = ({ name, focused, size = 26 }: { name: string; focused: boolean;
 const TabBar = ({ state, descriptors, navigation }: any) => {
   const { width: SCREEN_WIDTH } = useWindowDimensions();
   const TAB_BAR_WIDTH = SCREEN_WIDTH - 32;
+  const SEARCH_BUTTON_SIZE = 56;
+  const ACTIONS_GAP = 10;
   const { activeTheme } = useApp();
+  const router = useRouter();
+  const pathname = usePathname();
 
   const numTabs = state?.routes?.length || 3;
-  const tabWidth = (TAB_BAR_WIDTH - 24) / numTabs;
+  const navBarWidth = TAB_BAR_WIDTH - SEARCH_BUTTON_SIZE - ACTIONS_GAP;
+  const tabWidth = (navBarWidth - 24) / numTabs;
   const currentIndex = state?.index ?? 0;
+  const searchFocused = pathname === '/search';
+
+  const focusedTabName = state?.routes?.[currentIndex]?.name;
+  const searchContext: 'chats' | 'calls' | 'settings' =
+    focusedTabName === 'calls' ? 'calls' : focusedTabName === 'settings' ? 'settings' : 'chats';
 
   const isFirstIndicatorSync = React.useRef(true);
   const translateX = useSharedValue(currentIndex * tabWidth);
@@ -89,7 +98,7 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
       stiffness: 120,
       mass: 0.8,
     });
-  }, [currentIndex, tabWidth, translateX]);
+  }, [currentIndex, glowProgress, tabWidth, translateX]);
 
   useEffect(() => {
     if (!hasRenderedTabBarOnce) {
@@ -127,6 +136,19 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
     opacity: tabBarOpacity.value,
   }));
 
+  const searchScale = useSharedValue(1);
+
+  useEffect(() => {
+    if (searchFocused) {
+      searchScale.value = withSequence(
+        withSpring(1.16, { damping: 10, stiffness: 220 }),
+        withSpring(1.08, { damping: 12, stiffness: 160 })
+      );
+    } else {
+      searchScale.value = withSpring(1, { damping: 15, stiffness: 180 });
+    }
+  }, [searchFocused, searchScale]);
+
   const focusedRoute = state?.routes?.[state.index];
   const focusedOptions = focusedRoute ? descriptors?.[focusedRoute.key]?.options : undefined;
   const focusedRouteId = focusedRoute?.name || 'index';
@@ -146,6 +168,12 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
     transform: [{ translateY: translateY.value }],
   }));
 
+  const searchFabStyle = useAnimatedStyle(() => ({
+    width: '100%',
+    height: '100%',
+    transform: [{ scale: searchScale.value }],
+  }));
+
   if (!state || !state.routes || state.routes.length === 0 || !descriptors || !focusedRoute) {
     return null;
   }
@@ -156,57 +184,76 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
 
   return (
     <Animated.View style={[styles.tabBarContainer, tabBarFadeStyle, dropDownStyle]}>
-      <View style={styles.tabBarGlassContainer}>
-        <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFillObject} />
+      <View style={styles.bottomActionsRow}>
+        <View style={[styles.tabBarGlassContainer, { width: navBarWidth }]}>
+          <GlassView intensity={35} tint="dark" style={StyleSheet.absoluteFillObject} />
 
-        {/* Standardized Glow blob — Unified shadow-based bloom for both platforms */}
-        <Animated.View
-          style={[
-            styles.glowBlob,
-            { 
-              width: tabWidth * 1.5, 
-              borderRadius: 30, 
-              shadowColor: activeTheme.primary,
-              // iOS handles shadows differently, we boost them here to match Android's elevation intensity
-              shadowOpacity: Platform.OS === 'ios' ? 0.9 : 1,
-              shadowRadius: Platform.OS === 'ios' ? 25 : 30,
-            },
-            glowStyle,
-          ]}
-          pointerEvents="none"
-        />
+          {/* Standardized Glow blob — Unified shadow-based bloom for both platforms */}
+          <Animated.View
+            style={[
+              styles.glowBlob,
+              { 
+                width: tabWidth * 1.5, 
+                borderRadius: 30, 
+                shadowColor: activeTheme.primary,
+                shadowOpacity: Platform.OS === 'ios' ? 0.9 : 1,
+                shadowRadius: Platform.OS === 'ios' ? 25 : 30,
+              },
+              glowStyle,
+            ]}
+            pointerEvents="none"
+          />
 
-        {/* Indicator pill */}
-        <Animated.View style={[styles.indicatorPill, { width: tabWidth }, indicatorStyle]} />
+          {/* Indicator pill */}
+          <Animated.View style={[styles.indicatorPill, { width: tabWidth }, indicatorStyle]} />
 
-        <View style={styles.tabBarInner}>
-          {state.routes.map((route: any, index: number) => {
-            const isFocused = state.index === index;
+          <View style={styles.tabBarInner}>
+            {state.routes.map((route: any, index: number) => {
+              const isFocused = state.index === index;
 
-            const onPress = () => {
-              hapticService.impact(Haptics.ImpactFeedbackStyle.Light);
-              const event = navigation.emit({
-                type: 'tabPress',
-                target: route.key,
-                canPreventDefault: true,
-              });
-              if (!isFocused && !event.defaultPrevented) {
-                navigation.navigate(route.name, route.params);
-              }
-            };
+              const onPress = () => {
+                hapticService.impact(Haptics.ImpactFeedbackStyle.Light);
+                const event = navigation.emit({
+                  type: 'tabPress',
+                  target: route.key,
+                  canPreventDefault: true,
+                });
+                if (!isFocused && !event.defaultPrevented) {
+                  navigation.navigate(route.name, route.params);
+                }
+              };
 
-            let iconName: string = 'home';
-            if (route.name === 'index') iconName = 'chatbubble-ellipses';
-            if (route.name === 'calls') iconName = 'call';
-            if (route.name === 'settings') iconName = 'settings';
+              let iconName: string = 'home';
+              if (route.name === 'index') iconName = 'chatbubble-ellipses';
+              if (route.name === 'calls') iconName = 'call';
+              if (route.name === 'settings') iconName = 'settings';
 
-            return (
-              <Pressable key={route.key} onPress={onPress} style={styles.tabButton}>
-                <TabIcon name={iconName} focused={isFocused} />
-              </Pressable>
-            );
-          })}
+              return (
+                <Pressable key={route.key} onPress={onPress} style={styles.tabButton}>
+                  <TabIcon name={iconName} focused={isFocused} />
+                </Pressable>
+              );
+            })}
+          </View>
         </View>
+
+        <Pressable
+          onPress={() => {
+            hapticService.impact(Haptics.ImpactFeedbackStyle.Light);
+            router.push(`/search?context=${searchContext}`);
+          }}
+          style={[styles.searchFabPressable, { width: SEARCH_BUTTON_SIZE, height: SEARCH_BUTTON_SIZE, borderRadius: SEARCH_BUTTON_SIZE / 2 }]}
+        >
+          <Animated.View style={searchFabStyle}>
+          <View style={[
+            styles.searchFabShell,
+            searchFocused && styles.searchFabShellActive,
+          ]}>
+            <GlassView intensity={40} tint="dark" style={StyleSheet.absoluteFillObject} />
+            <Ionicons name="search" size={18} color={searchFocused ? activeTheme.primary : '#8E8E93'} />
+          </View>
+          </Animated.View>
+        </Pressable>
       </View>
     </Animated.View>
   );
@@ -238,8 +285,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 16,
   },
-  tabBarGlassContainer: {
+  bottomActionsRow: {
     width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  tabBarGlassContainer: {
     borderRadius: 40,
     overflow: 'hidden',
     borderWidth: Platform.OS === 'android' ? 1 : 1.2,
@@ -276,5 +329,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     height: '100%',
+  },
+  searchFabPressable: {
+    overflow: 'hidden',
+  },
+  searchFabShell: {
+    flex: 1,
+    overflow: 'hidden',
+    borderRadius: 999,
+    borderWidth: Platform.OS === 'android' ? 1 : 1.2,
+    borderColor: Platform.OS === 'android' ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.22)',
+    backgroundColor: Platform.OS === 'android' ? '#0A0A0A' : 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchFabShellActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.07)',
   },
 });
