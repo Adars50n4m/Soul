@@ -117,21 +117,20 @@ const ArtworkView = ({
     const animStyle = useAnimatedStyle(() => ({ opacity: opacity.value }));
 
     return (
-        <Animated.View style={[styles.artworkWrapper, animStyle]}>
+        <Animated.View style={[styles.artworkWrapper, animStyle, showLyrics && styles.lyricsActiveWrapper]}>
             {showLyrics && lyrics.length > 0 ? (
-                <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 24, padding: 16 }]}>
+                <View style={styles.lyricsWideContainer}>
                     <ScrollView
                         ref={lyricsScrollRef}
                         showsVerticalScrollIndicator={false}
-                        contentContainerStyle={{ paddingVertical: 10 }}
+                        contentContainerStyle={{ paddingVertical: 20 }}
                     >
                         {lyrics.map((line: LyricLine, idx: number) => (
                             <Text
                                 key={idx}
                                 style={[
                                     styles.lyricLine,
-                                    { fontSize: 13 },
-                                    idx === currentLyricIndex && { color: '#fff', fontWeight: '800', fontSize: 15 }
+                                    idx === currentLyricIndex && styles.lyricLineActive
                                 ]}
                             >
                                 {line.text}
@@ -188,6 +187,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
     const slideY = useSharedValue(height);          // Sheet slide in/out
     const scrollY = useSharedValue(0);              // Scroll position for PIP transition
     const backdropOpacity = useSharedValue(0);      // Backdrop fade
+    const expandedBaseHeight = useSharedValue(395); // Dynamic height to prevent lyrics overlap
     const [keyboardVisible, setKeyboardVisible] = useState(false);
     const scrollViewRef = useRef<any>(null);
 
@@ -240,8 +240,8 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
 
     // ─── PIP interpolations (all on UI thread) ───────────────────────────────
     const headerOverlayStyle = useAnimatedStyle(() => {
-        // Collapse from full player height (395) to just the unified mini bar (86)
-        const h = interpolate(scrollY.value, [0, 200], [395, 86], Extrapolation.CLAMP);
+        // Collapse from current dynamic base height to just the unified mini bar (86)
+        const h = interpolate(scrollY.value, [0, 200], [expandedBaseHeight.value, 86], Extrapolation.CLAMP);
         const bg = interpolate(scrollY.value, [0, 150], [0, 0.98], Extrapolation.CLAMP);
         return {
             height: h,
@@ -309,6 +309,15 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
             setLyrics([]);
         }
     }, [musicState.currentSong?.id]);
+
+    // ─── Animate header height when lyrics toggle ────────────────────────────
+    useEffect(() => {
+        if (showLyrics) {
+            expandedBaseHeight.value = withSpring(480, { damping: 20, stiffness: 100 });
+        } else {
+            expandedBaseHeight.value = withSpring(395, { damping: 20, stiffness: 100 });
+        }
+    }, [showLyrics]);
 
     useEffect(() => {
         if (showLyrics && lyrics.length > 0 && currentLyricIndex >= 0) {
@@ -805,6 +814,16 @@ const styles = StyleSheet.create({
         position: 'relative',
         backgroundColor: 'transparent',
     },
+    lyricsActiveWrapper: {
+        width: '100%',
+        height: 280,
+        shadowOpacity: 0,
+        borderRadius: 0,
+    },
+    lyricsWideContainer: {
+        ...StyleSheet.absoluteFillObject,
+        paddingHorizontal: 10,
+    },
     artwork: {
         width: '100%',
         height: '100%',
@@ -849,11 +868,17 @@ const styles = StyleSheet.create({
         marginTop: -35,
     },
     lyricLine: {
-        color: 'rgba(255,255,255,0.4)',
-        fontSize: 11,
+        color: 'rgba(255,255,255,0.3)',
+        fontSize: 18,
+        fontWeight: '600',
         textAlign: 'center',
-        marginVertical: 4,
+        marginVertical: 8,
         paddingHorizontal: 20,
+    },
+    lyricLineActive: {
+        color: '#fff',
+        fontSize: 24,
+        fontWeight: '800',
     },
     progressBarContainer: {
         width: '100%',
