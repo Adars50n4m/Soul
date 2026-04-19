@@ -317,7 +317,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
     // ─── Animate header height when lyrics toggle ────────────────────────────
     useEffect(() => {
         if (showLyrics) {
-            expandedBaseHeight.value = withSpring(520, { damping: 25, stiffness: 120 });
+            expandedBaseHeight.value = withSpring(465, { damping: 25, stiffness: 120 });
         } else {
             expandedBaseHeight.value = withSpring(395, { damping: 25, stiffness: 120 });
         }
@@ -754,7 +754,7 @@ const styles = StyleSheet.create({
     fullPlayerContent: {
         alignItems: 'center',
         paddingHorizontal: 24,
-        paddingTop: 50,   // Compensates for headerOverlay now starting at top:0
+        paddingTop: 35,   // Shift everything up (was 50)
     },
     miniPlayerContent: {
         position: 'absolute',
@@ -809,7 +809,7 @@ const styles = StyleSheet.create({
     artworkWrapper: {
         width: 200,
         height: 200,
-        marginBottom: 20,
+        marginBottom: 12,  // Tighter vertical flow (was 20)
         borderRadius: 24,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 10 },
@@ -820,7 +820,7 @@ const styles = StyleSheet.create({
     },
     lyricsActiveWrapper: {
         width: '100%',
-        height: 280,
+        height: 270,       // Slightly shorter to keep layout compact
         shadowOpacity: 0,
         borderRadius: 0,
     },
@@ -851,7 +851,7 @@ const styles = StyleSheet.create({
     },
     trackInfo: {
         alignItems: 'center',
-        marginBottom: 16,
+        marginBottom: 12, // Tighter (was 16)
         width: '100%',
     },
     trackTitle: {
@@ -886,7 +886,7 @@ const styles = StyleSheet.create({
     },
     progressBarContainer: {
         width: '100%',
-        marginBottom: 24,
+        marginBottom: 18, // Tighter (was 24)
         justifyContent: 'center',
     },
     progressBarTouchArea: {
