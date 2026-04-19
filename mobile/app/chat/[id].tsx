@@ -2366,7 +2366,7 @@ const styles = StyleSheet.create({
     header: {
         flex: 1,
         backgroundColor: 'transparent',
-        paddingLeft: 16,
+        paddingLeft: 8,
         paddingRight: 16,
         flexDirection: 'row',
         alignItems: 'center',
@@ -2397,7 +2397,7 @@ const styles = StyleSheet.create({
     },
     headerInfo: {
         flex: 1,
-        marginLeft: 7,
+        marginLeft: 3,
         justifyContent: 'center',
     },
     contactName: {
