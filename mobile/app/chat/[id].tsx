@@ -1840,7 +1840,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                                 </View>
                             )}
 
-                            <View style={[styles.header, { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, height: '100%', paddingRight: 16 }]} pointerEvents="box-none">
+                            <View style={[styles.header, { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, height: '100%', paddingRight: 8 }]} pointerEvents="box-none">
                                 <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
                                     <Pressable collapsable={false} style={styles.avatarWrapper} onPress={openProfileWithMorph}>
                                         <SoulAvatar uri={contact?.avatar} size={46} isOnline={contact?.id ? getPresence(contact.id).isOnline : false} />
