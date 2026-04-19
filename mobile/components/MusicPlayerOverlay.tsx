@@ -275,6 +275,10 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
         opacity: backdropOpacity.value,
     }));
 
+    const spacerStyle = useAnimatedStyle(() => ({
+        height: expandedBaseHeight.value,
+    }));
+
     // ─── Playback polling ────────────────────────────────────────────────────
     useEffect(() => {
         let interval: any;
@@ -313,9 +317,9 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
     // ─── Animate header height when lyrics toggle ────────────────────────────
     useEffect(() => {
         if (showLyrics) {
-            expandedBaseHeight.value = withSpring(480, { damping: 20, stiffness: 100 });
+            expandedBaseHeight.value = withSpring(520, { damping: 25, stiffness: 120 });
         } else {
-            expandedBaseHeight.value = withSpring(395, { damping: 20, stiffness: 100 });
+            expandedBaseHeight.value = withSpring(395, { damping: 25, stiffness: 120 });
         }
     }, [showLyrics]);
 
@@ -439,8 +443,8 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                                 contentContainerStyle={[styles.scrollContent, { alignItems: 'stretch' }]}
                                 keyboardShouldPersistTaps="handled"
                             >
-                                {/* Spacer below player header */}
-                                <View style={{ height: 420 }} />
+                                {/* Spacer below player header — now dynamic to prevent overlap */}
+                                <Animated.View style={spacerStyle} />
 
                                 {/* Search */}
                                 <View style={[styles.searchContainer, keyboardVisible && { marginTop: 40 }]}>
