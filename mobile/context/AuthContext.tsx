@@ -375,9 +375,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const dbTimeout = new Promise<boolean>((resolve) => {
                     dbTimeoutId = setTimeout(() => {
                         dbTimeoutId = undefined;
-                        console.warn(`[AuthContext] Database initialization HUNG after 4s - continuing to UI`);
+                        console.warn(`[AuthContext] Database initialization HUNG after 2s - continuing to UI`);
                         resolve(false);
-                    }, 4000); // Shorter timeout for faster boot
+                    }, 2000); // Shorter timeout for faster boot
                 });
 
                 await Promise.race([dbPromise, dbTimeout]);
@@ -406,9 +406,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const sessionTimeout = new Promise<null>((resolve) => {
                     sessionTimeoutId = setTimeout(() => {
                         sessionTimeoutId = undefined;
-                        console.log(`[AuthContext] Session check TIMED OUT after 3s, continuing to UI...`);
+                        console.log(`[AuthContext] Session check TIMED OUT after 2s, continuing to UI...`);
                         resolve(null);
-                    }, 3000); // Reduced from 10s for snappier startup
+                    }, 2000); // Reduced from 3s for snappier startup
                 });
 
                 const sessionResult = await Promise.race([sessionPromise, sessionTimeout]);

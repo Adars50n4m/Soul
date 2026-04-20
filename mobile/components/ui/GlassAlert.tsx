@@ -7,6 +7,7 @@ import Animated, {
   withTiming, 
   FadeIn, 
   FadeOut,
+  runOnJS,
 } from 'react-native-reanimated';
 import GlassView from './GlassView';
 import { useApp } from '../../context/AppContext';
@@ -31,13 +32,18 @@ const GlassAlert = ({ visible, title, message, buttons = [], onClose }: GlassAle
   const scale = useSharedValue(0.9);
   const opacity = useSharedValue(0);
 
+  const [isAlertActive, setIsAlertActive] = React.useState(visible);
+
   useEffect(() => {
     if (visible) {
+      setIsAlertActive(true);
       scale.value = withSpring(1, { damping: 15, stiffness: 150 });
       opacity.value = withTiming(1, { duration: 250 });
     } else {
       scale.value = withTiming(0.9, { duration: 200 });
-      opacity.value = withTiming(0, { duration: 200 });
+      opacity.value = withTiming(0, { duration: 200 }, (finished) => {
+        if (finished) runOnJS(setIsAlertActive)(false);
+      });
     }
   }, [visible]);
 
@@ -46,7 +52,7 @@ const GlassAlert = ({ visible, title, message, buttons = [], onClose }: GlassAle
     transform: [{ scale: scale.value }],
   }));
 
-  if (!visible && opacity.value === 0) return null;
+  if (!isAlertActive) return null;
 
   const handleButtonPress = (btn: AlertButton) => {
     onClose();

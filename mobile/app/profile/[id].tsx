@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
-    View, Text, Image, Pressable, StyleSheet, StatusBar, TextInput,
+    View, Text, Pressable, StyleSheet, StatusBar, TextInput,
     ScrollView, useWindowDimensions, Alert, Modal, Share, FlatList, Platform, Dimensions, BackHandler
 } from 'react-native';
+import { Image } from 'expo-image';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -74,7 +75,8 @@ export default function ProfileScreen() {
     const { width, height } = useWindowDimensions();
 
     const params = useLocalSearchParams<{ id: string; avatarX?: string; avatarY?: string; avatarW?: string; avatarH?: string; avatarTransition?: string }>();
-    const id = normalizeId(Array.isArray(params.id) ? params.id[0] : params.id);
+    const rawId = Array.isArray(params.id) ? params.id[0] : params.id;
+    const id = rawId ? normalizeId(rawId) : null;
     const navigation = useNavigation();
     const { currentUser, otherUser, contacts, messages, activeTheme, clearChatMessages, connectivity, fetchOtherUserProfile } = useApp();
     const { startCall } = useCall();
@@ -95,6 +97,8 @@ export default function ProfileScreen() {
         if (id && !isOwnProfile) {
             console.log(`[ProfileScreen] Fetching profile for: ${id}`);
             fetchOtherUserProfile(id);
+        } else if (!id && !isOwnProfile) {
+            console.warn('[ProfileScreen] Mount without valid ID');
         }
     }, [id, isOwnProfile, fetchOtherUserProfile]);
 
@@ -113,9 +117,10 @@ export default function ProfileScreen() {
         height: Number(Array.isArray(params.avatarH) ? params.avatarH[0] : params.avatarH),
     }), [params.avatarH, params.avatarW, params.avatarX, params.avatarY]);
     const avatarTransitionParam = Array.isArray(params.avatarTransition) ? params.avatarTransition[0] : params.avatarTransition;
-    const profileAvatarTransitionTag = useMemo(() => (
-        id ? getProfileAvatarTransitionTag(id) : undefined
-    ), [id]);
+    const profileAvatarTransitionTag = useMemo(() => {
+        const transitionId = normalizeId(id as string);
+        return transitionId ? getProfileAvatarTransitionTag(transitionId) : undefined;
+    }, [id]);
     const useSharedAvatarTransition = SUPPORT_PROFILE_AVATAR_SHARED_TRANSITION && avatarTransitionParam === '1' && !!profileAvatarTransitionTag;
     const hasAvatarMorph = !useSharedAvatarTransition && Number.isFinite(avatarOrigin.x)
         && Number.isFinite(avatarOrigin.y)
@@ -182,7 +187,10 @@ export default function ProfileScreen() {
             top: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.y, 0], Extrapolation.CLAMP),
             width: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.width, width], Extrapolation.CLAMP),
             height: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.height, 540], Extrapolation.CLAMP),
-            borderRadius: interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.width / 2, 0], Extrapolation.CLAMP),
+            // Only manually interpolate radius if we are NOT using the native shared transition
+            borderRadius: useSharedAvatarTransition 
+                ? 0 
+                : interpolate(heroMorphProgress.value, [0, 1], [avatarOrigin.width / 2, 0], Extrapolation.CLAMP),
         };
     });
 
@@ -561,7 +569,8 @@ export default function ProfileScreen() {
                             <Image
                                 source={{ uri: heroAvatarUri }}
                                 style={[styles.heroImage, { backgroundColor: '#111' }]}
-                                resizeMode="cover"
+                                contentFit="cover"
+                                transition={0} // Fast handover for shared transition
                             />
                         ) : (
                             <View style={styles.heroFallbackAvatar}>
@@ -1003,6 +1012,7 @@ const styles = StyleSheet.create({
         height: 540,
         overflow: 'hidden',
         backgroundColor: 'transparent',
+        borderRadius: 0, // Base for SharedTransition
     },
     heroImage: {
         width: '100%',

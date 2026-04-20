@@ -207,30 +207,34 @@ const SiriWaveform = ({ level, active, themeColor }: { level: number; active: bo
         );
     }, [active]);
 
-    const clampedLevel = Math.max(0, Math.min(1, level));
-    const amplitude = 4 + clampedLevel * 14;
+    const amplitude = useDerivedValue(() => {
+        const clampedLevel = Math.max(0, Math.min(1, level));
+        return 4 + clampedLevel * 14;
+    }, [level]);
 
-    const buildWavePath = (p: number, phaseOffset: number, ampFactor: number, freq: number) => {
+    const buildWavePath = (phaseOffset: number, ampFactor: number, freq: number) => {
         'worklet';
+        const p = phase.value;
+        const amp = amplitude.value;
         const step = 6;
         let path = `M 0 ${centerY}`;
         for (let x = 0; x <= width; x += step) {
             const theta = (x / width) * Math.PI * 2 * freq + p + phaseOffset;
             const theta2 = (x / width) * Math.PI * 2 * (freq * 1.7) + p * 0.7 + phaseOffset;
-            const y = centerY + Math.sin(theta) * amplitude * ampFactor + Math.sin(theta2) * amplitude * 0.2;
+            const y = centerY + Math.sin(theta) * amp * ampFactor + Math.sin(theta2) * amp * 0.2;
             path += ` L ${x} ${y}`;
         }
         return path;
     };
 
     const animatedProps1 = useAnimatedProps(() => ({
-        d: buildWavePath(phase.value, 2.1, 0.48, 0.85)
+        d: buildWavePath(2.1, 0.48, 0.85)
     }));
     const animatedProps2 = useAnimatedProps(() => ({
-        d: buildWavePath(phase.value, 1.2, 0.72, 1.1)
+        d: buildWavePath(1.2, 0.72, 1.1)
     }));
     const animatedProps3 = useAnimatedProps(() => ({
-        d: buildWavePath(phase.value, 0, 1, 1.4)
+        d: buildWavePath(0, 1, 1.4)
     }));
 
     return (
@@ -663,7 +667,6 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
         // Fallback for legacy ID navigation
         const legacyMappedUuid = id ? (USERS[id]?.id) : null;
         if (legacyMappedUuid) {
-            console.log(`[Chat] Resolving legacy ID ${id} to UUID ${legacyMappedUuid}`);
             return contacts.find(c => c.id === legacyMappedUuid);
         }
         return undefined;
@@ -674,43 +677,62 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
         return transitionId ? getProfileAvatarTransitionTag(transitionId) : undefined;
     }, [contact?.id, id]);
     const isGroup = contact?.isGroup || false;
+    const targetProfileId = String(contact?.id || id || '');
 
     const openProfileWithMorph = useCallback(() => {
-        const pushProfile = (origin?: { x: number; y: number; width: number; height: number }) => {
-            router.push({
-                pathname: (isGroup ? '/group-info/[id]' : '/profile/[id]') as any,
-                params: !isGroup && ENABLE_PROFILE_AVATAR_SHARED_TRANSITION && profileAvatarTransitionTag
-                    ? {
-                        id: String(stringId),
-                        avatarTransition: '1',
-                    }
-                    : origin
-                        ? {
-                            id: String(stringId),
-                            avatarX: Math.round(origin.x).toString(),
-                            avatarY: Math.round(origin.y).toString(),
-                            avatarW: Math.round(origin.width).toString(),
-                            avatarH: Math.round(origin.height).toString(),
-                        }
-                        : {
-                            id: String(stringId),
-                        },
-            });
-        };
+        try {
+            console.log('[ChatScreen] Opening profile for:', targetProfileId);
+            const pushProfile = (origin?: { x: number; y: number; width: number; height: number }) => {
+                try {
+                    router.push({
+                        pathname: (isGroup ? '/group-info/[id]' : '/profile/[id]') as any,
+                        params: !isGroup && ENABLE_PROFILE_AVATAR_SHARED_TRANSITION && profileAvatarTransitionTag
+                            ? {
+                                id: String(targetProfileId),
+                                avatarTransition: '1',
+                            }
+                            : origin
+                                ? {
+                                    id: String(targetProfileId),
+                                    avatarX: Math.round(origin.x).toString(),
+                                    avatarY: Math.round(origin.y).toString(),
+                                    avatarW: Math.round(origin.width).toString(),
+                                    avatarH: Math.round(origin.height).toString(),
+                                }
+                                : {
+                                    id: String(targetProfileId),
+                                },
+                    });
+                } catch (pushErr) {
+                    console.error('[ChatScreen] Navigation push failed:', pushErr);
+                    // Fallback to simple push if complex params fail
+                    router.push(`/profile/${targetProfileId}` as any);
+                }
+            };
 
-        if (!isGroup && ENABLE_PROFILE_AVATAR_SHARED_TRANSITION && profileAvatarTransitionTag) {
-            pushProfile();
-            return;
-        }
-
-        profileAvatarRef.current?.measure((x, y, width, height, pageX, pageY) => {
-            if (!width || !height) {
+            if (!isGroup && ENABLE_PROFILE_AVATAR_SHARED_TRANSITION && profileAvatarTransitionTag) {
                 pushProfile();
                 return;
             }
-            pushProfile({ x: pageX, y: pageY, width, height });
-        });
-    }, [isGroup, profileAvatarTransitionTag, router, stringId]);
+
+            if (!profileAvatarRef.current) {
+                console.warn('[ChatScreen] profileAvatarRef is null, jumping to profile');
+                pushProfile();
+                return;
+            }
+
+            profileAvatarRef.current.measure((x, y, width, height, pageX, pageY) => {
+                if (!width || !height || isNaN(pageX) || isNaN(pageY)) {
+                    pushProfile();
+                    return;
+                }
+                pushProfile({ x: pageX, y: pageY, width, height });
+            });
+        } catch (err) {
+            console.error('[ChatScreen] openProfileWithMorph failed:', err);
+            router.push(`/profile/${targetProfileId}` as any);
+        }
+    }, [isGroup, profileAvatarTransitionTag, router, targetProfileId]);
 
     // FIX: Use contact.id (UUID) for message lookup, not the raw id param
     const messageKey = contact?.id || id || '';
@@ -1069,7 +1091,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                 [CANCEL_SWIPE_THRESHOLD - 20, CANCEL_SWIPE_THRESHOLD],
                 ['rgba(255,255,255,0.08)', 'rgba(239, 68, 68, 0.2)']
             )
-        };
+        } as any;
     });
 
     const recordingMicAnimatedStyle = useAnimatedStyle(() => {
@@ -1085,7 +1107,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                 [0, 0.8, 1],
                 [themeAccent, themeAccentSoft, '#ef4444']
             ),
-        };
+        } as any;
     });
 
     const recordingWaveAnimatedStyle = useAnimatedStyle(() => {
@@ -1824,7 +1846,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                                     top: HEADER_PILL_TOP,
                                     left: MAIN_PILL_LEFT,
                                     right: 24,
-                                    backgroundColor: 'rgba(15, 15, 20, 0.4)',
+                                    backgroundColor: '#0a0a0c', // Solid background for shadow efficiency
                                     borderRadius: HEADER_PILL_RADIUS,
                                     zIndex: 10,
                                     borderWidth: 1,
@@ -1848,13 +1870,11 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                                 <View 
                                     style={{ 
                                         position: 'absolute', 
-                                        bottom: 5, 
-                                        left: 16, 
-                                        right: 16,
-                                        height: 2.5, 
-                                        backgroundColor: 'rgba(255,255,255,0.1)',
-                                        borderRadius: 2,
-                                        overflow: 'hidden',
+                                        bottom: 0, 
+                                        left: 0, 
+                                        right: 0,
+                                        height: 2, 
+                                        backgroundColor: 'rgba(255,255,255,0.05)',
                                         zIndex: 15
                                     }} 
                                 >
@@ -1877,7 +1897,15 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                             <View style={[styles.header, { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, height: '100%', paddingRight: 8 }]} pointerEvents="box-none">
                                 <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
                                     <Pressable collapsable={false} style={styles.avatarWrapper} onPress={openProfileWithMorph}>
-                                        <SoulAvatar uri={contact?.avatar} size={46} isOnline={contact?.id ? getPresence(contact.id).isOnline : false} />
+                                        <SoulAvatar 
+                                            ref={profileAvatarRef}
+                                            uri={contact?.avatar} 
+                                            size={46} 
+                                            isOnline={contact?.id ? getPresence(contact.id).isOnline : false} 
+                                            sharedTransitionTag={profileAvatarTransitionTag}
+                                            sharedTransition={PROFILE_AVATAR_SHARED_TRANSITION}
+                                            allowExperimentalSharedTransition={true}
+                                        />
                                     </Pressable>
                                     <View style={styles.headerInfo}>
                                         <Text style={styles.contactName}>{contact?.name || '...'}</Text>
@@ -1925,6 +1953,21 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             {/* Content Wrapper */}
             <Animated.View style={[StyleSheet.absoluteFill, { zIndex: 1, backgroundColor: 'transparent' }, backgroundMorphAnimatedStyle as any]}>
                 <View style={StyleSheet.absoluteFill}>
+                    {/* In overlay mode, let taps on the transparent upper region dismiss the keyboard
+                        (the call's remote video sits behind this and stays visible through the transparency). */}
+                    {isOverlay && (
+                        <Pressable
+                            onPress={Keyboard.dismiss}
+                            style={{
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                right: 0,
+                                height: SCREEN_HEIGHT * 0.60,
+                                zIndex: 0,
+                            }}
+                        />
+                    )}
                     <View style={{ flex: 1 }}>
                         <Animated.View style={[{ flex: 1 }, isOverlay && { paddingTop: SCREEN_HEIGHT * 0.60 }, messagesContainerAnimatedStyle]}>
                             {isReady && (
@@ -1953,6 +1996,8 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                                                 ]}
                                                 showsVerticalScrollIndicator={false}
                                                 scrollEventThrottle={16}
+                                                keyboardShouldPersistTaps="handled"
+                                                keyboardDismissMode="on-drag"
                                                 ListEmptyComponent={
                                                     <View style={styles.emptyChat}>
                                                         <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
@@ -2299,7 +2344,9 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             <EnhancedMediaViewer
                 visible={!!mediaViewer}
                 isStatus={false}
-                media={mediaViewer ? mediaViewer.items[mediaViewer.index] as any : null}
+                media={mediaViewer && mediaViewer.items && typeof mediaViewer.index === 'number' 
+                    ? mediaViewer.items[mediaViewer.index] as any 
+                    : null}
                 sourceLayout={selectedMediaLayout}
                 userInfo={(() => {
                     if (!mediaViewer) return undefined;

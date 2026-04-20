@@ -135,24 +135,37 @@ export const storageService = {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-        const response = await fetch(`${SERVER_URL}/api/media/upload`, {
+        const targetUrl = `${SERVER_URL.replace(/\/$/, '')}/api/media/upload`;
+        console.log(`[StorageService] Sending POST request to: ${targetUrl}`);
+
+        const response = await fetch(targetUrl, {
             method: 'POST',
             body: formData,
             signal: controller.signal,
+        }).catch(err => {
+            const domain = targetUrl.split('/')[2] || 'unknown';
+            console.error(`[StorageService] Fetch to ${targetUrl} failed:`, err);
+            throw new Error(`Conn error: ${err.message} [on ${domain}]`);
         });
         clearTimeout(timeoutId);
 
         onProgress?.(0.9);
 
         if (!response.ok) {
-            throw new Error(`Upload proxy failed with status ${response.status}`);
+            const errText = await response.text().catch(() => 'No body');
+            const domain = targetUrl.split('/')[2] || 'unknown';
+            console.warn(`[StorageService] Upload proxy failed (${response.status}):`, errText);
+            throw new Error(`Srv Error ${response.status}: ${errText.substring(0, 30)} [on ${domain}]`);
         }
 
         const payload: Partial<UploadResponse> = await response.json().catch(() => ({}));
 
         if (payload.success) {
             const key = payload.key || payload.filename;
-            if (key) return key;
+            if (key) {
+                console.log(`[StorageService] Upload confirmed with key: ${key}`);
+                return key;
+            }
         }
 
         throw new Error(payload.error || `Upload proxy failed with status ${response.status}`);
@@ -190,7 +203,11 @@ export const storageService = {
 
         const uploadPromise = (async () => {
             try {
-                if (!R2_CONFIG.USE_R2) {
+                // Heuristic: If SERVER_URL is identical to the proxy worker, 
+                // it's likely a misconfiguration for API uploads.
+                const SERVER_IS_PROXY = SERVER_URL.includes('workers.dev');
+                
+                if (!R2_CONFIG.USE_R2 && !SERVER_IS_PROXY) {
                     console.log(`[StorageService] Using server proxy upload for ${bucket}/${folder}`);
                     try {
                         return await this.uploadViaServerProxy(localUri, bucket, folder, contentType, onProgress);
@@ -204,7 +221,9 @@ export const storageService = {
                     }
                 }
 
-                console.log(`[StorageService] Uploading to R2: ${bucket}/${folder}`);
+                // If USE_R2 is true OR the server is misconfigured to point to the proxy worker,
+                // we try R2 first, with a fallback to the proxy just in case.
+                console.log(`[StorageService] Attempting direct R2 upload: ${bucket}/${folder}`);
                 try {
                     const r2Key = await r2StorageService.uploadImage(localUri, bucket, folder, onProgress, contentType);
                     if (r2Key) {
@@ -217,7 +236,7 @@ export const storageService = {
                         throw new Error('Upload requires an active session. Please log in again and retry.');
                     }
 
-                    if (!isNetworkLikeError(r2Error)) {
+                    if (!isNetworkLikeError(r2Error) && !SERVER_IS_PROXY) {
                         throw r2Error;
                     }
 

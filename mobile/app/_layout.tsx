@@ -85,17 +85,23 @@ function RootContent() {
     });
   }, []);
 
-  // Handle Splash Screen hiding
+  // Handle Background Service registration (DEFERRED)
   useEffect(() => {
-    console.log('[RootContent] Mounted');
-    // Register background sync tasks
-    backgroundSyncService.register();
+    console.log('[RootContent] Mounted - scheduling background services...');
+    
+    // DELAY registration of non-critical services to allow JS thread to breathe
+    const deferTimer = setTimeout(() => {
+      console.log('[RootContent] 🔄 Registering background services now.');
+      backgroundSyncService.register().catch(e => console.warn('[BackgroundSync] Registration error:', e));
+    }, 5000);
+
     const cleanupListener = backgroundSyncService.setupListener();
 
     return () => {
+        clearTimeout(deferTimer);
         cleanupListener();
     };
-  }, []); // This useEffect runs once on mount for background sync setup
+  }, []); // This useEffect runs once on mount for deferred setup
 
   // Absolute fail-safe: never allow splash to block app forever on slow/hung init.
   useEffect(() => {

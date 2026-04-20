@@ -122,30 +122,50 @@ export const getSaavnApiUrl = () => SAAVN_API_URL;
  * This bypasses ISP-level blocks on the .supabase.co domain for images/videos.
  */
 export function proxySupabaseUrl(url: string | null | undefined): string {
-    if (!url) return '';
-    if (url.startsWith('data:') || url.startsWith('file://')) return url;
-    
-    // Handle Supabase Storage URLs (legacy)
-    if (url.includes('xuipxbyvsawhuldopvjn.supabase.co/storage/v1/object/public/')) {
-        return url.replace(
-            'https://xuipxbyvsawhuldopvjn.supabase.co',
-            SUPABASE_ENDPOINT
-        );
-    }
-
-    // Handle R2 keys (new)
-    // Keys like 'user-id-timestamp.jpg' or 'avatars/uuid.jpg' or 'uploads/uuid.jpg'
-    if (!url.includes(':') && !url.startsWith('/') && !url.startsWith('http')) {
-        const publicBase = R2_CONFIG.PUBLIC_URL && !R2_CONFIG.PUBLIC_URL.includes('XXXXXXXXXXXX')
-            ? R2_CONFIG.PUBLIC_URL.replace(/\/$/, '')
-            : R2_CONFIG.WORKER_URL?.replace(/\/$/, ''); // Fallback to worker if public URL missing
-
-        if (publicBase) {
-            // Ensure we don't double slash
-            const cleanUrl = url.startsWith('/') ? url.substring(1) : url;
-            return `${publicBase}/${cleanUrl}`;
+    try {
+        if (!url || typeof url !== 'string') return '';
+        if (url.startsWith('data:') || url.startsWith('file://')) return url;
+        
+        // Handle Supabase Storage URLs (legacy/direct)
+        const isSupabaseUrl = url.includes('.supabase.co/storage/v1/object/public/');
+        
+        if (isSupabaseUrl && SUPABASE_ENDPOINT && !SUPABASE_ENDPOINT.includes('localhost')) {
+            // Replace the direct hostname with our proxy endpoint
+            try {
+                // Use the real Supabase origin as the target for replacement
+                const supabaseOrigin = 'https://xuipxbyvsawhuldopvjn.supabase.co';
+                const proxyOrigin = SUPABASE_ENDPOINT.replace(/\/$/, '');
+                
+                if (url.startsWith(supabaseOrigin)) {
+                    return url.replace(supabaseOrigin, proxyOrigin);
+                }
+                
+                // Fallback for different subdomains if they ever come up
+                const urlObj = new URL(url);
+                return url.replace(urlObj.origin, proxyOrigin);
+            } catch (e) {
+                return url.replace(
+                    'https://xuipxbyvsawhuldopvjn.supabase.co',
+                    SUPABASE_ENDPOINT.replace(/\/$/, '')
+                );
+            }
         }
+
+        // Handle R2 keys (new)
+        // Keys like 'user-id-timestamp.jpg' or 'avatars/uuid.jpg' or 'uploads/uuid.jpg'
+        if (!url.includes(':') && !url.startsWith('/') && !url.startsWith('http')) {
+            const publicBase = R2_CONFIG.PUBLIC_URL && !R2_CONFIG.PUBLIC_URL.includes('XXXXXXXXXXXX')
+                ? R2_CONFIG.PUBLIC_URL.replace(/\/$/, '')
+                : R2_CONFIG.WORKER_URL?.replace(/\/$/, ''); // Fallback to worker if public URL missing
+
+            if (publicBase) {
+                const cleanUrl = url.startsWith('/') ? url.substring(1) : url;
+                return `${publicBase}/${cleanUrl}`;
+            }
+        }
+    } catch (err) {
+        console.warn('[API] proxySupabaseUrl encountered an error:', err);
     }
 
-    return url;
+    return url || '';
 }

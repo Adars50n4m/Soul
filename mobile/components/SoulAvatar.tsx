@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, forwardRef } from 'react';
 import Animated from 'react-native-reanimated';
 import { View } from 'react-native';
 import { Image } from 'expo-image';
@@ -28,7 +28,7 @@ interface SoulAvatarProps {
  * Shows user photo if available, otherwise shows default person icon.
  * Includes optional premium online indicator.
  */
-export const SoulAvatar: React.FC<SoulAvatarProps> = ({
+export const SoulAvatar = forwardRef<View, SoulAvatarProps>(({
   uri,
   localUri,
   size = 50,
@@ -41,7 +41,7 @@ export const SoulAvatar: React.FC<SoulAvatarProps> = ({
   sharedTransition,
   allowExperimentalSharedTransition = false,
   isOnline = false
-}) => {
+}, ref) => {
   const { activeTheme } = useApp();
   const [error, setError] = useState(false);
 
@@ -49,7 +49,7 @@ export const SoulAvatar: React.FC<SoulAvatarProps> = ({
     setError(false);
   }, [uri, localUri]);
 
-  const sharedProps = (sharedTransitionTag && (SUPPORT_SHARED_TRANSITIONS || allowExperimentalSharedTransition))
+  const sharedProps = (sharedTransitionTag)
     ? {
         sharedTransitionTag,
         sharedTransitionStyle,
@@ -58,31 +58,48 @@ export const SoulAvatar: React.FC<SoulAvatarProps> = ({
     : {};
 
   const proxiedUri = proxySupabaseUrl(uri);
-  // Initial source choice
   const [currentSource, setCurrentSource] = useState<string | undefined>(localUri || proxiedUri);
   const [hasFallbackToRemote, setHasFallbackToRemote] = useState(false);
+  const [hasFallbackToDirect, setHasFallbackToDirect] = useState(false);
+  const [hasFallbackToGlobalProxy, setHasFallbackToGlobalProxy] = useState(false);
 
   useEffect(() => {
     setCurrentSource(localUri || proxiedUri);
     setHasFallbackToRemote(false);
+    setHasFallbackToDirect(false);
+    setHasFallbackToGlobalProxy(false);
     setError(false);
   }, [uri, localUri, proxiedUri]);
 
   const avatarShellStyle = {
     width: size,
     height: size,
-    borderRadius: size / 2,
+    borderRadius: Math.floor(size / 2), // Absolute circle for SharedTransition target
     overflow: 'hidden' as const,
     backgroundColor: '#262626',
   };
 
   const handleImageError = () => {
     if (localUri && currentSource === localUri && proxiedUri && !hasFallbackToRemote) {
-      // Local failed, try remote once
-      console.log(`[SoulAvatar] Local URI failed: ${localUri}. Falling back to remote.`);
+      // 1. Local failed, try proxied remote
+      console.log(`[SoulAvatar] Local URI failed: ${localUri}. Trying proxy: ${proxiedUri}`);
       setCurrentSource(proxiedUri);
       setHasFallbackToRemote(true);
+    } else if (currentSource === proxiedUri && uri && proxiedUri !== uri && !hasFallbackToDirect) {
+      // 2. Proxied failed, try direct Supabase URL
+      console.log(`[SoulAvatar] Proxy failed: ${proxiedUri}. Trying direct: ${uri}`);
+      setCurrentSource(uri);
+      setHasFallbackToDirect(true);
+    } else if (currentSource === uri && uri && uri.startsWith('http') && !hasFallbackToGlobalProxy) {
+      // 3. Direct failed, try Glogal Image Proxy (Weserv)
+      // wsrv.nl is a high-reputation CDN proxy that often bypasses carrier blocks
+      const globalProxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(uri)}&default=${encodeURIComponent(uri)}`;
+      console.log(`[SoulAvatar] Direct failed: ${uri}. Trying global proxy: ${globalProxyUrl}`);
+      setCurrentSource(globalProxyUrl);
+      setHasFallbackToGlobalProxy(true);
     } else {
+      // 4. All attempts failed
+      console.warn(`[SoulAvatar] All image sources failed for URI: ${uri}`);
       setError(true);
     }
   };
@@ -151,7 +168,7 @@ export const SoulAvatar: React.FC<SoulAvatarProps> = ({
   };
 
   return (
-    <View style={[{ width: size, height: size }, style]}>
+    <View ref={ref} collapsable={false} style={[{ width: size, height: size }, style]}>
       <Animated.View
         collapsable={false}
         {...sharedProps}
@@ -177,4 +194,4 @@ export const SoulAvatar: React.FC<SoulAvatarProps> = ({
       )}
     </View>
   );
-};
+});

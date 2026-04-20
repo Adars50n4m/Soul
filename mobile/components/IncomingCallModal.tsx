@@ -132,7 +132,7 @@ export const IncomingCallModal = () => {
                             <View style={styles.avatarWrapper}>
                                 <Animated.View style={[styles.rippleRing, rippleStyle]} />
                                 <Animated.View style={[styles.rippleRing, rippleStyle]} />
-                                <Animated.View style={[styles.avatarContainer, avatarAnimatedStyle]}>
+                                <Animated.View style={[styles.avatarContainer, avatarAnimatedStyle, { backgroundColor: '#1A1A20' }]}>
                                     <SoulAvatar
                                         uri={displayAvatar}
                                         size={140}

@@ -469,8 +469,25 @@ class OfflineService {
   }
 
   async getAllMessages(): Promise<QueuedMessage[]> {
+    console.warn('[LocalDBService] Using getAllMessages (DANGER: potentially slow)');
     const db = await getDb();
     const rows = await db.getAllAsync(`SELECT * FROM messages ORDER BY timestamp ASC;`);
+    return (rows as any[]).map(rowToQueuedMessage);
+  }
+
+  /**
+   * Fetches the latest N messages from every chat to populate the preview list
+   * without loading 50,000 messages.
+   */
+  async getLatestMessagesSummary(limitPerChat = 1): Promise<QueuedMessage[]> {
+    const db = await getDb();
+    // Complex SQL to get N latest per chat
+    const rows = await db.getAllAsync(`
+      SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) as rn
+        FROM messages
+      ) WHERE rn <= ?;
+    `, [limitPerChat]);
     return (rows as any[]).map(rowToQueuedMessage);
   }
 
@@ -700,27 +717,23 @@ class OfflineService {
   }
 
   async saveContact(contact: any): Promise<void> {
-    const db = await getDb();
-    
-    // SAFEGUARD: Never save the current user to the contacts table!
-    // We try to get the current user ID from AsyncStorage to be sure.
-    try {
-      const cachedUserId = await require('@react-native-async-storage/async-storage').default.getItem('ss_current_user');
-      const myId = cachedUserId;
-      if (myId) {
-        const { LEGACY_TO_UUID: MAPPING } = require('../config/supabase');
-        const cid = MAPPING[contact.id] || contact.id;
-        const mid = MAPPING[myId] || myId;
-        if (cid === mid) {
-          console.log('[SQLite] Blocking self-contact save for:', contact.id);
-          return;
-        }
-      }
-    } catch (e) {
-      console.warn('[SQLite] saveContact self-filter check failed (ignoring):', e);
-    }
+    await this.saveContactsBatch([contact]);
+  }
 
-    await db.runAsync(
+  async saveContactsBatch(contacts: any[]): Promise<void> {
+    if (!contacts.length) return;
+    const db = await dbManager.getDatabase({ name: DB_NAME, migrations: async () => {} });
+
+    let myUuid: string | null = null;
+    try {
+      const cachedId = await require('@react-native-async-storage/async-storage').default.getItem('ss_current_user');
+      myUuid = cachedId;
+    } catch (e) {}
+
+    const { LEGACY_TO_UUID: MAPPING } = require('../config/supabase');
+
+    await db.withTransactionAsync(async () => {
+      const statement = await db.prepareAsync(
         `INSERT INTO contacts 
             (id, name, avatar, avatar_type, teddy_variant, status, last_message, unread_count, about, last_seen, last_synced_at, updated_at, note, note_timestamp, local_avatar_uri, avatar_updated_at, is_group) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -740,18 +753,27 @@ class OfflineService {
             note_timestamp = excluded.note_timestamp,
             local_avatar_uri = COALESCE(excluded.local_avatar_uri, contacts.local_avatar_uri),
             avatar_updated_at = COALESCE(excluded.avatar_updated_at, contacts.avatar_updated_at),
-            is_group = excluded.is_group;`, 
-        [
-            contact.id, 
-            contact.name, 
-            contact.avatar ?? null, 
+            is_group = excluded.is_group;`
+      );
+
+      try {
+        for (const contact of contacts) {
+          const cid = MAPPING[contact.id] || contact.id;
+          const mid = myUuid ? (MAPPING[myUuid] || myUuid) : null;
+          
+          if (cid === mid) continue;
+
+          await statement.executeAsync([
+            contact.id,
+            contact.name,
+            contact.avatar ?? null,
             contact.avatarType ?? 'default',
             contact.teddyVariant ?? null,
-            contact.status ?? 'offline', 
-            contact.lastMessage ?? null, 
-            contact.unreadCount ?? 0, 
-            contact.about ?? null, 
-            contact.lastSeen ?? null, 
+            contact.status ?? 'offline',
+            contact.lastMessage ?? null,
+            contact.unreadCount ?? 0,
+            contact.about ?? null,
+            contact.lastSeen ?? null,
             new Date().toISOString(),
             contact.updatedAt ?? null,
             contact.note ?? null,
@@ -759,8 +781,12 @@ class OfflineService {
             contact.localAvatarUri ?? null,
             contact.avatarUpdatedAt ?? null,
             contact.isGroup ? 1 : 0
-        ]
-    );
+          ]);
+        }
+      } finally {
+        await statement.finalizeAsync();
+      }
+    });
   }
 
   async setContactArchived(userId: string, archived: boolean): Promise<void> {

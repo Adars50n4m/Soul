@@ -259,31 +259,34 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.log(`[ChatContext] Instant hydration: ${normalized.length} contacts (filtered blacklisted/self)`);
       }
 
-      // Phase 2: Messages (Async)
+      // Phase 2: Messages (PREVIEW ONLY) - Load only latest per chat to populate list
       const localMessages = await Promise.race([
-        offlineService.getAllMessages(),
+        offlineService.getLatestMessagesSummary(1),
         new Promise<any[]>((resolve) => setTimeout(() => resolve([]), dbQueryTimeout))
       ]) as any[];
 
       // If timeout fired and returned empty, don't overwrite existing messages in state
       if (!localMessages || localMessages.length === 0) {
-        console.warn('[ChatContext] No local messages returned (timeout or empty DB), preserving existing state');
-        return;
+        console.warn('[ChatContext] No local messages returned for summary, using existing state');
+        // If we have some messages but no summary, it might be a weird state, but continuing is safer
       }
 
       const grouped = (localMessages).reduce((acc: Record<string, Message[]>, row: any) => {
         const normalizedChatId = LEGACY_TO_UUID[row.chatId] || row.chatId;
         if (!acc[normalizedChatId]) acc[normalizedChatId] = [];
-        acc[normalizedChatId].push(mapQueuedMessage(row));
+        acc[normalizedChatId].push(row); // Use raw message for hydration, it will be mapped/sorted when needed
         return acc;
       }, {});
 
-      (Object.values(grouped) as Message[][]).forEach((chatRows) => {
-        chatRows.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      // Mapping QueuedMessages to display Messages
+      const mappedGrouped: Record<string, Message[]> = {};
+      Object.keys(grouped).forEach(chatId => {
+        mappedGrouped[chatId] = (grouped[chatId] as any[]).map(mapQueuedMessage);
       });
 
-      setMessages(grouped);
+      setMessages(mappedGrouped);
       isHydratedRef.current = true;
+      console.log(`[ChatContext] Local hydration complete. Loaded ${Object.keys(mappedGrouped).length} chat previews.`);
     } catch (e) {
       console.warn('[ChatContext] hydrateFromLocalDb error:', e);
     } finally {
@@ -424,6 +427,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             return merged.filter(c => !isBlacklisted(c.id, c.name));
           });
           
+          const batchToSave: any[] = [];
           for (const profile of allVisibleProfiles) {
             const primaryId = LEGACY_TO_UUID[profile.id] || profile.id;
             if (primaryId === myUuid) continue; 
@@ -432,7 +436,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const avatarUrl = profile.avatar_url || existing?.avatar || '';
             const updatedAt = profile.updated_at || existing?.last_updated_at || new Date().toISOString();
 
-            // Background sync the avatar file
+            // Background sync the avatar file (still individual, but non-blocking)
             if (avatarUrl) {
               syncAvatar(primaryId, avatarUrl, updatedAt).then(localUri => {
                 if (localUri) {
@@ -443,7 +447,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }).catch(() => {});
             }
 
-            await offlineService.saveContact({
+            batchToSave.push({
               id: primaryId,
               name: profile.display_name || profile.username || 'User',
               avatar: avatarUrl,
@@ -453,6 +457,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
               unreadCount: existing?.unreadCount || 0,
               updatedAt: updatedAt
             });
+          }
+
+          if (batchToSave.length > 0) {
+            await offlineService.saveContactsBatch(batchToSave);
+            console.log(`[ChatContext] Batched save for ${batchToSave.length} contacts complete.`);
           }
           lastServerSyncRef.current = Date.now();
           AsyncStorage.setItem('ss_last_contact_sync', lastServerSyncRef.current.toString()).catch(() => {});

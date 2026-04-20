@@ -22,7 +22,10 @@ export const SUPABASE_PROXY_URL = getEnvVar('EXPO_PUBLIC_SUPABASE_PROXY_URL', 'h
 
 // 3. App Server (Node.js/Localtunnel)
 export const IS_DEV = __DEV__;
-const DEFAULT_TUNNEL = 'http://localhost:3000';
+// Default to the Cloudflare Workers proxy so physical devices and standalone
+// builds keep working even if .env wasn't bundled or dev-host resolution fails.
+// Override for local dev by setting EXPO_PUBLIC_SERVER_URL=http://localhost:3000.
+const DEFAULT_TUNNEL = 'https://soul-supabase-proxy.adarshark.workers.dev';
 let resolvedServerUrl = getEnvVar('EXPO_PUBLIC_SERVER_URL', DEFAULT_TUNNEL);
 
 const extractExpoDevHost = (): string | null => {
@@ -71,7 +74,7 @@ if (IS_DEV) {
     if (Platform.OS !== 'android' && resolvedServerUrl.includes('10.0.2.2')) {
       resolvedServerUrl = debugHost
         ? `http://${debugHost}:3000`
-        : 'http://localhost:3000';
+        : DEFAULT_TUNNEL;
       console.log(`[Env] Rewriting Android emulator URL for ${Platform.OS}: ${resolvedServerUrl}`);
     }
     
@@ -107,6 +110,16 @@ if (IS_DEV) {
     console.log(`[Env] Using remote SERVER_URL in dev: ${resolvedServerUrl}`);
   }
 }
+
+// Physical-device safety net: if we somehow ended up with localhost/127.0.0.1
+// on a real device (no Metro host, missing .env, stale release build, etc.),
+// fall back to the cloud proxy instead of silently failing every network call.
+const _isPhysicalDevice = (Constants as any)?.isDevice !== false;
+if (_isPhysicalDevice && (resolvedServerUrl.includes('localhost') || resolvedServerUrl.includes('127.0.0.1'))) {
+  console.warn(`[Env] ⚠️ Physical device resolved to ${resolvedServerUrl} — overriding with cloud proxy.`);
+  resolvedServerUrl = DEFAULT_TUNNEL;
+}
+
 export const SERVER_URL = resolvedServerUrl;
 console.log(`[Env] Final Connectivity URL: ${SERVER_URL}`);
 
@@ -115,8 +128,10 @@ console.log(`[Env] Final Connectivity URL: ${SERVER_URL}`);
 export const MUSIC_API_URL = getEnvVar('EXPO_PUBLIC_MUSIC_API_URL', 'https://saavn.sumit.co/api');
 
 // 5. Cloudflare R2 / Upload Worker
+// Defaults are the real production URLs so physical devices / standalone
+// builds still resolve media correctly when .env isn't bundled.
 export const R2_WORKER_URL = getEnvVar('EXPO_PUBLIC_R2_WORKER_URL', 'https://soul-upload-worker.adarshark.workers.dev');
-export const R2_PUBLIC_URL = getEnvVar('EXPO_PUBLIC_R2_PUBLIC_URL', 'https://pub-XXXXXXXXXXXX.r2.dev');
+export const R2_PUBLIC_URL = getEnvVar('EXPO_PUBLIC_R2_PUBLIC_URL', 'https://pub-e61d644ab07147a8a1a45a3bbd84aa1d.r2.dev');
 
 // 6. WebRTC TURN Servers
 // Default: OpenRelay Project free TURN (works from any network, no signup)
@@ -149,7 +164,9 @@ export const CALL_REQUIRE_CUSTOM_TURN = getEnvVar(
 ) === 'true';
 
 // 7. Feature Flags
-export const USE_R2 = false; // Forced to false to ensure server-proxy path is used for reliability
+// Default to R2 ON because the proxy worker doesn't expose an upload route —
+// physical devices without .env bundling must hit R2 directly.
+export const USE_R2 = getEnvVar('EXPO_PUBLIC_USE_R2', 'true') === 'true';
 export const VOIP_PUSH_ENABLED = getEnvVar('EXPO_PUBLIC_VOIP_PUSH_ENABLED', 'false') === 'true';
 
 // 7. Connectivity Constants

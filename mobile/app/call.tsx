@@ -296,8 +296,10 @@ export default function CallScreen() {
     const selfVideoX = useSharedValue(width - 130);
     const selfVideoY = useSharedValue(120);
     const screenTranslateY = useSharedValue(0);
+    const savedSelfVideoPos = useRef<{ x: number; y: number } | null>(null);
 
     const panGesture = Gesture.Pan()
+        .enabled(!showLiveChat)
         .onUpdate((event) => {
             selfVideoX.value = event.translationX + (width - 130);
             selfVideoY.value = event.translationY + 120;
@@ -306,6 +308,20 @@ export default function CallScreen() {
             selfVideoX.value = withSpring(selfVideoX.value < width / 2 ? 20 : width - 130);
             selfVideoY.value = withSpring(Math.max(100, Math.min(height - 250, selfVideoY.value)));
         });
+
+    // Tuck self-video into a safe spot (below close button, above chat) while the
+    // Live Chat overlay is open, then restore the user's previous position on close.
+    useEffect(() => {
+        if (showLiveChat) {
+            savedSelfVideoPos.current = { x: selfVideoX.value, y: selfVideoY.value };
+            selfVideoX.value = withSpring(20);
+            selfVideoY.value = withSpring(Math.max(insets.top + 70, 100));
+        } else if (savedSelfVideoPos.current) {
+            selfVideoX.value = withSpring(savedSelfVideoPos.current.x);
+            selfVideoY.value = withSpring(savedSelfVideoPos.current.y);
+            savedSelfVideoPos.current = null;
+        }
+    }, [showLiveChat, insets.top]);
 
     const selfVideoStyle = useAnimatedStyle(() => ({
         transform: [
@@ -330,6 +346,44 @@ export default function CallScreen() {
     }));
 
     const edgeGlowStyle = useAnimatedStyle(() => ({ opacity: edgeGlowPulse.value }));
+
+    // NEW: Mesh Background Animation
+    const meshP1 = useSharedValue(0);
+    const meshP2 = useSharedValue(0);
+    const meshP3 = useSharedValue(0);
+
+    const meshStyle1 = useAnimatedStyle(() => ({
+        transform: [
+            { translateX: interpolate(meshP1.value, [0, 1], [-width * 0.25, width * 0.25]) },
+            { translateY: interpolate(meshP2.value, [0, 1], [-height * 0.1, height * 0.1]) },
+            { rotate: `${meshP1.value * 360}deg` }
+        ],
+        opacity: 0.35
+    }));
+
+    const meshStyle2 = useAnimatedStyle(() => ({
+        transform: [
+            { translateX: interpolate(meshP2.value, [0, 1], [width * 0.2, -width * 0.2]) },
+            { translateY: interpolate(meshP3.value, [0, 1], [height * 0.15, -height * 0.15]) },
+            { rotate: `${-meshP2.value * 360}deg` }
+        ],
+        opacity: 0.3
+    }));
+
+    const meshStyle3 = useAnimatedStyle(() => ({
+        transform: [
+            { translateX: interpolate(meshP3.value, [0, 1], [-width * 0.15, width * 0.15]) },
+            { translateY: interpolate(meshP1.value, [0, 1], [height * 0.2, -height * 0.2]) },
+            { rotate: `${meshP3.value * 360}deg` }
+        ],
+        opacity: 0.25
+    }));
+
+    useEffect(() => {
+        meshP1.value = withRepeat(withTiming(1, { duration: 9000, easing: Easing.inOut(Easing.sin) }), -1, true);
+        meshP2.value = withRepeat(withTiming(1, { duration: 12000, easing: Easing.inOut(Easing.quad) }), -1, true);
+        meshP3.value = withRepeat(withTiming(1, { duration: 15000, easing: Easing.inOut(Easing.exp) }), -1, true);
+    }, []);
 
     // Mount guard: set isMounted after the first render to prevent navigating
     // before the Root Layout navigator is ready (causes "navigate before mount" crash).
@@ -379,10 +433,19 @@ export default function CallScreen() {
 
     useEffect(() => {
         if (callState === 'ringing' || callState === 'connecting') {
-            pulseScale.value = withRepeat(withTiming(1.5, { duration: 1500 }), -1, false);
-            pulseOpacity.value = withRepeat(withTiming(0, { duration: 1500 }), -1, false);
+            pulseScale.value = withRepeat(
+                withSpring(1.4, { damping: 12, stiffness: 60 }),
+                -1,
+                true
+            );
+            pulseOpacity.value = withRepeat(
+                withTiming(0, { duration: 1800, easing: Easing.out(Easing.quad) }),
+                -1,
+                false
+            );
         } else {
-            pulseScale.value = 1; pulseOpacity.value = 0;
+            pulseScale.value = withSpring(1);
+            pulseOpacity.value = withTiming(0);
         }
     }, [callState]);
 
@@ -538,7 +601,30 @@ export default function CallScreen() {
                     <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
 
                     {/* 1. Background Media Layer */}
-                    <View style={[StyleSheet.absoluteFill, { backgroundColor: '#111' }]}>
+                    <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0a0a0c' }]}>
+                        {/* Dynamic Liquid Mesh */}
+                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle1]}>
+                            <LinearGradient 
+                                colors={[hexToRgba(activeTheme?.primary || '#BC002A', 0.45), 'transparent']} 
+                                start={{x: 0, y: 0}} end={{x: 1, y: 1}} 
+                                style={{ width: width * 1.6, height: width * 1.6, borderRadius: width * 0.8 }} 
+                            />
+                        </Animated.View>
+                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle2]}>
+                            <LinearGradient 
+                                colors={['transparent', hexToRgba(activeTheme?.accent || '#FF6A88', 0.35)]} 
+                                start={{x: 1, y: 0}} end={{x: 0, y: 1}} 
+                                style={{ width: width * 1.5, height: width * 1.5, borderRadius: width * 0.75, top: height * 0.3 }} 
+                            />
+                        </Animated.View>
+                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle3]}>
+                            <LinearGradient 
+                                colors={['transparent', hexToRgba('#4C6EF5', 0.25)]} 
+                                start={{x: 0.5, y: 0}} end={{x: 0.5, y: 1}} 
+                                style={{ width: width * 1.4, height: width * 1.4, borderRadius: width * 0.7, left: width * 0.2, top: -height * 0.1 }} 
+                            />
+                        </Animated.View>
+
                         {remoteStreams.size > 0 && activeCall?.isAccepted && isVideo ? (
                             <View style={styles.gridContainer}>
                                 {Array.from(remoteStreams.entries()).map(([userId, stream], index) => {
@@ -574,11 +660,15 @@ export default function CallScreen() {
                             </View>
                         ) : (
                             !!contact.avatar && (
-                                <Image source={{ uri: contact.avatar }} style={[styles.backgroundImage, { width, height }]} blurRadius={isVideo ? 60 : 50} />
+                                <Image 
+                                    source={{ uri: contact.avatar }} 
+                                    style={[styles.backgroundImage, { width, height }]} 
+                                    blurRadius={isVideo ? 60 : 50} 
+                                />
                             )
                         )}
 
-                        <View style={[styles.overlay, { zIndex: 1 }]} />
+                        <View style={[styles.overlay, { zIndex: 1, backgroundColor: 'rgba(5, 5, 8, 0.4)' }]} />
                     </View>
 
                     {/* 2. Edge Glow */}
@@ -610,7 +700,7 @@ export default function CallScreen() {
                                 </View>
                             )}
 
-                            {/* Center Info - visible if not video OR not connected OR chat is open but video not ready */}
+                            {/* Center Info */}
                             {( (!isVideo || !uiConnected || activeCall?.remoteVideoOff)) && (
                                 <View style={styles.mainInfo}>
                                     <View style={styles.avatarWrapper}>
@@ -624,8 +714,8 @@ export default function CallScreen() {
                                 </View>
                             )}
 
-                            {/* Self Video - keep hidden in chat to save space */}
-                            {(!showLiveChat && isVideo && uiConnected) && (
+                            {/* Self Video - stays visible during Live Chat so the user can still see their own feed */}
+                            {(isVideo && uiConnected) && (
                                 <GestureDetector gesture={panGesture}>
                                     <Animated.View style={[styles.selfVideoContainer, selfVideoStyle]}>
                                         {localStream && !activeCall?.isVideoOff && RTCView ? (

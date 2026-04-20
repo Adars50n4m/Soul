@@ -484,8 +484,12 @@ export default function ProfileEditScreen() {
                             await updateProfile({ avatar: uploadedKey });
                         }
                     } catch (error: any) {
-                        console.warn('Avatar upload error (camera):', error);
-                        Alert.alert('Sync Failed', 'Photo saved locally but could not upload to server. It will sync later.');
+                        const errMsg = error?.message || String(error);
+                        console.warn('Avatar upload error (camera):', errMsg);
+                        Alert.alert(
+                            'Sync Failed',
+                            `Photo saved locally, but upload failed:\n\n${errMsg}\n\nIt will retry later.`
+                        );
                     } finally {
                         setIsUploadingAvatar(false);
                     }
@@ -534,10 +538,11 @@ export default function ProfileEditScreen() {
                             throw new Error('Upload failed - no key returned');
                         }
                     } catch (error: any) {
-                        console.warn('[ProfileEdit] Avatar update sequence failed:', error?.message || error);
+                        const errMsg = error?.message || String(error);
+                        console.warn('[ProfileEdit] Avatar update sequence failed:', errMsg);
                         Alert.alert(
                             'Sync Pending',
-                            'Photo selected successfully, but sync failed right now. It will retry when connection/session is restored.'
+                            `Photo selected successfully, but sync failed:\n\n${errMsg}\n\nIt will retry when connection is restored.`
                         );
                     } finally {
                         setIsUploadingAvatar(false);

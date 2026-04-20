@@ -319,186 +319,186 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.keyboardAvoid}
         >
-        {/* Top Header Controls */}
-        <Animated.View entering={SlideInUp.duration(300).springify().damping(18)} exiting={SlideOutUp.duration(200)} style={styles.header}>
-          <Pressable style={styles.closeButton} onPress={handleClose} disabled={isUploading}>
-            <MaterialIcons name="close" size={26} color="#fff" />
-          </Pressable>
-          
-          <View style={styles.headerActions}>
-            {mode === 'status' && (
-              <Pressable style={styles.iconButton} onPress={() => Alert.alert("Music", "Coming soon!")}>
-                <MaterialIcons name="music-note" size={24} color="#fff" />
-              </Pressable>
-            )}
-            <Pressable style={[styles.iconButton, { opacity: currentType === 'video' ? 0.3 : 1 }]} onPress={handleCrop} disabled={isUploading || currentType === 'video'}>
-              <MaterialIcons name="crop-rotate" size={24} color="#fff" />
-            </Pressable>
-            {currentType === 'video' && (
-              <Pressable style={styles.iconButton} onPress={handleTrimVideo} disabled={isUploading || isTrimming}>
-                {isTrimming ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <MaterialIcons name="content-cut" size={22} color="#fff" />
-                )}
-              </Pressable>
-            )}
-            <Pressable style={[styles.iconButton, { opacity: currentType === 'video' ? 0.3 : 1 }]} onPress={handleAddText} disabled={isUploading || currentType === 'video'}>
-              <Text style={styles.aaText}>Aa</Text>
-            </Pressable>
-            <Pressable style={[styles.iconButton, isDrawingMode && styles.iconActive, { opacity: currentType === 'video' ? 0.3 : 1 }]} onPress={toggleDrawing} disabled={isUploading || currentType === 'video'}>
-              <MaterialIcons name="edit" size={24} color={isDrawingMode ? activeTheme.primary : '#fff'} />
-            </Pressable>
-            <Pressable style={styles.iconButton} onPress={handleRemoveCurrentMedia} disabled={isUploading}>
-              <MaterialIcons name="delete-outline" size={24} color="#fff" />
-            </Pressable>
-            {isDrawingMode && paths.length > 0 && (
-              <Pressable style={styles.iconButton} onPress={handleUndoPen}>
-                <MaterialIcons name="undo" size={24} color="#fff" />
-              </Pressable>
-            )}
-          </View>
-        </Animated.View>
-
-        {/* Media Preview Area */}
-        <View style={styles.mediaContainer}>
-          {currentType === 'image' && (
-            <PanGestureHandler onGestureEvent={onGestureEvent} onHandlerStateChange={onHandlerStateChange} enabled={isDrawingMode}>
-              <Animated.View style={StyleSheet.absoluteFill}>
-                <View ref={viewShotRef as any} collapsable={false} style={styles.viewShotCanvas}>
-                  <Animated.View entering={ZoomIn.duration(350).springify().damping(16)} style={styles.mediaImageWrapper}>
-                    <Image source={{ uri: currentUri }} style={styles.mediaImage} contentFit="contain" />
-                  </Animated.View>
-                  
-                  {/* Drawing & Text Canvas Overlays */}
-                  {(paths.length > 0 || currentPath || textOverlays.length > 0) && (
-                    <View style={StyleSheet.absoluteFill} pointerEvents="none">
-                      <Svg height="100%" width="100%">
-                        {paths.map((p, i) => (
-                          <Path key={i} d={p.path} stroke={p.color} strokeWidth={p.strokeWidth} fill="none" strokeLinecap="round" />
-                        ))}
-                        {currentPath ? (
-                          <Path d={currentPath} stroke={activeTheme.primary} strokeWidth={5} fill="none" strokeLinecap="round" />
-                        ) : null}
-                      </Svg>
-                      
-                      {textOverlays.map((t) => (
-                        <PanGestureHandler
-                          key={t.id}
-                          onGestureEvent={(e) => onTextDrag(e, t.id)}
-                          onHandlerStateChange={(e) => onTextDragStateChange(e, t)}
-                        >
-                          <Animated.View style={[styles.canvasTextContainer, { left: t.x, top: t.y }]}>
-                            <Pressable 
-                              onPress={() => setActiveTextId(t.id)} 
-                              onLongPress={() => handleCycleTextColor(t.id)}
-                            >
-                              <CanvasTextInput
-                                t={t}
-                                activeTextId={activeTextId}
-                                setActiveTextId={setActiveTextId}
-                                setTextOverlays={setTextOverlays}
-                                textOverlays={textOverlays}
-                              />
-                            </Pressable>
-                          </Animated.View>
-                        </PanGestureHandler>
-                      ))}
-                    </View>
-                  )}
-                </View>
-              </Animated.View>
-            </PanGestureHandler>
-          )}
-          {currentType === 'video' && (
-            <Animated.View entering={ZoomIn.duration(350).springify().damping(16)} style={styles.videoWrapper}>
-              <Video
-                ref={videoRef}
-                source={{ uri: currentUri }}
-                style={styles.mediaImage}
-                resizeMode={ResizeMode.CONTAIN}
-                useNativeControls={true}
-                isLooping={false}
-              />
-            </Animated.View>
-          )}
-          {currentType === 'audio' && (
-            <View style={styles.audioPreview}>
-              <MaterialIcons name="graphic-eq" size={80} color={activeTheme.primary} />
-              <MaterialIcons name="play-circle-filled" size={60} color="#fff" />
-            </View>
-          )}
-          {currentType === 'file' && (
-            <View style={styles.audioPreview}>
-              <MaterialIcons name="insert-drive-file" size={80} color="#4ade80" />
-              <Text style={{ color: '#fff', fontSize: 18, marginTop: 10, textAlign: 'center', paddingHorizontal: 20 }}>
-                {mediaItems[currentIndex]?.name || 'Document'}
-              </Text>
-            </View>
-          )}
-
-          {/* Swipe Controls for Multiple Items */}
-          {mediaItems.length > 1 && (
-            <View style={styles.swipeIndicators}>
-              <Pressable 
-                style={[styles.navArrow, { opacity: currentIndex > 0 ? 1 : 0.3 }]} 
-                onPress={() => currentIndex > 0 && setCurrentIndex(currentIndex - 1)}
-              >
-                <MaterialIcons name="chevron-left" size={32} color="#fff" />
-              </Pressable>
-              
-              <View style={styles.dotsRow}>
-                {mediaItems.map((_, idx) => (
-                  <View key={idx} style={[styles.dot, { backgroundColor: idx === currentIndex ? activeTheme.primary : 'rgba(255,255,255,0.4)' }]} />
-                ))}
-              </View>
-
-              <Pressable 
-                style={[styles.navArrow, { opacity: currentIndex < mediaItems.length - 1 ? 1 : 0.3 }]} 
-                onPress={() => currentIndex < mediaItems.length - 1 && setCurrentIndex(currentIndex + 1)}
-              >
-                <MaterialIcons name="chevron-right" size={32} color="#fff" />
-              </Pressable>
-            </View>
-          )}
-        </View>
-
-        {/* Bottom Input Area */}
-        <Animated.View entering={SlideInDown.duration(300).springify().damping(18)} exiting={SlideOutDown.duration(200)} style={styles.bottomContainer}>
-          <View style={styles.inputActionRow}>
-            <Pressable style={styles.galleryButton} onPress={handlePickGallery} disabled={isUploading}>
-              <MaterialIcons name="image" size={24} color="#fff" />
+          {/* Top Header Controls */}
+          <Animated.View entering={SlideInUp.duration(300).springify().damping(18)} exiting={SlideOutUp.duration(200)} style={styles.header}>
+            <Pressable style={styles.closeButton} onPress={handleClose} disabled={isUploading}>
+              <MaterialIcons name="close" size={26} color="#fff" />
             </Pressable>
             
-            <View style={styles.inputWrapper}>
-              <TextInput
-                style={styles.captionInput}
-                placeholder="Add a caption..."
-                placeholderTextColor="rgba(255, 255, 255, 0.6)"
-                value={caption}
-                onChangeText={setCaption}
-                maxLength={500}
-                editable={!isUploading}
-                multiline
-              />
-            </View>
-
-            <Pressable
-              style={[styles.themedSendButton, { backgroundColor: activeTheme.primary }, isUploading && styles.sendButtonDisabled]}
-              onPress={handleSend}
-              disabled={isUploading}
-            >
-              {isUploading ? (
-                <ActivityIndicator size="small" color="#fff" />
-              ) : (
-                <MaterialIcons name="send" size={18} color="#fff" />
+            <View style={styles.headerActions}>
+              {mode === 'status' && (
+                <Pressable style={styles.iconButton} onPress={() => Alert.alert("Music", "Coming soon!")}>
+                  <MaterialIcons name="music-note" size={24} color="#fff" />
+                </Pressable>
               )}
-            </Pressable>
-          </View>
-        </Animated.View>
-      </KeyboardAvoidingView>
+              <Pressable style={[styles.iconButton, { opacity: currentType === 'video' ? 0.3 : 1 }]} onPress={handleCrop} disabled={isUploading || currentType === 'video'}>
+                <MaterialIcons name="crop-rotate" size={24} color="#fff" />
+              </Pressable>
+              {currentType === 'video' && (
+                <Pressable style={styles.iconButton} onPress={handleTrimVideo} disabled={isUploading || isTrimming}>
+                  {isTrimming ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <MaterialIcons name="content-cut" size={22} color="#fff" />
+                  )}
+                </Pressable>
+              )}
+              <Pressable style={[styles.iconButton, { opacity: currentType === 'video' ? 0.3 : 1 }]} onPress={handleAddText} disabled={isUploading || currentType === 'video'}>
+                <Text style={styles.aaText}>Aa</Text>
+              </Pressable>
+              <Pressable style={[styles.iconButton, isDrawingMode && styles.iconActive, { opacity: currentType === 'video' ? 0.3 : 1 }]} onPress={toggleDrawing} disabled={isUploading || currentType === 'video'}>
+                <MaterialIcons name="edit" size={24} color={isDrawingMode ? activeTheme.primary : '#fff'} />
+              </Pressable>
+              <Pressable style={styles.iconButton} onPress={handleRemoveCurrentMedia} disabled={isUploading}>
+                <MaterialIcons name="delete-outline" size={24} color="#fff" />
+              </Pressable>
+              {isDrawingMode && paths.length > 0 && (
+                <Pressable style={styles.iconButton} onPress={handleUndoPen}>
+                  <MaterialIcons name="undo" size={24} color="#fff" />
+                </Pressable>
+              )}
+            </View>
+          </Animated.View>
 
-      {/* Crop Image Modal */}
+          {/* Media Preview Area */}
+          <View style={styles.mediaContainer}>
+            {currentType === 'image' && (
+              <PanGestureHandler onGestureEvent={onGestureEvent} onHandlerStateChange={onHandlerStateChange} enabled={isDrawingMode}>
+                <Animated.View style={StyleSheet.absoluteFill}>
+                  <View ref={viewShotRef as any} collapsable={false} style={styles.viewShotCanvas}>
+                    <Animated.View entering={ZoomIn.duration(350).springify().damping(16)} style={styles.mediaImageWrapper}>
+                      <Image source={{ uri: currentUri }} style={styles.mediaImage} contentFit="contain" />
+                    </Animated.View>
+                    
+                    {/* Drawing & Text Canvas Overlays */}
+                    {(paths.length > 0 || currentPath || textOverlays.length > 0) && (
+                      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                        <Svg height="100%" width="100%">
+                          {paths.map((p, i) => (
+                            <Path key={i} d={p.path} stroke={p.color} strokeWidth={p.strokeWidth} fill="none" strokeLinecap="round" />
+                          ))}
+                          {currentPath ? (
+                            <Path d={currentPath} stroke={activeTheme.primary} strokeWidth={5} fill="none" strokeLinecap="round" />
+                          ) : null}
+                        </Svg>
+                        
+                        {textOverlays.map((t) => (
+                          <PanGestureHandler
+                            key={t.id}
+                            onGestureEvent={(e) => onTextDrag(e, t.id)}
+                            onHandlerStateChange={(e) => onTextDragStateChange(e, t)}
+                          >
+                            <Animated.View style={[styles.canvasTextContainer, { left: t.x, top: t.y }]}>
+                              <Pressable 
+                                onPress={() => setActiveTextId(t.id)} 
+                                onLongPress={() => handleCycleTextColor(t.id)}
+                              >
+                                <CanvasTextInput
+                                  t={t}
+                                  activeTextId={activeTextId}
+                                  setActiveTextId={setActiveTextId}
+                                  setTextOverlays={setTextOverlays}
+                                  textOverlays={textOverlays}
+                                />
+                              </Pressable>
+                            </Animated.View>
+                          </PanGestureHandler>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                </Animated.View>
+              </PanGestureHandler>
+            )}
+            {currentType === 'video' && (
+              <Animated.View entering={ZoomIn.duration(350).springify().damping(16)} style={styles.videoWrapper}>
+                <Video
+                  ref={videoRef}
+                  source={{ uri: currentUri }}
+                  style={styles.mediaImage}
+                  resizeMode={ResizeMode.CONTAIN}
+                  useNativeControls={true}
+                  isLooping={false}
+                />
+              </Animated.View>
+            )}
+            {currentType === 'audio' && (
+              <View style={styles.audioPreview}>
+                <MaterialIcons name="graphic-eq" size={80} color={activeTheme.primary} />
+                <MaterialIcons name="play-circle-filled" size={60} color="#fff" />
+              </View>
+            )}
+            {currentType === 'file' && (
+              <View style={styles.audioPreview}>
+                <MaterialIcons name="insert-drive-file" size={80} color="#4ade80" />
+                <Text style={{ color: '#fff', fontSize: 18, marginTop: 10, textAlign: 'center', paddingHorizontal: 20 }}>
+                  {mediaItems[currentIndex]?.name || 'Document'}
+                </Text>
+              </View>
+            )}
+
+            {/* Swipe Controls for Multiple Items */}
+            {mediaItems.length > 1 && (
+              <View style={styles.swipeIndicators}>
+                <Pressable 
+                  style={[styles.navArrow, { opacity: currentIndex > 0 ? 1 : 0.3 }]} 
+                  onPress={() => currentIndex > 0 && setCurrentIndex(currentIndex - 1)}
+                >
+                  <MaterialIcons name="chevron-left" size={32} color="#fff" />
+                </Pressable>
+                
+                <View style={styles.dotsRow}>
+                  {mediaItems.map((_, idx) => (
+                    <View key={idx} style={[styles.dot, { backgroundColor: idx === currentIndex ? activeTheme.primary : 'rgba(255,255,255,0.4)' }]} />
+                  ))}
+                </View>
+
+                <Pressable 
+                  style={[styles.navArrow, { opacity: currentIndex < mediaItems.length - 1 ? 1 : 0.3 }]} 
+                  onPress={() => currentIndex < mediaItems.length - 1 && setCurrentIndex(currentIndex + 1)}
+                >
+                  <MaterialIcons name="chevron-right" size={32} color="#fff" />
+                </Pressable>
+              </View>
+            )}
+          </View>
+
+          {/* Bottom Input Area */}
+          <Animated.View entering={SlideInDown.duration(300).springify().damping(18)} exiting={SlideOutDown.duration(200)} style={styles.bottomContainer}>
+            <View style={styles.inputActionRow}>
+              <Pressable style={styles.galleryButton} onPress={handlePickGallery} disabled={isUploading}>
+                <MaterialIcons name="image" size={24} color="#fff" />
+              </Pressable>
+              
+              <View style={styles.inputWrapper}>
+                <TextInput
+                  style={styles.captionInput}
+                  placeholder="Add a caption..."
+                  placeholderTextColor="rgba(255, 255, 255, 0.6)"
+                  value={caption}
+                  onChangeText={setCaption}
+                  maxLength={500}
+                  editable={!isUploading}
+                  multiline
+                />
+              </View>
+
+              <Pressable
+                style={[styles.themedSendButton, { backgroundColor: activeTheme.primary }, isUploading && styles.sendButtonDisabled]}
+                onPress={handleSend}
+                disabled={isUploading}
+              >
+                {isUploading ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <MaterialIcons name="send" size={18} color="#fff" />
+                )}
+              </Pressable>
+            </View>
+          </Animated.View>
+        </KeyboardAvoidingView>
+
+        {/* Crop Image Modal */}
         <CropImageModal
           visible={showCropModal}
           imageUri={currentUri}

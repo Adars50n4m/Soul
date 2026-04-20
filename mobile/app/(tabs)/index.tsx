@@ -1391,7 +1391,7 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
         onSelectAudio={() => Alert.alert("Audio Status", "Coming soon!")}
         onSelectNote={() => {
             setIsMediaPickerVisible(false);
-            setIsNoteModalVisible(true);
+            setTimeout(() => setIsNoteModalVisible(true), 260);
         }}
       />
 

@@ -110,16 +110,18 @@ const OPEN_RELAY_TURN_SERVERS: any[] = [
   { urls: 'stun:stun.relay.metered.ca:80' },
   { urls: 'stun:stun.relay.metered.ca:443' },
   { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun.l.google.com:443' }, // Backup port 443
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.voiparound.com:3478' },
+  { urls: 'stun:stun.nextcloud.com:3478' },
   // OpenRelay TURN — free, no signup, works from any network
-  // These are the officially published free credentials for the Open Relay Project
   { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:80?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  // Cloudflare STUN
-  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
 // Runtime TURN credential cache (fetched from Metered API at call time)
@@ -339,6 +341,8 @@ class WebRTCService {
     }
 
     private async applyExpoCallAudioMode(): Promise<void> {
+        const isSimulator = Platform.OS === 'ios' && !Constants.isDevice;
+        
         await ExpoAudio.setAudioModeAsync({
             allowsRecordingIOS: true,
             playsInSilentModeIOS: true,
@@ -387,12 +391,16 @@ class WebRTCService {
             throw new Error('Microphone permission is required for calling.');
         }
 
+        const isSimulator = Platform.OS === 'ios' && !Constants.isDevice;
+
         if (!this.hasManualAudioOutputOverride) {
             this.speakerEnabled = this.getPreferredSpeakerForCallType(this.callType);
         }
 
         try {
             await this.applyExpoCallAudioMode();
+            // Sequential buffer: Give ExpoAudio a moment to settle the native category change
+            if (isSimulator) await new Promise(r => setTimeout(r, 200));
         } catch (error) {
             console.warn('[WebRTCService] Failed to apply Expo call audio mode:', error);
         }
@@ -400,7 +408,11 @@ class WebRTCService {
         if (InCallManager) {
             try {
                 if (!this.isAudioSessionActive) {
-                    InCallManager.start({ media: this.callType });
+                    console.log(`[WebRTCService] 🎙️ Starting InCallManager (${this.callType})...`);
+                    InCallManager.start({ 
+                        media: this.callType,
+                        ringback: '', // Explicitly disable builtin ringback if any
+                    });
                 }
                 InCallManager.setKeepScreenOn(true);
                 this.applyNativeAudioRoute();
@@ -410,6 +422,18 @@ class WebRTCService {
         }
 
         this.isAudioSessionActive = true;
+        
+        // CRITICAL SIMULATOR FIX: 
+        // The VoiceProcessingAudioUnit initialization (triggered by setLocalDescription later)
+        // often timeouts if called immediately after session activation on the simulator.
+        if (isSimulator) {
+            console.log('[WebRTCService] 🛡️ Simulator detected: applying defensive 800ms stabilization delay...');
+            await new Promise(r => setTimeout(r, 800));
+        } else {
+            // Even on physical devices, a tiny buffer helps prevent Race Conditions in the audio daemon
+            await new Promise(r => setTimeout(r, 100));
+        }
+
         console.log(`[WebRTCService] Audio session active (${context}) output=${this.getAudioOutput()}`);
     }
 
@@ -542,34 +566,38 @@ class WebRTCService {
             iceServers,
             sdpSemantics: 'unified-plan',
             iceCandidatePoolSize: 10,
-            // 'all' allows both direct (host/srflx) and relay candidates.
-            // 'relay' would ONLY work if TURN auth succeeds — risky for dev.
             iceTransportPolicy: ENV.CALL_FORCE_RELAY ? 'relay' : 'all',
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require',
         };
     }
 
-    private getPeerConnectionConfigs(): any[] {
-        // Build all available ICE servers (STUN + TURN)
+    private async getPeerConnectionConfigs(): Promise<any[]> {
+        // 1. Get latest Metered credentials if available
+        const meteredServers = await fetchMeteredTurnCredentials();
+        
+        // 2. Build all available ICE servers (Dynamic + Static + Custom)
         const allServers = [
+            ...meteredServers,
             ...CUSTOM_TURN_SERVERS,
             ...OPEN_RELAY_TURN_SERVERS,
             ...SAFE_FALLBACK_STUN_SERVERS,
         ].filter(s => !!s && s?.urls);
 
         const turnOnlyServers = allServers.filter(
-            s => typeof s.urls === 'string' && s.urls.startsWith('turn:')
+            s => {
+                const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+                return urls.some((u: string) => u.startsWith('turn:') || u.startsWith('turns:'));
+            }
         );
 
-        // For virtual environments (Android Emulator / iOS Simulator), we prefer 'all' 
-        // but prioritize our local relay entry. 'relay' policy is too strict if 
-        // the local turnserver has auth issues.
         const primaryPolicy = 'all';
 
-        console.log(`[WebRTCService] 🛠️ ICE pool: ${allServers.length} servers (${turnOnlyServers.length} TURN) | Policy: ${primaryPolicy}`);
+        console.log(`[WebRTCService] 🛠️ ICE pool refreshed: ${allServers.length} servers (${turnOnlyServers.length} TURN) | Policy: ${primaryPolicy}`);
 
         return [
             {
-                // PRIMARY: uses 'all' to allow STUN/Host fallbacks, but local TURN is first in server list.
+                // PRIMARY: uses 'all' to allow STUN/Host fallbacks, but all TURNs are present.
                 iceServers: allServers,
                 iceTransportPolicy: primaryPolicy,
                 iceCandidatePoolSize: 10,
@@ -587,7 +615,7 @@ class WebRTCService {
                 rtcpMuxPolicy: 'require',
             },
             {
-                // FALLBACK 2: TCP only 
+                // FALLBACK 2: TCP only and Secure Ports
                 iceServers: allServers.filter(s => {
                     const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
                     return urls.some((u: string) => u.includes('tcp') || u.startsWith('stun:') || (u.startsWith('turn:') && u.includes('443')));
@@ -631,9 +659,18 @@ class WebRTCService {
                 console.log('[WebRTCService] ✅ ICE connected — media path confirmed');
                 this.setState('connected');
                 this.reconnectAttempts = 0; // Reset on successful connection
+                if (this.connectionWatchdog) {
+                    clearTimeout(this.connectionWatchdog);
+                    this.connectionWatchdog = null;
+                }
             }
             if (state === 'disconnected') {
-                console.warn('[WebRTCService] ⚠️ ICE disconnected — waiting for recovery');
+                console.warn('[WebRTCService] ⚠️ ICE disconnected — starting watchdog');
+                this.startConnectionWatchdog();
+            }
+            if (state === 'checking') {
+                // If we stay in checking for more than 10-12s, the watchdog will trigger a restart
+                this.startConnectionWatchdog();
             }
         };
 
@@ -1527,26 +1564,31 @@ class WebRTCService {
             clearTimeout(this.connectionWatchdog);
         }
 
+        // PROACTIVE WATCHDOG: 8.5 seconds for first attempt to catch slow P2P gathering early
         this.connectionWatchdog = setTimeout(() => {
             this.connectionWatchdog = null;
 
-            if (this.callState !== 'connecting' && this.callState !== 'ringing') {
+            // Only act if we should be connected
+            if (this.callState !== 'connecting' && this.callState !== 'ringing' && this.callState !== 'connected') {
                 return;
             }
 
-            const hasConnectedPeer = Array.from(this.peerConnections.values()).some((pc) => (
+            const hasConnectedPeer = Array.from(this.peerConnections.values()).every((pc) => (
                 pc.connectionState === 'connected'
                 || pc.iceConnectionState === 'connected'
                 || pc.iceConnectionState === 'completed'
             ));
 
             if (!hasConnectedPeer && this.peerConnections.size > 0) {
-                console.warn('[WebRTCService] ⏰ Connection watchdog timeout — attempting ICE restart');
+                console.warn('[WebRTCService] ⏰ Connection watchdog timeout — attempting defensive ICE restart');
                 void this.attemptIceRestart().catch((error: any) => {
                     console.warn('[WebRTCService] Connection watchdog ICE restart failed:', error?.message || error);
                 });
+                
+                // Keep watching (retry interval slightly shorter for recovery)
+                this.startConnectionWatchdog();
             }
-        }, 7000);
+        }, this.reconnectAttempts === 0 ? 8500 : 6000);
     }
 
     private stopTrackMonitoring(): void {
@@ -1588,16 +1630,69 @@ class WebRTCService {
         }
 
         this.reconnectAttempts++;
-        console.log(`[WebRTCService] 🔄 Attempting ICE restart (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+        const shouldForceRelay = this.reconnectAttempts === 2;
+        const shouldDestructiveReset = this.reconnectAttempts >= 3;
+        
+        console.log(`[WebRTCService] 🔄 Attempting ICE recovery stage ${this.reconnectAttempts}/${this.maxReconnectAttempts} | ForceRelay=${shouldForceRelay} | Destructive=${shouldDestructiveReset}`);
         
         for (const [userId, pc] of this.peerConnections.entries()) {
             try {
+                if (shouldDestructiveReset) {
+                    console.warn(`[WebRTCService] 🧨 Stage 4: DESTRUCTIVE RESET for peer ${userId}`);
+                    await this.recreatePeerConnection(userId);
+                    continue; // recreatePeerConnection handles the NEW offer
+                }
+
+                if (shouldForceRelay) {
+                    console.log(`[WebRTCService] 🛡️ Stage 3: Escalating to FORCE-RELAY for ${userId}`);
+                    const configs = await this.getPeerConnectionConfigs();
+                    const relayConfig = configs.find(c => c.iceTransportPolicy === 'relay') || configs[0];
+                    if (pc.setConfiguration) {
+                        pc.setConfiguration(relayConfig);
+                    }
+                }
+                
                 const offer = await pc.createOffer({ iceRestart: true });
                 await pc.setLocalDescription(offer);
                 await callService.sendOffer(offer, userId);
             } catch (err: any) {
-                console.warn(`[WebRTCService] ICE restart failed for ${userId}:`, err?.message);
+                console.warn(`[WebRTCService] ICE recovery stage ${this.reconnectAttempts} failed for ${userId}:`, err?.message);
+                
+                // If even the simple offer failed, try destructive next time
+                if (this.reconnectAttempts < 5) {
+                    this.connectionWatchdog = setTimeout(() => this.attemptIceRestart(), 2000) as any;
+                }
             }
+        }
+    }
+
+    private async recreatePeerConnection(userId: string): Promise<void> {
+        console.log(`[WebRTCService] ♻️ Re-initializing connection for ${userId} from scratch...`);
+        
+        // 1. Teardown old connection
+        const oldPc = this.peerConnections.get(userId);
+        if (oldPc) {
+            try {
+                oldPc.close();
+                this.peerConnections.delete(userId);
+            } catch (e) {}
+        }
+
+        // 2. Clear state
+        this.pendingParticipants.delete(userId);
+        
+        // 3. Create fresh connection with Aggressive Relay policy
+        const configs = await this.getPeerConnectionConfigs();
+        const aggressiveConfig = configs.find(c => c.iceTransportPolicy === 'relay') || configs[0];
+        
+        const newPc = await this.getOrCreatePeerConnection(userId, aggressiveConfig);
+        
+        // 4. Trigger fresh offer
+        if (this.isInitiator) {
+            console.log(`[WebRTCService] 🚀 Sending fresh offer after destructive reset to ${userId}`);
+            const offer = await newPc.createOffer();
+            await newPc.setLocalDescription(offer);
+            await callService.sendOffer(offer, userId);
         }
     }
 

@@ -17,7 +17,7 @@ interface NoteCreatorModalProps {
 
 export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalProps) => {
     const { width, height } = useWindowDimensions();
-    const { currentUser, updateNote, activeTheme } = useApp();
+    const { currentUser, updateSoulNote, activeTheme } = useApp();
     const [noteText, setNoteText] = useState(currentUser?.note || '');
     const [prevVisible, setPrevVisible] = useState(visible);
 
@@ -48,13 +48,13 @@ export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalP
 
     const handleDone = () => {
         if (noteText.trim()) {
-            updateNote(noteText.trim());
+            updateSoulNote(noteText.trim());
         }
         onClose();
     };
 
     const handleDelete = () => {
-        updateNote(null);
+        updateSoulNote('');
         setNoteText('');
         onClose();
     };
@@ -88,15 +88,15 @@ export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalP
                     {/* Content */}
                     <View style={styles.content}>
                         <View style={styles.avatarWrapper}>
-                            {/* Note Bubble Preview */}
-                            <Animated.View 
+                            {/* Note Bubble */}
+                            <Animated.View
                                 entering={FadeIn.delay(300)}
-                                style={[styles.previewBubble, { width: width * 0.7 }]}
+                                style={[styles.previewBubble, { maxWidth: width * 0.78 }]}
                             >
                                 <TextInput
                                     ref={inputRef}
                                     style={styles.input}
-                                    placeholder="What&apos;s on your mind?"
+                                    placeholder="What's on your mind?"
                                     placeholderTextColor="rgba(255,255,255,0.4)"
                                     value={noteText}
                                     onChangeText={setNoteText}
@@ -104,17 +104,17 @@ export const NoteCreatorModal = ({ visible, onClose, onSave }: NoteCreatorModalP
                                     maxLength={60}
                                     selectionColor={activeTheme.primary}
                                 />
-                                {/* Tail dots for consistency */}
-                                <View style={styles.tailAnchor}>
-                                    <View style={[styles.tailRoot, { backgroundColor: '#262626' }]} />
-                                    <View style={[styles.tailMain, { backgroundColor: '#262626' }]} />
-                                    <View style={[styles.tailDotSmall, { backgroundColor: '#262626' }]} />
-                                </View>
                             </Animated.View>
 
-                            <Image 
-                                source={{ uri: currentUser?.avatar || 'https://via.placeholder.com/150' }} 
-                                style={styles.avatar} 
+                            {/* Tail dots between bubble and avatar */}
+                            <View style={styles.tailColumn} pointerEvents="none">
+                                <View style={styles.tailDotMedium} />
+                                <View style={styles.tailDotSmall} />
+                            </View>
+
+                            <Image
+                                source={{ uri: currentUser?.avatar || 'https://via.placeholder.com/150' }}
+                                style={styles.avatar}
                             />
                         </View>
 
@@ -208,59 +208,44 @@ const styles = StyleSheet.create({
     },
     previewBubble: {
         backgroundColor: '#262626',
-        paddingVertical: 28,
-        paddingHorizontal: 32,
+        paddingVertical: 22,
+        paddingHorizontal: 28,
         borderRadius: 38,
-        marginBottom: 20,
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
+        borderColor: 'rgba(255,255,255,0.08)',
         alignItems: 'center',
-        position: 'relative',
+        justifyContent: 'center',
         minWidth: 210,
+        minHeight: 72,
     },
     input: {
         color: '#fff',
-        fontSize: 20,
-        fontWeight: '700',
+        fontSize: 18,
+        fontWeight: '600',
         textAlign: 'center',
-        width: '100%',
+        minHeight: 24,
     },
-    tailAnchor: {
-        position: 'absolute',
-        top: '100%',
-        left: 40,
-        width: 80,
-        height: 60,
+    tailColumn: {
+        alignItems: 'center',
+        marginTop: 10,
+        marginBottom: 10,
+        gap: 6,
     },
-    tailRoot: {
-        position: 'absolute',
-        top: 2,
-        left: 0,
-        width: 16,
-        height: 16,
-        borderRadius: 8,
-        borderWidth: 1.5,
-        borderColor: 'rgba(255,255,255,0.12)',
-    },
-    tailMain: {
-        position: 'absolute',
-        top: 28,
-        left: 10,
-        width: 9,
-        height: 9,
-        borderRadius: 4.5,
+    tailDotMedium: {
+        width: 12,
+        height: 12,
+        borderRadius: 6,
+        backgroundColor: '#262626',
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.06)',
+        borderColor: 'rgba(255,255,255,0.08)',
     },
     tailDotSmall: {
-        position: 'absolute',
-        top: 48,
-        left: 20,
-        width: 5,
-        height: 5,
-        borderRadius: 2.5,
-        opacity: 0.6,
-        backgroundColor: '#fff', // Slightly different for modal preview
+        width: 7,
+        height: 7,
+        borderRadius: 3.5,
+        backgroundColor: '#262626',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.08)',
     },
     hintText: {
         color: 'rgba(255,255,255,0.4)',
