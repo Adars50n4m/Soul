@@ -217,7 +217,7 @@ app.post('/api/status/create', async (req, res) => {
                     user_id: status.userId,
                     user_name: status.userName,
                     user_avatar: status.userAvatar,
-                    media_key: status.mediaUrl || status.media_key, // Correcting column name
+                    media_key: status.mediaUrl || status.media_key, // Standardizing to media_key
                     media_type: status.mediaType,
                     caption: status.caption,
                     likes: status.likes || [],
@@ -320,7 +320,19 @@ app.get('/api/users/search', authenticateUser, async (req, res) => {
             !(dbUsers || []).some(dbU => dbU.id === u.id)
         );
 
-        const users = [...matchingSuperusers, ...(dbUsers || [])];
+        const validatedDbUsers = [];
+        for (const user of dbUsers || []) {
+            try {
+                const { data: authUserData, error: authUserError } = await supabase.auth.admin.getUserById(user.id);
+                if (!authUserError && authUserData?.user) {
+                    validatedDbUsers.push(user);
+                }
+            } catch (_) {
+                // Ignore orphaned profile rows that no longer map to auth.users
+            }
+        }
+
+        const users = [...matchingSuperusers, ...validatedDbUsers];
 
         console.log(`[Search] Found ${users?.length || 0} matching users for query "${query}" (included ${matchingSuperusers.length} superusers)`);
 
@@ -373,13 +385,16 @@ app.get('/api/users/search', authenticateUser, async (req, res) => {
     }
 });
 
-// 2. Send Connection Request
-app.post('/api/connections/request', authenticateUser, async (req, res) => {
+// 2. Send Connection Request (with alias for plural robustness)
+app.post(['/api/connections/request', '/api/connections/requests'], authenticateUser, async (req, res) => {
     const { receiverId, message } = req.body;
     const senderId = req.user.id;
 
     if (!receiverId) return res.status(400).json({ error: 'receiverId is required' });
     if (senderId === receiverId) return res.status(400).json({ error: 'Cannot connect with yourself' });
+
+    let targetId = receiverId;
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(targetId);
 
     try {
         if (!supabase) {
@@ -387,11 +402,26 @@ app.post('/api/connections/request', authenticateUser, async (req, res) => {
             return res.status(503).json({ error: 'Database service unavailable' });
         }
 
+        // If targetId is a username, resolve it to a UUID from the profiles table
+        if (!isUUID) {
+            const { data: profile, error: profileErr } = await supabase
+                .from('profiles')
+                .select('id')
+                .eq('username', targetId)
+                .maybeSingle();
+            
+            if (profileErr || !profile) {
+                console.warn(`[Connections] ⚠️ Failed to resolve username "${targetId}" to UUID:`, profileErr?.message);
+                return res.status(404).json({ error: `User "${targetId}" not found in our database.` });
+            }
+            targetId = profile.id;
+        }
+
         // Check if already connected or request pending
         const { data: existing } = await supabase
             .from('connection_requests')
             .select('id, status')
-            .match({ sender_id: senderId, receiver_id: receiverId })
+            .match({ sender_id: senderId, receiver_id: targetId })
             .eq('status', 'pending')
             .maybeSingle();
 
@@ -401,7 +431,7 @@ app.post('/api/connections/request', authenticateUser, async (req, res) => {
             .from('connection_requests')
             .insert({
                 sender_id: senderId,
-                receiver_id: receiverId,
+                receiver_id: targetId,
                 message,
                 status: 'pending'
             })
@@ -414,7 +444,7 @@ app.post('/api/connections/request', authenticateUser, async (req, res) => {
         const { data: sender } = await supabase.from('profiles').select('username').eq('id', senderId).single();
 
         // Emit socket notification to receiver
-        io.to(receiverId).emit('connection:request_received', {
+        io.to(targetId).emit('connection:request_received', {
             request: data,
             senderId: senderId,
             senderName: sender?.username || 'Someone'
@@ -455,8 +485,8 @@ app.get('/api/connections/requests', authenticateUser, async (req, res) => {
         userIds.delete(userId);
 
         const { data: profiles } = await supabase
-            .from('users')
-            .select('id, username, full_name, avatar_url')
+            .from('profiles')
+            .select('id, username, display_name, name, avatar_url')
             .in('id', Array.from(userIds));
 
         const incoming = requests

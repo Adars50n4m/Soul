@@ -226,6 +226,34 @@ function rowToQueuedMessage(row: any): QueuedMessage {
 }
 
 class OfflineService {
+  private transactionQueue: Promise<unknown> = Promise.resolve();
+
+  private async runSerializedTransaction<T>(
+    operation: (db: SQLite.SQLiteDatabase) => Promise<T>
+  ): Promise<T> {
+    const db = await getDb();
+
+    let releaseQueue!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
+
+    const previous = this.transactionQueue;
+    this.transactionQueue = previous.then(() => gate, () => gate);
+
+    await previous;
+
+    try {
+      let result!: T;
+      await db.withTransactionAsync(async () => {
+        result = await operation(db);
+      });
+      return result;
+    } finally {
+      releaseQueue();
+    }
+  }
+
   async initialize(): Promise<void> {
     await getDb();
   }
@@ -290,8 +318,7 @@ class OfflineService {
   }
 
   async saveGroupMembers(groupId: string, members: LocalGroupMember[]): Promise<void> {
-    const db = await getDb();
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
         // WhatsApp style: usually we refresh the whole list for a group
         // If we want to be surgical, we could just upsert
         for (const member of members) {
@@ -334,10 +361,9 @@ class OfflineService {
   }
 
   async saveMessage(chatId: string, msg: LocalMessage): Promise<void> {
-    const db = await getDb();
     const receiver = msg.sender === 'me' ? chatId : 'me';
     
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
       const existing = await db.getFirstAsync<{ id: string; media_thumbnail?: string | null }>(
         `SELECT id, media_thumbnail FROM messages WHERE id = ? LIMIT 1;`,
         [msg.id]
@@ -379,8 +405,7 @@ class OfflineService {
   }
 
   async savePendingMessage(chatId: string, msg: QueuedMessage): Promise<void> {
-    const db = await getDb();
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
       await db.runAsync(
         `INSERT INTO messages
            (id, chat_id, sender, receiver, text,
@@ -563,10 +588,9 @@ class OfflineService {
   }
 
   async updateMessageId(oldId: string, newId: string): Promise<void> {
-    const db = await getDb();
     if (oldId === newId) return;
 
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
       // Check if newId already exists (race condition with Realtime broadcast)
       const existing = await db.getFirstAsync(`SELECT id, local_file_uri FROM messages WHERE id = ? LIMIT 1;`, [newId]) as any;
       
@@ -722,7 +746,6 @@ class OfflineService {
 
   async saveContactsBatch(contacts: any[]): Promise<void> {
     if (!contacts.length) return;
-    const db = await dbManager.getDatabase({ name: DB_NAME, migrations: async () => {} });
 
     let myUuid: string | null = null;
     try {
@@ -732,7 +755,7 @@ class OfflineService {
 
     const { LEGACY_TO_UUID: MAPPING } = require('../config/supabase');
 
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
       const statement = await db.prepareAsync(
         `INSERT INTO contacts 
             (id, name, avatar, avatar_type, teddy_variant, status, last_message, unread_count, about, last_seen, last_synced_at, updated_at, note, note_timestamp, local_avatar_uri, avatar_updated_at, is_group) 
@@ -834,8 +857,7 @@ class OfflineService {
   }
 
   async saveMediaDownload(messageId: string, remoteUrl: string, localUri: string, fileSize?: number): Promise<void> {
-    const db = await getDb();
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
       await db.runAsync(`INSERT OR REPLACE INTO media_downloads (message_id, remote_url, local_uri, file_size) VALUES (?, ?, ?, ?);`, [messageId, remoteUrl, localUri, fileSize ?? null]);
       await db.runAsync(`UPDATE messages SET local_file_uri = ? WHERE id = ?;`, [localUri, messageId]);
     });
@@ -848,10 +870,9 @@ class OfflineService {
   }
 
   async clearChat(partnerId: string): Promise<void> {
-    const db = await getDb();
     console.log(`[LocalDBService] clearChat for partnerId: ${partnerId}`);
     try {
-      await db.withTransactionAsync(async () => {
+      await this.runSerializedTransaction(async (db) => {
         console.log(`[LocalDBService] clearChat: deleting messages...`);
         await db.runAsync(`DELETE FROM messages WHERE chat_id = ?;`, [partnerId]);
         console.log(`[LocalDBService] clearChat: updating contacts...`);
@@ -934,7 +955,7 @@ class OfflineService {
       // Fail open and allow the transaction to try/fail normally
     }
     
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
       for (const [legacyId, uuid] of Object.entries(mapping)) {
         // 1. Update messages table (no unique constraint on chat_id/receiver)
         await db.runAsync(
@@ -975,9 +996,8 @@ class OfflineService {
    * Used during logout to prevent data pollution between different accounts.
    */
   async clearDatabase(): Promise<void> {
-    const db = await getDb();
     console.log('[SQLite] Clearing user database...');
-    await db.withTransactionAsync(async () => {
+    await this.runSerializedTransaction(async (db) => {
       await db.runAsync('DELETE FROM messages;');
       await db.runAsync('DELETE FROM contacts;');
       await db.runAsync('DELETE FROM chats;');
@@ -990,6 +1010,8 @@ class OfflineService {
       await db.runAsync('DELETE FROM avatar_cache;');
       await db.runAsync('DELETE FROM pending_uploads;');
       await db.runAsync('DELETE FROM cached_users;');
+      await db.runAsync('DELETE FROM groups;');
+      await db.runAsync('DELETE FROM group_members;');
       await db.runAsync('DELETE FROM sync_queue;');
     });
     console.log('[SQLite] Database cleared successfully.');

@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
-import { NativeModules, Platform, AppState } from 'react-native';
+import { NativeModules, Platform, AppState, Alert } from 'react-native';
 // We import types only to avoid side-effects if the native module is missing
 import type { Song, MusicState } from '../types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -92,7 +92,9 @@ interface MusicContextType {
     playPrevious: () => Promise<void>;
     sleepTimerMinutes: number | null;
     setSleepTimer: (minutes: number | null) => void;
+    setSleepTimer: (minutes: number | null) => void;
     setMusicPartner: (partnerId: string) => void;
+    requestMusicSync: () => void;
 }
 
 export const MusicContext = createContext<MusicContextType | undefined>(undefined);
@@ -107,6 +109,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const musicStateRef = useRef(musicState);
     musicStateRef.current = musicState;
     const [isPlayerReady, setIsPlayerReady] = useState(false);
+    const [clockOffset, setClockOffset] = useState(0);
     const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
     const [shuffle, setShuffle] = useState(false);
     const [queue, setQueue] = useState<Song[]>([]);
@@ -207,8 +210,10 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.log('[MusicContext] Remote event received:', event.type);
         if (event.type === TrackPlayerEvents.Event.RemotePlay) {
             TrackPlayer.play();
+            musicSyncService.broadcastUpdate({ isPlaying: true });
         } else if (event.type === TrackPlayerEvents.Event.RemotePause) {
             TrackPlayer.pause();
+            musicSyncService.broadcastUpdate({ isPlaying: false });
         } else if (event.type === TrackPlayerEvents.Event.RemoteNext) {
             playNext();
         } else if (event.type === TrackPlayerEvents.Event.RemotePrevious) {
@@ -221,16 +226,51 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         AsyncStorage.getItem(`ss_favorites_${currentUser.id}`).then(favs => {
             if (favs) setMusicState(prev => ({ ...prev, favorites: JSON.parse(favs) }));
         });
-        musicSyncService.initialize(currentUser.id, async (remoteState) => {
-            console.log('[MusicSync] Received remote update:', remoteState.isPlaying, remoteState.currentSong?.name);
+        musicSyncService.initialize(currentUser.id, async (remoteState, eventType) => {
+            // Handle Clock Sync (Ping/Pong)
+            if (eventType === 'ping') {
+                musicSyncService.sendPong(remoteState.updatedAt);
+                return;
+            }
+            if (eventType === 'pong') {
+                const now = Date.now();
+                const rtt = now - remoteState.position; // remoteState.position stores our original ping time
+                const remoteClockAtTarget = remoteState.updatedAt + (rtt / 2);
+                const newOffset = remoteClockAtTarget - now;
+                
+                // Use a moving average for more stable offset (70% new, 30% old)
+                setClockOffset(prev => (prev === 0 ? newOffset : (prev * 0.3 + newOffset * 0.7)));
+                console.log(`[MusicSync] ⏱️ Clock sync: offset=${newOffset.toFixed(0)}ms, rtt=${rtt.toFixed(0)}ms`);
+                return;
+            }
+
+            console.log(`[MusicSync] (${eventType}) Received remote update:`, remoteState.isPlaying, remoteState.currentSong?.name);
+            
+            // Handle Sync Request: If partner asked for our state, send it immediately
+            if (eventType === 'sync_request') {
+                const currentPos = await TrackPlayer.getPosition();
+                musicSyncService.broadcastUpdate({
+                    currentSong: musicStateRef.current.currentSong,
+                    isPlaying: musicStateRef.current.isPlaying,
+                    position: currentPos * 1000,
+                });
+                return;
+            }
+
             if (!TrackPlayer || !isPlayerReady) return;
 
             try {
-                // If partner started playing a new song
+                // Determine target position with high-precision latency compensation (drift + clock sync)
+                const now = Date.now();
+                // (now + clockOffset) is our estimate of the PARTNER'S local time right now
+                const drift = (now + clockOffset) - remoteState.updatedAt;
+                const targetPosSeconds = (remoteState.position + drift) / 1000;
+
+                // 1. If partner started playing a new song
                 if (remoteState.currentSong && remoteState.currentSong.url) {
                     const currentSong = musicStateRef.current?.currentSong;
                     if (!currentSong || currentSong.id !== remoteState.currentSong.id) {
-                        // Different song — load and play it
+                        console.log('[MusicSync] Different song detected — syncing to:', remoteState.currentSong.name);
                         await TrackPlayer.reset();
                         await TrackPlayer.add({
                             id: remoteState.currentSong.id,
@@ -240,21 +280,51 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                             artwork: remoteState.currentSong.image,
                             duration: remoteState.currentSong.duration ? Number(remoteState.currentSong.duration) / 1000 : undefined,
                         });
-                        if (remoteState.position > 0) {
-                            await TrackPlayer.seekTo(remoteState.position / 1000);
-                        }
+                        
+                        await TrackPlayer.seekTo(targetPosSeconds);
+                        
                         if (remoteState.isPlaying) {
-                            await TrackPlayer.play();
+                            if (remoteState.scheduledStartTime) {
+                                const delay = (remoteState.scheduledStartTime - clockOffset) - Date.now();
+                                if (delay > 0) {
+                                    console.log(`[MusicSync] ⏱️ Scheduled start in ${delay}ms`);
+                                    setTimeout(() => TrackPlayer.play(), delay);
+                                } else {
+                                    await TrackPlayer.play();
+                                }
+                            } else {
+                                await TrackPlayer.play();
+                            }
                         }
+
                         setMusicState(prev => ({
                             ...prev,
                             currentSong: remoteState.currentSong,
                             isPlaying: remoteState.isPlaying,
                         }));
                     } else {
-                        // Same song — sync play/pause state
+                        // 2. Same song — sync play/pause and position drift
+                        const currentLocalPos = await TrackPlayer.getPosition();
+                        const posDifference = Math.abs(currentLocalPos - targetPosSeconds);
+
+                        // Only snap if we are drifting by more than 0.8 seconds (Tighter threshold for near-zero lag)
+                        if (posDifference > 0.8) {
+                            console.log(`[MusicSync] ⏳ Compensating for ${posDifference.toFixed(2)}s drift`);
+                            await TrackPlayer.seekTo(targetPosSeconds);
+                        }
+
                         if (remoteState.isPlaying) {
-                            await TrackPlayer.play();
+                            if (remoteState.scheduledStartTime) {
+                                const delay = (remoteState.scheduledStartTime - clockOffset) - Date.now();
+                                if (delay > 0) {
+                                    console.log(`[MusicSync] ⏱️ Scheduled resume in ${delay}ms`);
+                                    setTimeout(() => TrackPlayer.play(), delay);
+                                } else {
+                                    await TrackPlayer.play();
+                                }
+                            } else {
+                                await TrackPlayer.play();
+                            }
                         } else {
                             await TrackPlayer.pause();
                         }
@@ -281,7 +351,47 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             sub.remove();
             musicSyncService.cleanup();
         };
-    }, [currentUser]);
+    }, [currentUser, isPlayerReady]);
+
+    // ── Heartbeat Loop: Ensures real-time alignment during playback ─────────
+    useEffect(() => {
+        if (!musicState.isPlaying || !musicState.currentSong || !TrackPlayer) return;
+
+        const heartbeat = setInterval(async () => {
+            try {
+                // Only heartbeat if we have an active channel to broadcast on
+                if (musicSyncService.getConnectionStatus() === 'connected') {
+                    const pos = await TrackPlayer.getPosition();
+                    musicSyncService.broadcastUpdate({
+                        currentSong: musicStateRef.current.currentSong,
+                        isPlaying: true,
+                        position: pos * 1000,
+                    });
+                }
+            } catch (e) {
+                console.warn('[MusicContext] Heartbeat failed:', e);
+            }
+        }, 3000); // 3s heartbeat
+
+        return () => clearInterval(heartbeat);
+    }, [musicState.isPlaying, !!musicState.currentSong]);
+
+    // ── Clock Sync Effect: Regularly calibrate clocks when a partner is present ──
+    useEffect(() => {
+        if (!musicSyncService.partnerId || !currentUser) return;
+
+        // Perform initial sync pings
+        const syncInterval = setInterval(() => {
+            if (musicSyncService.getConnectionStatus() === 'connected') {
+                musicSyncService.sendPing();
+            }
+        }, 15000); // Re-calibrate every 15s
+
+        // Trigger immediate ping
+        setTimeout(() => musicSyncService.sendPing(), 1000);
+
+        return () => clearInterval(syncInterval);
+    }, [musicSyncService.partnerId, !!currentUser]);
 
     const playSong = useCallback(async (song: Song, broadcast = true) => {
         if (!isPlayerReady || !TrackPlayer) {
@@ -328,16 +438,20 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 duration: song.duration ? Number(song.duration) / 1000 : undefined,
             });
             
-            await TrackPlayer.play();
-            setMusicState(prev => ({ ...prev, currentSong: song, isPlaying: true }));
-            
             if (broadcast) {
+                const scheduledTime = Date.now() + 500;
                 musicSyncService.broadcastUpdate({ 
                     currentSong: song, 
                     isPlaying: true, 
-                    position: 0 
+                    position: 0,
+                    scheduledStartTime: scheduledTime
                 });
+                console.log(`[MusicContext] ⏱️ Local scheduled start in 500ms`);
+                setTimeout(() => TrackPlayer.play(), 500);
+            } else {
+                await TrackPlayer.play();
             }
+            setMusicState(prev => ({ ...prev, currentSong: song, isPlaying: true }));
         } catch (error) {
             console.error('[MusicContext] playSong error:', error);
         }
@@ -362,18 +476,25 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const wasPlaying = isPlayingState(state);
         if (wasPlaying) {
             await TrackPlayer.pause();
+            musicSyncService.broadcastUpdate({
+                currentSong: musicStateRef.current.currentSong,
+                isPlaying: false,
+                position: (await TrackPlayer.getPosition()) * 1000,
+            });
         } else {
-            await TrackPlayer.play();
+            const scheduledTime = Date.now() + 500;
+            const pos = await TrackPlayer.getPosition();
+            musicSyncService.broadcastUpdate({
+                currentSong: musicStateRef.current.currentSong,
+                isPlaying: true,
+                position: pos * 1000,
+                scheduledStartTime: scheduledTime
+            });
+            console.log(`[MusicContext] ⏱️ Local scheduled resume in 500ms`);
+            setTimeout(() => TrackPlayer.play(), 500);
         }
-        const nowPlaying = !wasPlaying;
-        // We rely on the usePlaybackState hook in effectively updating isPlaying 
-        // to avoid conflicts between manual state setting and actual player state.
-        const pos = await TrackPlayer.getPosition();
-        musicSyncService.broadcastUpdate({
-            currentSong: musicStateRef.current.currentSong,
-            isPlaying: nowPlaying,
-            position: pos * 1000,
-        });
+        // We rely on the usePlaybackState hook for actual state, but set UI state here for responsiveness
+        setMusicState(prev => ({ ...prev, isPlaying: !wasPlaying }));
     }, [isPlayerReady]);
 
     const toggleFavoriteSong = useCallback(async (song: Song) => {
@@ -479,11 +600,15 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         musicSyncService.setPartner(partnerId);
     }, []);
 
+    const requestMusicSync = useCallback(() => {
+        musicSyncService.requestSync();
+    }, []);
+
     const value = {
         musicState, playSong, togglePlayMusic, toggleFavoriteSong, seekTo, getPlaybackPosition,
         repeatMode, toggleRepeat, shuffle, toggleShuffle,
         queue, addToQueue, removeFromQueue, clearQueue, playNext, playPrevious,
-        sleepTimerMinutes, setSleepTimer, setMusicPartner,
+        sleepTimerMinutes, setSleepTimer, setMusicPartner, requestMusicSync,
     };
     return <MusicContext.Provider value={value}>{children}</MusicContext.Provider>;
 };

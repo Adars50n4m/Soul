@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, StatusBar,
-    useWindowDimensions, Platform, Alert, AppState
+    useWindowDimensions, Platform, Alert, AppState, BackHandler
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio as ExpoAudio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
@@ -9,7 +9,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter, useNavigation } from 'expo-router';
 import GlassView from '../components/ui/GlassView';
 import { MaterialIcons, Ionicons, Entypo } from '@expo/vector-icons';
-import ExpoPip from 'expo-pip';
 import SingleChatScreen from './chat/[id]';
 
 import { useApp } from '../context/AppContext';
@@ -21,12 +20,15 @@ import Animated, {
     Easing,
     withSpring,
     runOnJS,
-    interpolate
+    interpolate,
+    cancelAnimation
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useKeepAwake } from 'expo-keep-awake';
 import { SoulAvatar } from '../components/SoulAvatar';
 import { normalizeId } from '../utils/idNormalization';
+import { hapticService } from '../services/HapticService';
+import * as Haptics from 'expo-haptics';
 
 // Load video renderers separately
 const getVideoRenderModules = () => {
@@ -124,6 +126,13 @@ export default function CallScreen() {
 
     const uiConnected = wasConnected || callState === 'connected' || stats.bytesReceived > 0;
 
+    const handleMinimize = useCallback(() => {
+        hapticService.impact(Haptics.ImpactFeedbackStyle.Medium);
+        isMinimizing.current = true;
+        toggleMinimizeCall(true);
+        if (navigation.canGoBack()) navigation.goBack();
+    }, [navigation, toggleMinimizeCall]);
+
     useEffect(() => {
         if (callState === 'connecting') {
             const timer = setTimeout(() => setIsSlowConnection(true), 12000);
@@ -180,19 +189,6 @@ export default function CallScreen() {
                             try { startIOSPIP(rtcPipRef); } catch (e) { console.warn('startIOSPIP error:', e); }
                         }
                         timeout = setTimeout(() => setIosIsInPipMode(true), 150);
-                    } else if (Platform.OS === 'android') {
-                        if (typeof ExpoPip?.enterPipMode !== 'function') {
-                            console.log('[CallScreen] Android PiP unavailable in this build.');
-                        } else {
-                            try {
-                                ExpoPip.enterPipMode({
-                                    width: Math.floor(width),
-                                    height: Math.floor(height),
-                                    autoEnterEnabled: true
-                                });
-                                setAndroidIsInPipMode(true);
-                            } catch (e) { setAndroidIsInPipMode(false); }
-                        }
                     }
                 }
             } else if (nextAppState === 'active') {
@@ -209,6 +205,34 @@ export default function CallScreen() {
         return () => subscription.remove();
     }, [activeCall?.isAccepted, activeCall?.type, width, height]);
 
+    useEffect(() => {
+        if (Platform.OS !== 'android') return;
+
+        const shouldMinimizeToOverlay =
+            !!activeCall &&
+            !isMinimizing.current &&
+            (activeCall.isAccepted || !activeCall.isIncoming);
+
+        if (!shouldMinimizeToOverlay) return;
+
+        const unsubscribe = navigation.addListener('beforeRemove', (event: any) => {
+            if (isMinimizing.current) return;
+            event.preventDefault();
+            handleMinimize();
+        });
+
+        const backSubscription = BackHandler.addEventListener('hardwareBackPress', () => {
+            if (isMinimizing.current) return false;
+            handleMinimize();
+            return true;
+        });
+
+        return () => {
+            unsubscribe();
+            backSubscription.remove();
+        };
+    }, [activeCall, handleMinimize, navigation]);
+
     const isInPipMode = Platform.OS === 'android' ? androidIsInPipMode : iosIsInPipMode;
 
     const contact = useMemo(() => {
@@ -220,11 +244,6 @@ export default function CallScreen() {
         };
     }, [contacts, activeCall]);
 
-    const handleMinimize = useCallback(() => {
-        isMinimizing.current = true;
-        toggleMinimizeCall(true);
-        if (navigation.canGoBack()) navigation.goBack();
-    }, [navigation, toggleMinimizeCall]);
 
     const ensureMicrophoneAccess = useCallback(async (): Promise<boolean> => {
         try {
@@ -296,6 +315,7 @@ export default function CallScreen() {
     const selfVideoX = useSharedValue(width - 130);
     const selfVideoY = useSharedValue(120);
     const screenTranslateY = useSharedValue(0);
+    const screenScale = useSharedValue(1);
     const savedSelfVideoPos = useRef<{ x: number; y: number } | null>(null);
 
     const panGesture = Gesture.Pan()
@@ -332,14 +352,26 @@ export default function CallScreen() {
 
     const screenPanGesture = Gesture.Pan()
         .enabled(!showLiveChat)
-        .onUpdate((event) => { if (event.translationY > 0) screenTranslateY.value = event.translationY; })
+        .onUpdate((event) => {
+            if (event.translationY > 0) {
+                screenTranslateY.value = event.translationY;
+                screenScale.value = interpolate(event.translationY, [0, 400], [1, 0.85], 'clamp');
+            }
+        })
         .onEnd((event) => {
-            if (event.translationY > 150) runOnJS(handleMinimize)();
-            else screenTranslateY.value = withSpring(0);
+            if (event.translationY > 150) {
+                runOnJS(handleMinimize)();
+            } else {
+                screenTranslateY.value = withSpring(0, { damping: 15 });
+                screenScale.value = withSpring(1, { damping: 15 });
+            }
         });
 
     const screenStyle = useAnimatedStyle(() => ({
-        transform: [{ translateY: screenTranslateY.value }],
+        transform: [
+            { translateY: screenTranslateY.value },
+            { scale: screenScale.value }
+        ] as any,
         borderRadius: Platform.OS === 'android' ? (screenTranslateY.value > 10 ? 30 : 0) : interpolate(screenTranslateY.value, [0, 200], [0, 40]),
         overflow: 'hidden',
         flex: 1,
@@ -357,7 +389,7 @@ export default function CallScreen() {
             { translateX: interpolate(meshP1.value, [0, 1], [-width * 0.25, width * 0.25]) },
             { translateY: interpolate(meshP2.value, [0, 1], [-height * 0.1, height * 0.1]) },
             { rotate: `${meshP1.value * 360}deg` }
-        ],
+        ] as any,
         opacity: 0.35
     }));
 
@@ -366,7 +398,7 @@ export default function CallScreen() {
             { translateX: interpolate(meshP2.value, [0, 1], [width * 0.2, -width * 0.2]) },
             { translateY: interpolate(meshP3.value, [0, 1], [height * 0.15, -height * 0.15]) },
             { rotate: `${-meshP2.value * 360}deg` }
-        ],
+        ] as any,
         opacity: 0.3
     }));
 
@@ -375,7 +407,7 @@ export default function CallScreen() {
             { translateX: interpolate(meshP3.value, [0, 1], [-width * 0.15, width * 0.15]) },
             { translateY: interpolate(meshP1.value, [0, 1], [height * 0.2, -height * 0.2]) },
             { rotate: `${meshP3.value * 360}deg` }
-        ],
+        ] as any,
         opacity: 0.25
     }));
 
@@ -383,6 +415,11 @@ export default function CallScreen() {
         meshP1.value = withRepeat(withTiming(1, { duration: 9000, easing: Easing.inOut(Easing.sin) }), -1, true);
         meshP2.value = withRepeat(withTiming(1, { duration: 12000, easing: Easing.inOut(Easing.quad) }), -1, true);
         meshP3.value = withRepeat(withTiming(1, { duration: 15000, easing: Easing.inOut(Easing.exp) }), -1, true);
+        return () => {
+            cancelAnimation(meshP1);
+            cancelAnimation(meshP2);
+            cancelAnimation(meshP3);
+        };
     }, []);
 
     // Mount guard: set isMounted after the first render to prevent navigating
@@ -419,6 +456,16 @@ export default function CallScreen() {
         if (activeCall?.isRinging || callState === 'ringing') {
             return 'Ringing...';
         }
+
+        // Add descriptive state for checking/connecting
+        if (activeCall?.isAccepted) {
+            const iceState = webRTCService?.getIceConnectionState() || 'checking';
+            if (iceState === 'checking') return 'Synchronizing...';
+            if (iceState === 'new') return 'Negotiating...';
+            if (iceState === 'disconnected') return 'Connection Lost';
+            return 'Establishing...';
+        }
+
         return 'Connecting...';
     }, [activeCall?.isAccepted, activeCall?.isIncoming, activeCall?.isRinging, callDuration, callState, uiConnected]);
 
@@ -467,19 +514,6 @@ export default function CallScreen() {
 
     // Audio session management is now handled centrally by WebRTCService
     // to prevent hardware conflicts during transition from music to call.
-
-    // PIP params — separate effect that CAN re-run on activeCall changes
-    useEffect(() => {
-        if (activeCall?.isAccepted && Platform.OS === 'android' && typeof ExpoPip?.setPictureInPictureParams === 'function') {
-            try {
-                ExpoPip.setPictureInPictureParams({
-                    autoEnterEnabled: true,
-                    width: Math.floor(width),
-                    height: Math.floor(width * 1.5)
-                });
-            } catch (e) {}
-        }
-    }, [activeCall?.isAccepted, width]);
 
     useEffect(() => {
         if (!activeCall) return;
@@ -538,6 +572,10 @@ export default function CallScreen() {
                     return next;
                 });
                 setRemoteStreamUpdate(v => v+1); 
+            },
+            onStreamUpdated: (userId: string) => {
+                console.log(`[CallContext] 🔄 Stream updated for user: ${userId}`);
+                setRemoteStreamUpdate(v => v + 1);
             },
             onStats: (st: any) => setStats(prev => ({ ...prev, ...st })),
         };
@@ -603,21 +641,21 @@ export default function CallScreen() {
                     {/* 1. Background Media Layer */}
                     <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0a0a0c' }]}>
                         {/* Dynamic Liquid Mesh */}
-                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle1]}>
+                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle1 as any]}>
                             <LinearGradient 
                                 colors={[hexToRgba(activeTheme?.primary || '#BC002A', 0.45), 'transparent']} 
                                 start={{x: 0, y: 0}} end={{x: 1, y: 1}} 
                                 style={{ width: width * 1.6, height: width * 1.6, borderRadius: width * 0.8 }} 
                             />
                         </Animated.View>
-                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle2]}>
+                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle2 as any]}>
                             <LinearGradient 
                                 colors={['transparent', hexToRgba(activeTheme?.accent || '#FF6A88', 0.35)]} 
                                 start={{x: 1, y: 0}} end={{x: 0, y: 1}} 
                                 style={{ width: width * 1.5, height: width * 1.5, borderRadius: width * 0.75, top: height * 0.3 }} 
                             />
                         </Animated.View>
-                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle3]}>
+                        <Animated.View style={[StyleSheet.absoluteFill, meshStyle3 as any]}>
                             <LinearGradient 
                                 colors={['transparent', hexToRgba('#4C6EF5', 0.25)]} 
                                 start={{x: 0.5, y: 0}} end={{x: 0.5, y: 1}} 
@@ -764,7 +802,27 @@ export default function CallScreen() {
                                         <Text style={styles.diagnosticTitle}>Soul Diagnostics</Text>
                                         <Text style={styles.diagnosticValue}>State: {callState}</Text>
                                         <Text style={styles.diagnosticValue}>ICE: {webRTCService?.getIceConnectionState()}</Text>
-                                        <Text style={styles.diagnosticValue}>Rx Data: {(stats.bytesReceived / 1024).toFixed(1)} KB</Text>
+
+                                        <Text style={[styles.diagnosticTitle, { marginTop: 10, fontSize: 12 }]}>LOCAL TRACKS</Text>
+                                        {localStream?.getTracks().map((t: any) => (
+                                            <Text key={t.id} style={styles.diagnosticValue}>
+                                                • {t.kind}: {t.enabled ? 'Enabled' : 'Disabled'} | {t.muted ? 'Muted' : 'Active'}
+                                            </Text>
+                                        ))}
+
+                                        <Text style={[styles.diagnosticTitle, { marginTop: 10, fontSize: 12 }]}>REMOTE TRACKS</Text>
+                                        {Array.from(remoteStreams.entries()).map(([uid, s]) => (
+                                            <View key={uid}>
+                                                <Text style={[styles.diagnosticValue, { color: '#FF6A88' }]}>{uid.substring(0, 8)}:</Text>
+                                                {s.getTracks().map((t: any) => (
+                                                    <Text key={t.id} style={[styles.diagnosticValue, { marginLeft: 10 }]}>
+                                                        - {t.kind}: {t.enabled ? 'Enabled' : 'Disabled'} | {t.muted ? 'Muted' : 'Active'}
+                                                    </Text>
+                                                ))}
+                                            </View>
+                                        ))}
+
+                                        <Text style={[styles.diagnosticValue, { marginTop: 10 }]}>Rx Data: {(stats.bytesReceived / 1024).toFixed(1)} KB</Text>
                                         <Pressable onPress={() => setShowDiagnostics(false)} style={styles.closeDiagnostics}>
                                             <Text style={{color: '#fff', fontWeight: 'bold' }}>CLOSE</Text>
                                         </Pressable>

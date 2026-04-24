@@ -12,6 +12,7 @@ import {
   RefreshControl,
   TextInput,
 } from 'react-native';
+import { supabase } from '../config/supabase';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
@@ -20,6 +21,7 @@ import { CachedStatus } from '../types';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { SoulAvatar } from '../components/SoulAvatar';
+import { StatusThumbnail } from '../components/StatusThumbnail';
 import { useApp } from '../context/AppContext';
 import { MediaPickerSheet } from '../components/MediaPickerSheet';
 
@@ -71,6 +73,24 @@ export default function MyStatusScreen() {
 
   useEffect(() => {
     loadData();
+
+    // Real-time listener for view updates across all my statuses
+    const channel = supabase
+      .channel('my_status_views_sync')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'status_views' },
+        () => {
+          // Whenever ANY status is viewed, we refresh our local list to get updated counts
+          // In a high-traffic app, we would filter by our own status IDs first.
+          loadData();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [loadData]);
 
   const onRefresh = () => {
@@ -199,10 +219,15 @@ export default function MyStatusScreen() {
             onPress={() => router.push({ pathname: '/view-status', params: { id: currentUser?.id } })}
           >
             <View style={styles.avatarContainer}>
-               <SoulAvatar 
-                 uri={item.mediaLocalPath || item.mediaUrl}
-                 size={48} 
-               />
+              <View style={styles.statusThumbShell}>
+                <StatusThumbnail
+                  statusId={item.id}
+                  mediaKey={item.mediaKey}
+                  uriHint={item.mediaLocalPath || item.mediaUrl}
+                  mediaType={item.mediaType}
+                  style={styles.statusThumb}
+                />
+              </View>
             </View>
             <View style={styles.itemInfo}>
               <Text style={styles.viewText}>
@@ -371,6 +396,17 @@ const styles = StyleSheet.create({
   itemMain: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   avatarContainer: {
     marginRight: 15,
+  },
+  statusThumbShell: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#1a1a1a',
+  },
+  statusThumb: {
+    width: '100%',
+    height: '100%',
   },
   itemInfo: { flex: 1 },
   viewText: { color: '#fff', fontSize: 16, fontWeight: '600' },

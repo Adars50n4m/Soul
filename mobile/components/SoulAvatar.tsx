@@ -168,7 +168,7 @@ export const SoulAvatar = forwardRef<View, SoulAvatarProps>(({
   };
 
   return (
-    <View ref={ref} collapsable={false} style={[{ width: size, height: size }, style]}>
+    <View ref={ref} collapsable={false} style={[{ width: size, height: size, borderRadius: size / 2 }, style]}>
       <Animated.View
         collapsable={false}
         {...sharedProps}

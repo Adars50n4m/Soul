@@ -8,6 +8,7 @@ import { notificationService } from '../services/NotificationService';
 import { proxySupabaseUrl } from '../config/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
+import { soulFolderService } from '../services/SoulFolderService';
 
 export type PrivacyValue = 'everyone' | 'contacts' | 'nobody';
 
@@ -359,9 +360,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const startInit = Date.now();
         
         // --- NEW: Block until Database Migration is verified (with 5s fail-safe) ---
+        // --- REFINED: Optimistic Initialization Flow ---
         const runInit = async () => {
             try {
-                // 1. Database Phase
+                // 1. PHASE ZERO: Optimistic Cache Restore
+                // We do this BEFORE the DB phase to have a user object ready as early as possible.
+                const [cachedUserId, cachedProfileRaw] = await Promise.all([
+                    AsyncStorage.getItem('ss_current_user'),
+                    AsyncStorage.getItem('ss_cached_user_profile')
+                ]);
+
+                if (cachedUserId && cachedProfileRaw) {
+                    try {
+                        const parsed = JSON.parse(cachedProfileRaw) as User;
+                        if (parsed?.id === cachedUserId) {
+                            console.log('[AuthContext] Phase 0: Optimistically restored user from cache:', parsed.username);
+                            setCurrentUser(parsed);
+                        }
+                    } catch (e) {
+                        console.warn('[AuthContext] Failed to parse optimistic cache:', e);
+                    }
+                }
+
+                // 2. PHASE ONE: Database Connectivity
                 const dbPromise = (async () => {
                     await getDb();
                     if (dbTimeoutId) {
@@ -377,23 +398,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                         dbTimeoutId = undefined;
                         console.warn(`[AuthContext] Database initialization HUNG after 2s - continuing to UI`);
                         resolve(false);
-                    }, 2000); // Shorter timeout for faster boot
+                    }, 2000);
                 });
 
                 await Promise.race([dbPromise, dbTimeout]);
                 if (!isMounted) return;
 
-                console.log(`[AuthContext] DB phase complete after ${Date.now() - startInit}ms, starting session check...`);
-
-                const cachedUserId = await AsyncStorage.getItem('ss_current_user');
+                // 3. PHASE TWO: Session Verification
                 if (cachedUserId && isSuperUser(cachedUserId)) {
                     console.log('[AuthContext] Prioritizing cached super user during boot:', cachedUserId);
                     await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
-                    await synchronizeSessionWithTimeout(cachedUserId, 2000);
+                    await synchronizeSessionWithTimeout(cachedUserId, 3000);
                     return;
                 }
                 
-                // 2. Session Phase
                 const sessionPromise = (async () => {
                     const res = await supabase.auth.getSession();
                     if (sessionTimeoutId) {
@@ -406,20 +424,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const sessionTimeout = new Promise<null>((resolve) => {
                     sessionTimeoutId = setTimeout(() => {
                         sessionTimeoutId = undefined;
-                        console.log(`[AuthContext] Session check TIMED OUT after 2s, continuing to UI...`);
+                        // INCREASED: 5s for Android reliability
+                        console.warn(`[AuthContext] Session check TIMED OUT after 5s, relying on cache...`);
                         resolve(null);
-                    }, 2000); // Reduced from 3s for snappier startup
+                    }, 5000);
                 });
 
                 const sessionResult = await Promise.race([sessionPromise, sessionTimeout]);
                 if (!isMounted) return;
 
-                console.log(`[AuthContext] Initialization complete after ${Date.now() - startInit}ms. Setting isReady=true`);
+                console.log(`[AuthContext] Initialization complete after ${Date.now() - startInit}ms.`);
                 
-                if (!isMounted) return;
-
-                // If timeout fired (null), skip session check
+                // If timeout fired (null), we've already set the user optimistically if available
                 if (!sessionResult) {
+                    // We stay in ready state; if we have a cached user, they stay logged in (offline mode)
                     setIsReady(true);
                     return;
                 }
@@ -429,56 +447,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
                 if (error) {
                     console.error('[AuthContext] Session check error:', error);
-                    setIsReady(true); // Signal ready even on error to unblock UI
+                    // On error, we keep the optimistic user if it exists, hoping for recovery
+                    setIsReady(true);
                     return;
                 }
 
                 if (session) {
-                    console.log('[AuthContext] Session found, syncing profile for:', session.user.id);
+                    console.log('[AuthContext] Session verified, syncing profile for:', session.user.id);
                     await synchronizeSessionWithTimeout(session.user.id);
                 } else {
-                    console.log('[AuthContext] No session found, checking cache...');
+                    console.log('[AuthContext] No active session found.');
                     if (!isMounted) return;
 
+                    // If we had an optimistic user but no session, verify if we should keep them
                     if (cachedUserId) {
-                        if (isSuperUser(cachedUserId)) {
-                            console.log('[AuthContext] Restoring developer bypass user from local cache:', cachedUserId);
-                            await synchronizeSessionWithTimeout(cachedUserId);
+                        console.log('[AuthContext] Optimistic user exists but session is missing, attempting refresh...');
+                        const refreshed = await authService.refreshSession();
+                        const { data: refreshedSessionData } = await supabase.auth.getSession();
+                        const refreshedUserId = refreshedSessionData.session?.user?.id;
+
+                        if (refreshed && refreshedUserId) {
+                            console.log('[AuthContext] Session restored via refresh. Syncing profile for:', refreshedUserId);
+                            await synchronizeSessionWithTimeout(refreshedUserId);
                         } else {
-                            console.log('[AuthContext] Found cached user without active session:', cachedUserId);
-                            console.log('[AuthContext] Attempting session refresh from persisted auth state...');
+                            // Truly logged out or session expired
+                            const cachedAt = Number(await AsyncStorage.getItem('ss_cached_user_profile_at') || '0');
+                            const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-                            const refreshed = await authService.refreshSession();
-                            const { data: refreshedSessionData } = await supabase.auth.getSession();
-                            const refreshedUserId = refreshedSessionData.session?.user?.id;
-
-                            if (refreshed && refreshedUserId) {
-                                console.log('[AuthContext] Session restored. Syncing profile for:', refreshedUserId);
-                                await synchronizeSessionWithTimeout(refreshedUserId);
+                            if (currentUserRef.current && (Date.now() - cachedAt) < CACHE_TTL_MS) {
+                                console.warn('[AuthContext] Session expired, keeping cached profile for offline use');
+                                // Keep currentUser as is (already set in Phase 0)
                             } else {
-                                const cachedProfileRaw = await AsyncStorage.getItem('ss_cached_user_profile');
-                                const cachedAt = Number(await AsyncStorage.getItem('ss_cached_user_profile_at') || '0');
-                                const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-                                if (cachedProfileRaw && (Date.now() - cachedAt) < CACHE_TTL_MS) {
-                                    try {
-                                        const parsed = JSON.parse(cachedProfileRaw) as User;
-                                        if (parsed?.id === cachedUserId) {
-                                            console.warn('[AuthContext] Session missing, restoring cached profile in offline mode');
-                                            setCurrentUser(parsed);
-                                        }
-                                    } catch (parseError) {
-                                        console.warn('[AuthContext] Failed to parse cached profile:', parseError);
-                                    }
-                                } else {
-                                    console.warn('[AuthContext] Cached user is stale (no valid session). Clearing local auth cache.');
-                                    setCurrentUser(null);
-                                    await AsyncStorage.multiRemove(['ss_current_user', 'ss_cached_user_profile']);
-                                }
+                                console.warn('[AuthContext] Auth cache stale or invalid. Clearing.');
+                                setCurrentUser(null);
+                                await AsyncStorage.multiRemove(['ss_current_user', 'ss_cached_user_profile']);
                             }
                         }
-                    } else {
-                        console.log(`[AuthContext] No session or cached user (total init time: ${Date.now() - startInit}ms), readying app`);
                     }
                 }
             } catch (err) {
@@ -524,8 +528,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
             // First clear the local SQLite database to prevent pollution
             await offlineService.clearDatabase();
+            
+            // Clear local media cache
+            await soulFolderService.clearAllMedia();
         } catch (e) {
-            console.error('[AuthContext] Failed to clear local DB during logout:', e);
+            console.error('[AuthContext] Failed to clear local data during logout:', e);
         }
 
         await authService.signOut();
@@ -535,6 +542,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             'ss_cached_user_profile',
             'ss_cached_user_profile_at',
             'ss_device_session_id',
+            'ss_last_contact_sync',
+            'ss_pinned_chats',
+            'ss_muted_chats',
             'auth_token_expired',
         ]);
         router.replace('/login');

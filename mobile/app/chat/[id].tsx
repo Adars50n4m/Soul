@@ -5,7 +5,7 @@ import {
     View, Text, TextInput, Pressable, AppState,
     StyleSheet, StatusBar, Platform,
     Modal, Animated as RNAnimated, Dimensions, Keyboard, KeyboardEvent, Alert, InteractionManager, ScrollView, FlatList,
-    Image as RNImage
+    Image as RNImage, KeyboardAvoidingView, TouchableWithoutFeedback, ActivityIndicator
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
@@ -44,6 +44,7 @@ import MessageContextMenu from '../../components/chat/MessageContextMenu';
 import { ChatStyles, SCREEN_WIDTH, SCREEN_HEIGHT } from '../../components/chat/ChatStyles';
 import { formatDuration } from '../../utils/formatters';
 import { applyGroupedMediaLocalUri, getMessageMediaItems, sanitizeSongTitle, isMessageEmpty } from '../../utils/chatUtils';
+import { proxySupabaseUrl } from '../../config/api';
 
 import Animated, {
     useSharedValue,
@@ -273,7 +274,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
 
     const router = useRouter();
     const isFocused = useIsFocused();
-    const { contacts, messages, sendChatMessage, startCall, activeCall, updateMessage, addReaction, toggleHeart, deleteMessage, musicState, getPlaybackPosition, seekTo, currentUser, activeTheme, sendTyping, typingUsers, uploadProgressTracker, connectivity, initializeChatSession, cleanupChatSession, fetchOtherUserProfile, setMusicPartner, startGroupCall, sendMediaLikePulse, remoteLikePulse } = useApp() as any;
+    const { contacts, messages, sendChatMessage, startCall, activeCall, updateMessage, addReaction, toggleHeart, deleteMessage, musicState, getPlaybackPosition, seekTo, currentUser, activeTheme, sendTyping, typingUsers, uploadProgressTracker, connectivity, initializeChatSession, cleanupChatSession, fetchOtherUserProfile, setMusicPartner, requestMusicSync, startGroupCall, sendMediaLikePulse, remoteLikePulse } = useApp() as any;
     const themeAccent = activeTheme?.primary || '#BC002A';
     const themeAccentSoft = activeTheme?.accent || '#FF6A88';
     const { getPresence } = usePresence();
@@ -296,6 +297,8 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
     const [isReady, setIsReady] = useState(false);
     const [isAdmin, setIsAdmin] = useState(false);
     const [memberRoles, setMemberRoles] = useState<Record<string, string>>({});
+    const [isLoadingProfile, setIsLoadingProfile] = useState(false);
+    const [remoteContact, setRemoteContact] = useState<Contact | null>(null);
 
 
 
@@ -335,6 +338,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
 
     const [callOptionsPosition, setCallOptionsPosition] = useState({ x: 0, y: 0 });
     const [isExpanded, setIsExpanded] = useState(false);
+    const [isOverlayKeyboardVisible, setIsOverlayKeyboardVisible] = useState(false);
 
     // Morph Animation — iOS-style smooth bezier, no spring jitter
     const HEADER_TOP = 50;
@@ -463,15 +467,29 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
         const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
 
         const onShow = (event: KeyboardEvent) => {
+            // Android uses "resize" mode (set in app.json), so the OS handles keyboard avoidance.
+            // We only need the manual offset for iOS.
+            if (Platform.OS !== 'ios') return;
+
             const rawHeight = event.endCoordinates?.height || 0;
-            const height = IS_IOS
-                ? Math.max(0, rawHeight - keyboardOffset.value)
-                : rawHeight;
+            // iOS can emit multiple keyboard frame updates while the user types
+            // (predictive bar / input accessory changes). Re-subtracting the current
+            // offset makes the composer fall back down even though the keyboard stays open.
+            const height = Math.max(0, rawHeight);
             const duration = event.duration || 250;
+            if (isOverlay) {
+                setIsOverlayKeyboardVisible(true);
+                requestAnimationFrame(() => {
+                    flatListRef.current?.scrollToOffset({ offset: 0, animated: false });
+                });
+            }
             keyboardOffset.value = withTiming(height, { duration });
         };
 
         const onHide = () => {
+            if (isOverlay) {
+                setIsOverlayKeyboardVisible(false);
+            }
             keyboardOffset.value = withTiming(0, { duration: 200 });
         };
 
@@ -482,7 +500,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             showSub.remove();
             hideSub.remove();
         };
-    }, [keyboardOffset]);
+    }, [isOverlay, keyboardOffset]);
 
     const navigation = useNavigation();
 
@@ -661,7 +679,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
     const [inputLayout, setInputLayout] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
     // Derived State
     const contact = useMemo(() => {
-        const found = contacts.find(c => c.id === id);
+        const found = contacts.find(c => c.id === id) || remoteContact;
         if (found) return found;
 
         // Fallback for legacy ID navigation
@@ -670,7 +688,46 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             return contacts.find(c => c.id === legacyMappedUuid);
         }
         return undefined;
-    }, [contacts, id]);
+    }, [contacts, id, remoteContact]);
+
+    // Fetch profile if contact not found locally (e.g. after account switch or from discovery)
+    useEffect(() => {
+        if (!contact && stringId && !isLoadingProfile) {
+            console.log('[Chat] Contact not found locally, fetching remote profile for:', stringId);
+            setIsLoadingProfile(true);
+            
+            // Re-use fetchOtherUserProfile from context but also handle the result locally for this screen
+            const fetchRemote = async () => {
+                try {
+                    const sid = (stringId && LEGACY_TO_UUID[stringId]) || stringId;
+                    const { data, error } = await supabase.from('profiles').select('*').eq('id', sid).maybeSingle();
+                    
+                    if (data) {
+                        const normalized: Contact = {
+                            id: data.id,
+                            name: data.display_name || data.name || data.username || 'User',
+                            avatar: proxySupabaseUrl(data.avatar_url),
+                            avatarType: data.avatar_type || 'teddy',
+                            teddyVariant: data.teddy_variant || 'boy',
+                            status: 'offline', // Default status for remote fetch
+                            about: data.bio || 'Forever in sync',
+                            lastMessage: '',
+                            unreadCount: 0,
+                        };
+                        setRemoteContact(normalized);
+                    } else {
+                        console.warn('[Chat] Remote profile fetch returned no data');
+                    }
+                } catch (err) {
+                    console.error('[Chat] Remote profile fetch failed:', err);
+                } finally {
+                    setIsLoadingProfile(false);
+                }
+            };
+            
+            fetchRemote();
+        }
+    }, [contact, stringId, isLoadingProfile]);
 
     const profileAvatarTransitionTag = useMemo(() => {
         const transitionId = normalizeId(contact?.id || String(id || ''));
@@ -750,7 +807,11 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             initializeChatSession?.(id, isGroup);
             if (!isGroup) {
                 fetchOtherUserProfile?.(id);
+            if (id) {
                 setMusicPartner?.(id);
+                // Wait briefly for channel to subscribe, then request sync
+                setTimeout(() => requestMusicSync?.(), 1000);
+            }
             } else {
                 // Fetch roles for all group members
                 const { data: members } = await supabase
@@ -1295,6 +1356,12 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
         const replyToId = replyingTo ? replyingTo.id : undefined;
         sendChatMessage(messageKey, content, undefined, replyToId, undefined, nextMessageId);
         setReplyingTo(null);
+
+        if (isOverlay) {
+            requestAnimationFrame(() => {
+                flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+            });
+        }
     };
 
     const handleReaction = useCallback((emoji: string) => {
@@ -1380,23 +1447,6 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
         () => reversedMessages.filter((m: any) => m.sender === 'them' && m.status !== 'read').map((m: any) => m.id),
         [reversedMessages]
     );
-
-    // The oldest unread message (last in the inverted list's unread group)
-    const firstUnreadId = useMemo(
-        () => unreadIncomingIds.length > 0 ? unreadIncomingIds[unreadIncomingIds.length - 1] : null,
-        [unreadIncomingIds]
-    );
-
-    const jumpToFirstUnread = useCallback(() => {
-        if (!unreadIncomingIds.length) return;
-        const targetId = unreadIncomingIds[0];
-        const index = reversedMessages.findIndex((m: any) => m.id === targetId);
-        if (index !== -1) {
-            flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.4 });
-            setHighlightedMessageId(targetId);
-            setTimeout(() => setHighlightedMessageId(null), 1500);
-        }
-    }, [reversedMessages, unreadIncomingIds]);
 
     const handleSelectToggle = useCallback((msgId: string) => {
         setSelectedMessageIds(prev => {
@@ -1618,15 +1668,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                     isAdmin={isAdmin}
                     senderRole={memberRoles[item.sender_id]}
                 />
-                {item.id === firstUnreadId && unreadIncomingIds.length > 0 && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 8 }}>
-                        <View style={{ flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(96,165,250,0.4)' }} />
-                        <Text style={{ color: 'rgba(96,165,250,0.8)', fontSize: 11, fontWeight: '600', marginHorizontal: 10 }}>
-                            {unreadIncomingIds.length} NEW {unreadIncomingIds.length === 1 ? 'MESSAGE' : 'MESSAGES'}
-                        </Text>
-                        <View style={{ flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(96,165,250,0.4)' }} />
-                    </View>
-                )}
+
                 {showDateSeparator && (
                     <View style={{ alignItems: 'center', paddingVertical: 12 }}>
                         <View style={{
@@ -1643,7 +1685,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                 )}
             </>
         );
-    }, [selectedContextMessage, chatMessages, contact?.name, handleReaction, handleDoubleTap, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle, uploadProgressTracker, handleMediaDownload, handleRetryMessage, handleQuotePress, highlightedMessageId, reversedMessages, firstUnreadId, unreadIncomingIds, formatDateLabel]);
+    }, [selectedContextMessage, chatMessages, contact?.name, handleReaction, handleDoubleTap, handleMediaTap, selectionMode, selectedMessageIds, handleSelectToggle, uploadProgressTracker, handleMediaDownload, handleRetryMessage, handleQuotePress, highlightedMessageId, reversedMessages, unreadIncomingIds, formatDateLabel]);
 
     const renderCollectionItem = useCallback(({ item, index }: { item: any, index: number }) => (
         <Pressable
@@ -1683,7 +1725,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             mediaTypes: ['images', 'videos'] as ImagePicker.MediaType[],
             quality: 0.8,
             allowsEditing: false,
-            videoMaxDuration: 120,
+            videoMaxDuration: 600,
         });
         if (!result.canceled && result.assets[0]) {
             const asset = result.assets[0];
@@ -1700,7 +1742,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             quality: 0.8,
             allowsEditing: false,
             allowsMultipleSelection: true,
-            videoMaxDuration: 120,
+            videoMaxDuration: 600,
             legacy: true,
             preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
         });
@@ -1760,6 +1802,54 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                 let finalUri = item.uri;
 
                 try {
+                    if (item.type === 'video') {
+                        if (finalUri.startsWith('content://')) {
+                            const extFromName = item.name?.split('.').pop()?.toLowerCase();
+                            const extFromUri = finalUri.split('.').pop()?.split('?')[0]?.toLowerCase();
+                            const extension = extFromName || extFromUri || 'mp4';
+                            const localCopyPath = `${cacheDirectory}chat-video-${Date.now()}-${i}.${extension}`;
+                            await copyAsync({ from: finalUri, to: localCopyPath });
+                            finalUri = localCopyPath;
+                            console.log(`[ChatScreen] Materialized content URI video to local file: ${localCopyPath}`);
+                        }
+
+                        const info = await getInfoAsync(item.uri);
+                        const resolvedInfo = finalUri !== item.uri ? await getInfoAsync(finalUri) : info;
+                        const sizeBytes = (resolvedInfo as any)?.size || 0;
+                        const sizeMB = sizeBytes / (1024 * 1024);
+                        if (sizeBytes > 500 * 1024 * 1024) {
+                            throw new Error(`Video is too large (${sizeMB.toFixed(1)}MB). Please send a video under 500MB.`);
+                        }
+                    }
+
+                    if (item.type === 'video') {
+                        try {
+                            // Safely require the module only when needed
+                            const VideoThumbnails = require('expo-video-thumbnails');
+                            
+                            // Safety check: Ensure the native module is actually available
+                            if (VideoThumbnails && typeof VideoThumbnails.getThumbnailAsync === 'function') {
+                                // Generate thumbnail from video at 1s mark
+                                const { uri: thumbUri } = await VideoThumbnails.getThumbnailAsync(finalUri, {
+                                    time: 1000,
+                                    quality: 0.6,
+                                });
+                                
+                                // Shrink and convert to base64 for immediate placeholder
+                                const thumbResult = await ImageManipulator.manipulateAsync(
+                                    thumbUri,
+                                    [{ resize: { width: 160 } }],
+                                    { compress: 0.4, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+                                );
+                                thumbnail = `data:image/jpeg;base64,${thumbResult.base64}`;
+                            } else {
+                                console.warn('[ChatScreen] ExpoVideoThumbnails native module not found. Skipping thumbnail.');
+                            }
+                        } catch (err) {
+                            console.warn('[ChatScreen] Video thumbnail generation failed:', err);
+                        }
+                    }
+
                     if (item.type === 'image') {
                         // Generate a sharper lightweight preview for grouped media placeholders.
                         const thumbResult = await ImageManipulator.manipulateAsync(
@@ -1778,7 +1868,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                         finalUri = compressed.uri;
                     }
                 } catch (thumbErr) {
-                    console.warn('[ChatScreen] Image processing failed:', thumbErr);
+                    console.warn('[ChatScreen] Media processing failed:', thumbErr);
                 }
 
                 preparedItems.push({
@@ -1819,8 +1909,15 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
 
     if (!contact) {
         return (
-            <View style={styles.container}>
-                <Text style={styles.errorText}>Contact not found</Text>
+            <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+                {isLoadingProfile ? (
+                    <ActivityIndicator size="large" color={themeAccent} />
+                ) : (
+                    <Text style={styles.errorText}>Contact not found</Text>
+                )}
+                <Pressable onPress={handleBack} style={{ marginTop: 20, padding: 12 }}>
+                    <Text style={{ color: themeAccent, fontWeight: '600' }}>Go Back</Text>
+                </Pressable>
             </View>
         );
     }
@@ -1829,7 +1926,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
         <View style={[styles.container, isOverlay && { backgroundColor: 'transparent' }]} pointerEvents={(isOverlay || isFocused) ? 'auto' : 'none'}>
             <StatusBar barStyle="light-content" />
 
-            {!isOverlay && (
+            {!isOverlay || selectionMode ? (
                 <>
                     <ConnectionBanner connectivity={connectivity} mode="absolute" />
                     <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000', zIndex: -1 }]} />
@@ -1948,87 +2045,123 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                         )}
                     </View>
                 </>
-            )}
+            ) : null}
 
-            {/* Content Wrapper */}
-            <Animated.View style={[StyleSheet.absoluteFill, { zIndex: 1, backgroundColor: 'transparent' }, backgroundMorphAnimatedStyle as any]}>
-                <View style={StyleSheet.absoluteFill}>
-                    {/* In overlay mode, let taps on the transparent upper region dismiss the keyboard
-                        (the call's remote video sits behind this and stays visible through the transparency). */}
-                    {isOverlay && (
-                        <Pressable
-                            onPress={Keyboard.dismiss}
-                            style={{
-                                position: 'absolute',
-                                top: 0,
-                                left: 0,
-                                right: 0,
-                                height: SCREEN_HEIGHT * 0.60,
-                                zIndex: 0,
-                            }}
-                        />
-                    )}
-                    <View style={{ flex: 1 }}>
-                        <Animated.View style={[{ flex: 1 }, isOverlay && { paddingTop: SCREEN_HEIGHT * 0.60 }, messagesContainerAnimatedStyle]}>
-                            {isReady && (
-                                isOverlay ? (
+            <KeyboardAvoidingView
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                keyboardVerticalOffset={Platform.OS === 'ios' ? (isOverlay ? 0 : 0) : 0}
+                style={{ flex: 1 }}
+            >
+                {/* Content Wrapper */}
+                <Animated.View style={[StyleSheet.absoluteFill, { zIndex: 1, backgroundColor: 'transparent' }, backgroundMorphAnimatedStyle as any]}>
+                    <View style={StyleSheet.absoluteFill}>
+                        {/* In overlay mode, let taps on the transparent upper region dismiss the keyboard
+                            (the call's remote video sits behind this and stays visible through the transparency). */}
+                        {isOverlay && (
+                            <Pressable
+                                onPress={() => {
+                                    console.log('[DEBUG] Keyboard dismissed via overlay tap');
+                                    Keyboard.dismiss();
+                                }}
+                                style={{
+                                    position: 'absolute',
+                                    top: 0,
+                                    left: 0,
+                                    right: 0,
+                                    // Keep tap-to-dismiss only on the empty upper region so
+                                    // scroll gestures on the live-chat list still reach the FlatList.
+                                    height: isOverlayKeyboardVisible ? SCREEN_HEIGHT * 0.22 : SCREEN_HEIGHT * 0.52,
+                                    zIndex: 0,
+                                }}
+                            />
+                        )}
+                        <View style={{ flex: 1 }}>
+                            <Animated.View
+                                style={[
+                                    { flex: 1 },
+                                    isOverlay && {
+                                        paddingTop: SCREEN_HEIGHT * (isOverlayKeyboardVisible ? 0.24 : 0.60),
+                                    },
+                                    messagesContainerAnimatedStyle,
+                                ]}
+                            >
+                                {isOverlay ? (
                                     <View style={{ flex: 1 }}>
-                                        <MaskedView
-                                            style={{ flex: 1 }}
-                                            maskElement={
-                                                <LinearGradient
-                                                    colors={['transparent', 'white', 'white']}
-                                                    locations={[0, 0.70, 1]}
-                                                    style={StyleSheet.absoluteFill}
-                                                />
-                                            }
-                                        >
-                                            <Animated.FlatList
-                                                ref={flatListRef as any}
-                                                data={reversedMessages}
-                                                keyExtractor={keyExtractor}
-                                                inverted={true}
-                                                renderItem={renderMessage}
-                                                style={styles.messagesList}
-                                                contentContainerStyle={[
-                                                    styles.messagesContent,
-                                                    { paddingBottom: 100 }
-                                                ]}
-                                                showsVerticalScrollIndicator={false}
-                                                scrollEventThrottle={16}
-                                                keyboardShouldPersistTaps="handled"
-                                                keyboardDismissMode="on-drag"
-                                                ListEmptyComponent={
-                                                    <View style={styles.emptyChat}>
-                                                        <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
-                                                        <Text style={styles.emptyChatText}>No messages yet</Text>
-                                                    </View>
-                                                }
-                                            />
-                                        </MaskedView>
+                                        {isReady && (
+                                            <View style={{ flex: 1 }}>
+                                                <MaskedView
+                                                    style={{ flex: 1 }}
+                                                    maskElement={
+                                                        <LinearGradient
+                                                            colors={['transparent', 'white', 'white']}
+                                                            locations={[0, 0.70, 1]}
+                                                            style={StyleSheet.absoluteFill}
+                                                        />
+                                                    }
+                                                >
+                                                    <Animated.FlatList
+                                                        ref={flatListRef as any}
+                                                        data={reversedMessages}
+                                                        keyExtractor={keyExtractor}
+                                                        inverted={true}
+                                                        renderItem={renderMessage}
+                                                        style={styles.messagesList}
+                                                        contentContainerStyle={[
+                                                            styles.messagesContent,
+                                                            styles.overlayMessagesContent,
+                                                            isOverlayKeyboardVisible && styles.overlayMessagesContentKeyboard,
+                                                        ]}
+                                                        showsVerticalScrollIndicator={false}
+                                                        scrollEventThrottle={16}
+                                                        keyboardShouldPersistTaps="handled"
+                                                        keyboardDismissMode="on-drag"
+                                                        ListEmptyComponent={
+                                                            <View style={styles.emptyChat}>
+                                                                <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
+                                                                <Text style={styles.emptyChatText}>No messages yet</Text>
+                                                            </View>
+                                                        }
+                                                    />
+                                                </MaskedView>
+                                            </View>
+                                        )}
                                     </View>
                                 ) : (
-                                    <Animated.FlatList
-                                        ref={flatListRef as any}
-                                        data={reversedMessages}
-                                        keyExtractor={keyExtractor}
-                                        inverted={true}
-                                        renderItem={renderMessage}
-                                        style={styles.messagesList}
-                                        contentContainerStyle={styles.messagesContent}
-                                        showsVerticalScrollIndicator={false}
-                                        scrollEventThrottle={16}
-                                        ListEmptyComponent={
-                                            <View style={styles.emptyChat}>
-                                                <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
-                                                <Text style={styles.emptyChatText}>No messages yet</Text>
-                                            </View>
-                                        }
-                                    />
-                                )
-                            )}
+                                    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+                                        <View style={{ flex: 1 }}>
+                                            {isReady && (
+                                                <Animated.FlatList
+                                                    ref={flatListRef as any}
+                                                    data={reversedMessages}
+                                                    keyExtractor={keyExtractor}
+                                                    inverted={true}
+                                                    renderItem={renderMessage}
+                                                    style={styles.messagesList}
+                                                    contentContainerStyle={styles.messagesContent}
+                                                    showsVerticalScrollIndicator={false}
+                                                    scrollEventThrottle={16}
+                                                    keyboardShouldPersistTaps="handled"
+                                                    keyboardDismissMode="on-drag"
+                                                    ListEmptyComponent={
+                                                        <View style={styles.emptyChat}>
+                                                            <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
+                                                            <Text style={styles.emptyChatText}>No messages yet</Text>
+                                                        </View>
+                                                    }
+                                                />
+                                            )}
+                                        </View>
+                                    </TouchableWithoutFeedback>
+                                )}
 
-                            {!isOverlay && <ProgressiveBlur position="top" height={160} intensity={60} />}
+                            {!isOverlay && (
+                                <ProgressiveBlur
+                                    position="top"
+                                    height={160}
+                                    intensity={60}
+                                    maxAlpha={0.85}
+                                />
+                            )}
                             <ProgressiveBlur position="bottom" height={160} intensity={80} />
                         </Animated.View>
 
@@ -2190,12 +2323,16 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                     </View>
                 </View>
             </Animated.View>
+            </KeyboardAvoidingView>
 
             {/* Root-level Close Button for Overlay — Top Priority */}
             {isOverlay && (
                 <View style={{ position: 'absolute', top: Math.max(insets.top, 20), right: 20, zIndex: 100000 }} pointerEvents="auto">
                     <Pressable 
-                        onPress={() => onBack?.()} 
+                        onPress={() => {
+                            Keyboard.dismiss();
+                            onBack?.();
+                        }} 
                         hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
                         style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' }}
                     >
@@ -2259,14 +2396,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
             )}
 
 
-            {!!unreadIncomingIds.length && (
-                <Pressable style={styles.unreadJumpBtn} onPress={jumpToFirstUnread}>
-                    <GlassView intensity={45} tint="dark" style={styles.unreadJumpPill}>
-                        <MaterialIcons name="south" size={14} color="#fff" />
-                        <Text style={styles.unreadJumpText}>Unread</Text>
-                    </GlassView>
-                </Pressable>
-            )}
+
 
 
 
@@ -2528,6 +2658,16 @@ const styles = StyleSheet.create({
         paddingTop: 110, // Visually paddingBottom due to inverted
         paddingBottom: 100, // Visually paddingTop due to inverted
         flexGrow: 1,
+    },
+    overlayMessagesContent: {
+        // Inverted list: paddingTop is the visual bottom spacer above the composer.
+        // Keep the room here so the user can still scroll naturally like the normal chat.
+        paddingTop: 156,
+        paddingBottom: 24,
+    },
+    overlayMessagesContentKeyboard: {
+        paddingTop: 88,
+        paddingBottom: 12,
     },
     emptyChat: {
         flex: 1,
@@ -3010,27 +3150,6 @@ const styles = StyleSheet.create({
         height: 24,
         alignItems: 'center',
         justifyContent: 'center',
-    },
-    unreadJumpBtn: {
-        position: 'absolute',
-        right: 18,
-        bottom: 128,
-        zIndex: 900,
-    },
-    unreadJumpPill: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 4,
-        borderRadius: 14,
-        paddingHorizontal: 10,
-        paddingVertical: 6,
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.12)',
-    },
-    unreadJumpText: {
-        color: '#fff',
-        fontSize: 12,
-        fontWeight: '600',
     },
     starredOverlay: {
         flex: 1,

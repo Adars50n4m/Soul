@@ -107,7 +107,9 @@ export default function ArchivedChatsScreen() {
         contentContainerStyle={styles.list}
         ListEmptyComponent={
           <View style={styles.emptyWrap}>
-            <MaterialIcons name="archive" size={64} color="rgba(255,255,255,0.12)" />
+            <View style={styles.emptyIconCircle}>
+                <MaterialIcons name="archive" size={42} color="rgba(255,255,255,0.15)" />
+            </View>
             <Text style={styles.emptyTitle}>No archived chats</Text>
             <Text style={styles.emptyText}>Archived chats will stay here until you unarchive them.</Text>
           </View>
@@ -210,20 +212,31 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 32,
-    paddingTop: 120,
+    paddingHorizontal: 40,
+    marginTop: 140,
+  },
+  emptyIconCircle: {
+      width: 100,
+      height: 100,
+      borderRadius: 50,
+      backgroundColor: 'rgba(255,255,255,0.03)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: 24,
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.05)',
   },
   emptyTitle: {
-    color: '#fff',
-    fontSize: 20,
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 18,
     fontWeight: '700',
-    marginTop: 18,
+    marginBottom: 8,
   },
   emptyText: {
-    color: 'rgba(255,255,255,0.42)',
+    color: 'rgba(255,255,255,0.25)',
     textAlign: 'center',
-    marginTop: 8,
     fontSize: 14,
     lineHeight: 20,
+    fontWeight: '600',
   },
 });

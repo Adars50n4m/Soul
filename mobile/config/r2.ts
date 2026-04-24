@@ -10,8 +10,8 @@ export const R2_CONFIG = {
   // Feature flag
   USE_R2: Env.USE_R2,
 
-  // Upload timeout in milliseconds (5 min for high-res media or slow networks)
-  UPLOAD_TIMEOUT: 300000,
+  // Upload timeout in milliseconds (10 min for large media)
+  UPLOAD_TIMEOUT: 600000,
 
   // Retry configuration
   MAX_RETRIES: 3,

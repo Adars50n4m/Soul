@@ -835,7 +835,7 @@ const styles = StyleSheet.create({
     overlayHeader: { width: '100%', alignItems: 'center' },
     
     playerInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 20, width: '100%', marginBottom: 16 },
-    artworkWrapper: { width: 112, height: 112, borderRadius: 20, position: 'relative', overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', shadowColor: '#fff', shadowOpacity: 0.3, shadowRadius: 20, shadowOffset: { width: 0, height: 10 } },
+    artworkWrapper: { width: 112, height: 112, borderRadius: 20, position: 'relative', overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', backgroundColor: '#1a1a1a', shadowColor: '#fff', shadowOpacity: 0.3, shadowRadius: 20, shadowOffset: { width: 0, height: 10 } },
     artwork: { width: '100%', height: '100%' },
     artworkBadge: { position: 'absolute', bottom: -5, right: -5, width: 32, height: 32, borderRadius: 16, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#0f0f0f' },
     playerTextContainer: { flex: 1 },
@@ -853,7 +853,7 @@ const styles = StyleSheet.create({
 
     searchSection: { width: '100%', marginBottom: 12 },
     searchSectionKeyboard: { marginBottom: 12 },
-    searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'transparent', borderRadius: 25, paddingHorizontal: 16, height: 50, borderWidth: 1.2, borderColor: 'rgba(255,255,255,0.22)', shadowColor: '#fff', shadowOpacity: 0.1, shadowRadius: 10, overflow: 'hidden' },
+    searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 25, paddingHorizontal: 16, height: 50, borderWidth: 1.2, borderColor: 'rgba(255,255,255,0.22)', shadowColor: '#fff', shadowOpacity: 0.1, shadowRadius: 10, overflow: 'hidden' },
     searchInput: { flex: 1, color: '#fff', marginLeft: 12, fontSize: 14, fontWeight: '500' },
 
     listHeader: { flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginBottom: 16, paddingHorizontal: 8 },

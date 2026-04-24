@@ -13,16 +13,14 @@ import {
   ActivityIndicator,
   StatusBar,
   Animated,
-  Dimensions,
 } from 'react-native';
 import Svg, { Circle, Path, Ellipse, G } from 'react-native-svg';
-import { Feather } from '@expo/vector-icons';
+import { Feather, MaterialIcons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useApp } from '../context/AppContext';
 import { GlassView } from '../components/ui/GlassView';
 import { authService } from '../services/AuthService';
-
-const { width: SCREEN_W } = Dimensions.get('window');
+import { LinearGradient } from 'expo-linear-gradient';
 
 const STROKE = '#3A2B24';
 const C = {
@@ -199,11 +197,19 @@ export default function UsernameSetupScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <StatusBar barStyle="light-content" backgroundColor="#000" />
+      <View style={styles.bgOrbOne} />
+      <View style={styles.bgOrbTwo} />
+      <LinearGradient
+        colors={['rgba(188,0,42,0.18)', 'rgba(188,0,42,0.02)', 'transparent']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.bgGlow}
+      />
 
       {/* Bears SVG Header */}
-      <Animated.View style={{ transform: [{ translateY: floatY }, { translateX: shakeX }], alignItems: 'center', marginBottom: -50 }}>
+      <Animated.View style={[styles.heroWrap, { transform: [{ translateY: floatY }, { translateX: shakeX }] }]}>
         <Svg width="400" height="200" viewBox="0 0 400 300">
-          {bears.map(({ id, cx, cy, color, snout, cheek, peekArm }) => (
+          {bears.map(({ id, cx, cy, color, snout, cheek }) => (
             <G key={id}>
               <Ellipse cx={cx-24} cy={cy+132} rx="12" ry="8" fill={color} stroke={STROKE} strokeWidth="5" />
               <Ellipse cx={cx+24} cy={cy+132} rx="12" ry="8" fill={color} stroke={STROKE} strokeWidth="5" />
@@ -226,20 +232,48 @@ export default function UsernameSetupScreen() {
       </Animated.View>
 
       <ScrollView
-        contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 22, justifyContent: 'center' }}
+        contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
         {/* Glass Card */}
         <GlassView intensity={Platform.OS === 'ios' ? 80 : 60} tint="dark" style={s.card}>
-          <Text style={s.title}>Create Soul Id</Text>
-          <Text style={s.subtitle}>Choose your unique identity</Text>
+          <View style={styles.stepPill}>
+            <Text style={[styles.stepPillText, { color: themeAccent }]}>Step 1 of 2</Text>
+          </View>
+          <Text style={s.title}>Create your Soul ID</Text>
+          <Text style={s.subtitle}>Pick a unique username and secure your account before profile setup.</Text>
+
+          <View style={styles.progressRow}>
+            <View style={[styles.progressSegment, { backgroundColor: themeAccent }]} />
+            <View style={styles.progressSegmentMuted} />
+          </View>
+
+          {isOauthMode && (
+            <View style={styles.oauthBanner}>
+              <MaterialIcons name="verified-user" size={18} color={themeAccent} />
+              <Text style={styles.oauthBannerText}>Google account connected. Just choose your Soul ID.</Text>
+            </View>
+          )}
 
           {/* Back link */}
           <TouchableOpacity onPress={handleBack} style={s.backLink}>
             <Feather name="arrow-left" size={18} color={themeAccent} />
             <Text style={[s.backText, { color: themeAccent }]}> Back to login</Text>
           </TouchableOpacity>
+
+        <View style={styles.previewCardTop}>
+          <View style={[styles.previewBadge, { borderColor: themeAccent }]}>
+            <Text style={[styles.previewBadgeText, { color: themeAccent }]}>
+              {(username || 's').slice(0, 1).toUpperCase()}
+            </Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.previewEyebrow}>Your Soul handle</Text>
+            <Text style={styles.previewHandle}>@{username.trim().toLowerCase() || 'your_name'}</Text>
+            <Text style={styles.previewHint}>This will be how people find and remember you.</Text>
+          </View>
+        </View>
 
         {/* Username */}
         <View style={styles.fieldGroup}>
@@ -275,7 +309,7 @@ export default function UsernameSetupScreen() {
 
           <View style={styles.rulesList}>
             <Text style={styles.rule}>• 3–20 characters</Text>
-            <Text style={styles.rule}>• Letters, numbers, . and _</Text>
+            <Text style={styles.rule}>• Letters, numbers, . and _ only</Text>
             <Text style={styles.rule}>• Cannot start with . or _</Text>
           </View>
         </View>
@@ -370,9 +404,13 @@ export default function UsernameSetupScreen() {
         >
           {loading
             ? <ActivityIndicator color="#0A0A0F" size="small" />
-            : <Text style={styles.nextBtnText}>Next →</Text>
+            : <Text style={styles.nextBtnText}>Continue to profile</Text>
           }
         </TouchableOpacity>
+
+        <Text style={styles.footerNote}>
+          You can update your display name later, but your username should be chosen carefully.
+        </Text>
         </GlassView>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -381,11 +419,140 @@ export default function UsernameSetupScreen() {
 
 const styles = StyleSheet.create({
   fieldGroup: { marginBottom: 24 },
+  bgOrbOne: {
+    position: 'absolute',
+    width: 360,
+    height: 360,
+    borderRadius: 180,
+    backgroundColor: 'rgba(188,0,42,0.08)',
+    top: -80,
+    right: -140,
+  },
+  bgOrbTwo: {
+    position: 'absolute',
+    width: 420,
+    height: 420,
+    borderRadius: 210,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    bottom: -120,
+    left: -190,
+  },
+  bgGlow: {
+    position: 'absolute',
+    top: 90,
+    left: 0,
+    right: 0,
+    height: 260,
+  },
+  heroWrap: {
+    alignItems: 'center',
+    marginBottom: -34,
+    marginTop: 18,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: 22,
+    justifyContent: 'center',
+    paddingBottom: 26,
+  },
+  stepPill: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    marginBottom: 14,
+  },
+  stepPillText: {
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  progressRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 18,
+  },
+  progressSegment: {
+    flex: 1,
+    height: 6,
+    borderRadius: 999,
+  },
+  progressSegmentMuted: {
+    flex: 1,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  oauthBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(255,255,255,0.045)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  oauthBannerText: {
+    flex: 1,
+    color: '#D6D6E3',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  previewCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    padding: 16,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.045)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    marginBottom: 22,
+  },
+  previewBadge: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1.5,
+  },
+  previewBadgeText: {
+    fontSize: 24,
+    fontWeight: '800',
+  },
+  previewEyebrow: {
+    color: 'rgba(255,255,255,0.48)',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  previewHandle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  previewHint: {
+    color: '#8E8EA0',
+    fontSize: 12,
+    lineHeight: 17,
+  },
   label: { color: '#AAAABC', fontSize: 13, fontWeight: '600', letterSpacing: 0.5, marginBottom: 8, textTransform: 'uppercase' },
   inputWrapper: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#13131C',
-    borderRadius: 12, borderWidth: 1.5, borderColor: '#252535',
-    paddingHorizontal: 14, height: 52,
+    borderRadius: 16, borderWidth: 1.5, borderColor: '#252535',
+    paddingHorizontal: 16, height: 58,
   },
   inputSuccess: { borderColor: '#4CAF50' },
   inputError: { borderColor: '#FF4444' },
@@ -407,9 +574,16 @@ const styles = StyleSheet.create({
   strengthBar: { flex: 1, height: 4, borderRadius: 2 },
   strengthLabel: { fontSize: 12, fontWeight: '600', minWidth: 55, textAlign: 'right' },
   errorText: { color: '#FF6B6B', fontSize: 14, textAlign: 'center', marginBottom: 16 },
-  nextBtn: { borderRadius: 12, height: 52, alignItems: 'center', justifyContent: 'center', marginTop: 8 },
+  nextBtn: { borderRadius: 16, height: 56, alignItems: 'center', justifyContent: 'center', marginTop: 8 },
   btnDisabled: { opacity: 0.6 },
-  nextBtnText: { color: '#0A0A0F', fontSize: 16, fontWeight: '700' },
+  nextBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
+  footerNote: {
+    color: '#767688',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+    marginTop: 14,
+  },
 });
 
 // Glass card styles (same as login)
@@ -419,7 +593,7 @@ const s = StyleSheet.create({
     backgroundColor: 'rgba(26, 26, 28, 0.40)',
     borderRadius: 40,
     paddingHorizontal: 28,
-    paddingTop: 44,
+    paddingTop: 30,
     paddingBottom: 32,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.10)',
@@ -432,24 +606,26 @@ const s = StyleSheet.create({
     elevation: 14,
   },
   title: {
-    fontSize: 32,
+    fontSize: 34,
     fontWeight: '900',
     textAlign: 'center',
     letterSpacing: -0.5,
+    color: '#FFFFFF',
   },
   subtitle: {
-    fontSize: 13,
+    fontSize: 14,
     color: 'rgba(255,255,255,0.7)',
     textAlign: 'center',
-    marginTop: 4,
-    marginBottom: 26,
+    marginTop: 6,
+    marginBottom: 18,
     fontWeight: '500',
+    lineHeight: 20,
   },
   backLink: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 20,
+    marginBottom: 18,
   },
   backText: {
     fontSize: 14,

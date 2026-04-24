@@ -26,6 +26,7 @@ import { Feather, MaterialIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useApp } from '../context/AppContext';
 import { authService } from '../services/AuthService';
+import { supabase } from '../config/supabase';
 import { GlassView } from '../components/ui/GlassView';
 
 // Enable LayoutAnimation for Android
@@ -126,7 +127,10 @@ export default function LoginScreen() {
 
   // Redirect if already logged in
   useEffect(() => {
-    if (currentUser) {
+    // Safety check for OAuth redirection
+    authService.maybeCompleteAuthSession();
+    
+    if (currentUser && currentUser.username && !currentUser.username.startsWith('user_')) {
       router.replace('/(tabs)');
     }
   }, [currentUser]);
@@ -301,6 +305,16 @@ export default function LoginScreen() {
   }, [username, isLogin]);
 
   // ── Auth handlers ────────────────────────────────────────────────
+  const syncAuthenticatedUser = async (fallbackUserId?: string) => {
+    const { data } = await supabase.auth.getSession();
+    const userId = data.session?.user?.id || fallbackUserId;
+    if (!userId) {
+      return false;
+    }
+    await setSession(userId);
+    return true;
+  };
+
   const handleSubmit = async () => {
     if (status === 'loading') return;
     setError('');
@@ -323,8 +337,13 @@ export default function LoginScreen() {
       if (!email.trim() || !password.trim()) { setStatus('fail'); return; }
       setStatus('loading');
       const result = await authService.signInWithPassword(email, password);
-      if (result.success && result.user) {
-        await setSession(result.user.id);
+      if (result.success) {
+        const synced = await syncAuthenticatedUser(result.user?.id);
+        if (!synced) {
+          setError('Login succeeded but session sync failed. Please try again.');
+          setStatus('fail');
+          return;
+        }
         setStatus('success');
         setTimeout(() => router.replace('/(tabs)'), 1500);
       } else {
@@ -350,10 +369,15 @@ export default function LoginScreen() {
         setStatus('loading');
         const res = await authService.verifyOTP(emailSignup, otp);
         if (res.success) {
+          const synced = await syncAuthenticatedUser(res.user?.id);
+          if (!synced) {
+            setError('Verification succeeded but session sync failed. Please try again.');
+            setStatus('fail');
+            return;
+          }
           if (res.isNewUser) {
-            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-            setSignupStep('setup');
-            setStatus('idle');
+            // Let the global _layout.tsx handle the redirect to /username-setup
+            setStatus('success');
           } else {
             setStatus('success');
             setTimeout(() => router.replace('/(tabs)'), 1500);
@@ -363,42 +387,27 @@ export default function LoginScreen() {
           setStatus('fail');
         }
       }
-      else if (signupStep === 'setup') {
-        if (!username || usernameState !== 'available') { setError('Choose a valid username'); setStatus('fail'); return; }
-        if (password.length < 8) { setError('Password too short (8+)'); setStatus('fail'); return; }
-        if (password !== confirmPassword) { setError('Passwords do not match'); setStatus('fail'); return; }
-
-        setStatus('loading');
-        const res = await authService.completeProfileSetup({
-          username,
-          password,
-          displayName: username,
-        });
-
-        if (res.success) {
-          setStatus('success');
-          setTimeout(() => router.replace('/(tabs)'), 1500);
-        } else {
-          setError(res.error || 'Setup failed');
-          setStatus('fail');
-        }
-      }
     }
   };
 
   const handleGoogleSignIn = async () => {
     if (status === 'loading') return;
+    setError('');
     setStatus('loading');
     const result = await authService.signInWithGoogle();
     if (result.success) {
-      setStatus('success');
-      if (result.isNewUser) {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-        setIsLogin(false);
-        setSignupStep('setup');
-        setStatus('idle');
+      const synced = await syncAuthenticatedUser(result.user?.id);
+      if (!synced) {
+        setError('Google sign-in succeeded but session sync failed. Please try again.');
+        setStatus('fail');
+        return;
       }
-      else setTimeout(() => router.replace('/(tabs)'), 1000);
+      setStatus('success');
+      // If result.isNewUser is true, the _layout.tsx auth guard will automatically 
+      // see the user session and redirect them to /username-setup.
+      if (!result.isNewUser) {
+        setTimeout(() => router.replace('/(tabs)'), 1000);
+      }
     } else {
       setError(result.error || 'Google Sign-In failed');
       setStatus('fail');
@@ -594,7 +603,7 @@ const s = StyleSheet.create({
   kav: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 22 },
   bearsWrap: { width: 400, height: 170, alignItems: 'center', marginBottom: -50 },
   card: { width: '100%', backgroundColor: 'rgba(26, 26, 28, 0.4)', borderRadius: 40, padding: 28, overflow: 'hidden' },
-  title: { fontSize: 38, fontWeight: '900', textAlign: 'center' },
+  title: { fontSize: 38, fontWeight: '900', textAlign: 'center', color: '#FFFFFF' },
   subtitle: { fontSize: 13, color: 'rgba(255,255,255,0.7)', textAlign: 'center', marginBottom: 26 },
   err: { color: '#FF6B6B', textAlign: 'center', marginBottom: 12 },
   inputWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#222', borderRadius: 16, borderWidth: 1, borderColor: '#333', paddingHorizontal: 16, height: 56, marginBottom: 14 },

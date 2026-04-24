@@ -128,9 +128,6 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     };
 
-    init();
-
-    // Refresh on every app resume — users expect fresh status feed instantly
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'active') {
         void refreshStatuses();
@@ -156,14 +153,32 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           void refreshStatuses();
         }
       )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'status_views' },
+        (payload) => {
+          console.log('[StatusContext] New status view detected:', payload.new);
+          void refreshStatuses();
+        }
+      )
       .subscribe();
 
+    init();
     return () => {
       isMounted = false;
       subscription.remove();
       supabase.removeChannel(realtimeChannel);
     };
-  }, [isReady, refreshPendingUploads, refreshStatuses, syncPendingUploads]);
+  }, [isReady, refreshStatuses, refreshPendingUploads, syncPendingUploads]);
+
+  // Clear state on logout
+  useEffect(() => {
+    if (!isReady) {
+      setStatusGroups([]);
+      setMyStatuses([]);
+      setPendingUploads([]);
+    }
+  }, [isReady]);
 
   useEffect(() => {
     if (pendingUploads.length === 0) return;

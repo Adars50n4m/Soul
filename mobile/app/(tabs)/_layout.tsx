@@ -59,7 +59,7 @@ const TabIcon = ({ name, focused, size = 26 }: { name: string; focused: boolean;
 };
 
 const TabBar = ({ state, descriptors, navigation }: any) => {
-  const { width: SCREEN_WIDTH } = useWindowDimensions();
+  const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = useWindowDimensions();
   const TAB_BAR_WIDTH = SCREEN_WIDTH - 32;
   const SEARCH_BUTTON_SIZE = 56;
   const ACTIONS_GAP = 10;
@@ -174,6 +174,9 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
     transform: [{ scale: searchScale.value }],
   }));
 
+  const searchSourceX = SCREEN_WIDTH - 72;
+  const searchSourceY = SCREEN_HEIGHT - 90;
+
   if (!state || !state.routes || state.routes.length === 0 || !descriptors || !focusedRoute) {
     return null;
   }
@@ -240,7 +243,7 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
         <Pressable
           onPress={() => {
             hapticService.impact(Haptics.ImpactFeedbackStyle.Light);
-            router.push(`/search?context=${searchContext}`);
+            router.push(`/search?context=${searchContext}&sourceX=${searchSourceX}&sourceY=${searchSourceY}&sourceW=${SEARCH_BUTTON_SIZE}&sourceH=${SEARCH_BUTTON_SIZE}`);
           }}
           style={[styles.searchFabPressable, { width: SEARCH_BUTTON_SIZE, height: SEARCH_BUTTON_SIZE, borderRadius: SEARCH_BUTTON_SIZE / 2 }]}
         >

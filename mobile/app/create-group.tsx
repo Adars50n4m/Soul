@@ -275,7 +275,7 @@ export default function CreateGroupScreen() {
                 <MaterialIcons name="search" size={20} color="rgba(255,255,255,0.4)" style={{ marginLeft: 15 }} />
                 <TextInput
                     style={styles.searchInput}
-                    placeholder="Search contacts..."
+                    placeholder="Find friends to add..."
                     placeholderTextColor="rgba(255,255,255,0.4)"
                     value={searchQuery}
                     onChangeText={setSearchQuery}
@@ -349,13 +349,15 @@ const styles = StyleSheet.create({
     searchBar: {
         flexDirection: 'row',
         alignItems: 'center',
-        height: 44,
+        height: 46,
         marginHorizontal: 20,
-        borderRadius: 22,
+        borderRadius: 23,
         overflow: 'hidden',
         marginBottom: 10,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)',
     },
-    searchInput: { flex: 1, height: '100%', color: '#fff', paddingHorizontal: 12 },
+    searchInput: { flex: 1, height: '100%', color: '#fff', paddingHorizontal: 12, fontSize: 15 },
     contactItem: {
         flexDirection: 'row',
         alignItems: 'center',

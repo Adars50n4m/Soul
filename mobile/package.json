@@ -79,6 +79,7 @@
     "expo-symbols": "~0.2.2",
     "expo-system-ui": "~4.0.9",
     "expo-task-manager": "~12.0.6",
+    "expo-video-thumbnails": "~9.0.3",
     "expo-web-browser": "~14.0.2",
     "lottie-react-native": "7.1.0",
     "nativewind": "^2.0.11",

@@ -20,6 +20,7 @@ import { SecurityLockOverlay } from '../components/SecurityLockOverlay';
 import { Toaster } from '../components/ui/Toaster';
 import { SheetProvider } from 'react-native-sheet-transitions';
 import { CardioLoader } from '../components/ui/CardioLoader';
+import { soulFolderService } from '../services/SoulFolderService';
 
 
 // Error Boundary to catch rendering errors
@@ -75,7 +76,9 @@ function RootContent() {
   const { activeCall, currentUser, isReady, activeTheme } = context || { activeCall: null, currentUser: null, isReady: false, activeTheme: null };
   const themeAccent = activeTheme?.primary || '#BC002A';
   const [showSkip, setShowSkip] = useState(false);
+  const [isNavSettled, setIsNavSettled] = useState(false);
   const splashHiddenRef = useRef(false);
+  
   const hideSplashSafely = useCallback((reason: string) => {
     if (splashHiddenRef.current) return;
     splashHiddenRef.current = true;
@@ -93,6 +96,7 @@ function RootContent() {
     const deferTimer = setTimeout(() => {
       console.log('[RootContent] 🔄 Registering background services now.');
       backgroundSyncService.register().catch(e => console.warn('[BackgroundSync] Registration error:', e));
+      soulFolderService.init().catch(e => console.warn('[SoulFolder] Initialization error:', e));
     }, 5000);
 
     const cleanupListener = backgroundSyncService.setupListener();
@@ -116,37 +120,22 @@ function RootContent() {
     return () => clearTimeout(splashFailsafe);
   }, [hideSplashSafely]);
 
-  useEffect(() => {
-    if (isReady) {
-      console.log('[RootContent] isReady is now TRUE. Unblocking UI...');
-      hideSplashSafely('auth-ready');
-    }
-    
-    // Safety timeout: if isReady is still false after 3 seconds, show skip button
-    const timer = setTimeout(() => {
-        if (!isReady) {
-            console.warn('[RootLayout] NOT READY after 3s - offering emergency skip');
-            setShowSkip(true);
-        }
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [isReady, segments, hideSplashSafely]);
-
     useEffect(() => {
         if (!currentUser?.id) return;
         console.log('[RootLayout] User synced:', currentUser.id);
     }, [currentUser?.id]);
 
-    // --- AUTH GUARD ---
+    // --- AUTH GUARD & SPLASH CONTROLLER ---
     useEffect(() => {
         if (!context || !isReady || !segments || (segments as any[]).length === 0) return;
         
-        // A call is considered "blocking" for auth purposes ONLY if it's already accepted OR we are actively connecting
-        // and NOT on the call screen already. This prevents stale activeCall objects from blocking the /login redirect.
         const isCallActive = !!activeCall && (activeCall.isAccepted || (!activeCall.isIncoming && activeCall.callId));
         const inCallScreen = segments[0] === 'call';
-        
-        if (isCallActive && inCallScreen) return;
+        if (isCallActive && inCallScreen) {
+          setIsNavSettled(true);
+          hideSplashSafely('call-active');
+          return;
+        }
 
         const inAuthGroup = ['login', 'otp', 'username-setup', 'profile-setup', 'forgot-password'].includes(segments[0] as string);
         const needsProfileSetup = !currentUser?.isSuperUser && !!currentUser?.username && (
@@ -154,20 +143,39 @@ function RootContent() {
           currentUser.username.startsWith('user_')
         );
 
+        // 🛡️ Redirect Logic with Flash Prevention
         if (!currentUser && !inAuthGroup) {
+            console.log(`[RootLayout] No user found (isReady=${isReady}), redirecting to /login`);
             router.replace('/login');
+            // IMPORTANT: Stay unsettled so splash screen stays UP during this transition
+            if (isNavSettled) setIsNavSettled(false);
             return;
         }
 
         if (currentUser && needsProfileSetup && segments[0] !== 'username-setup' && segments[0] !== 'profile-setup') {
+            console.log('[RootLayout] New user needs setup, redirecting');
             router.replace('/username-setup?oauthMode=true');
+            if (isNavSettled) setIsNavSettled(false);
             return;
         }
 
         if (currentUser && inAuthGroup && !needsProfileSetup) {
+            console.log('[RootLayout] User logged in, redirecting from auth group to tabs');
             router.replace('/(tabs)');
+            if (isNavSettled) setIsNavSettled(false);
+            return;
         }
-    }, [currentUser, isReady, segments, router, !!activeCall, activeCall?.isAccepted]);
+
+        // ✅ Navigation Settlement
+        // We only settle if we are on the screen that matches our current auth state.
+        const matchesAuth = (currentUser && !inAuthGroup) || (!currentUser && inAuthGroup);
+        
+        if (matchesAuth && !isNavSettled) {
+            console.log('[RootLayout] ✅ Navigation settled on target:', segments[0]);
+            setIsNavSettled(true);
+            hideSplashSafely('auth-resolved');
+        }
+    }, [currentUser, isReady, segments, router, !!activeCall, activeCall?.isAccepted, hideSplashSafely, isNavSettled]);
 
     // --- TRAFFIC CONTROLLER FOR CALLS ---
     useEffect(() => {
@@ -212,6 +220,12 @@ function RootContent() {
         <Stack.Screen name="(tabs)" options={{ 
           headerShown: false,
           gestureEnabled: false 
+        }} />
+        <Stack.Screen name="search" options={{
+          headerShown: false,
+          animation: 'none',
+          gestureEnabled: false,
+          contentStyle: { backgroundColor: '#000' },
         }} />
         <Stack.Screen name="call" options={{
           presentation: 'fullScreenModal',
@@ -285,8 +299,8 @@ function RootContent() {
         }} />
       </Stack>
 
-      {/* Persistence / Loading Overlay: Always sits on top until isReady is true */}
-      {!isReady && (
+      {/* Persistence / Loading Overlay: Always sits on top until isReady AND isNavSettled are true */}
+      {(!isReady || !isNavSettled) && (
         <View 
           style={{ 
             ...ViewStyle.absoluteFillObject, 

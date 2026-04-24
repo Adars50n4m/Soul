@@ -15,7 +15,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { useApp } from '../context/AppContext';
 import { SoulAvatar } from '../components/SoulAvatar';
 import { SUPPORT_SHARED_TRANSITIONS } from '../constants/sharedTransitions';
-import { storageService } from '../services/StorageService';
+import { authService } from '../services/AuthService';
 import { proxySupabaseUrl } from '../config/api';
 import { setProfileEditSourceHidden } from '../services/profileEditMorphState';
 import { CountryPicker } from '../components/CountryPicker';
@@ -477,19 +477,18 @@ export default function ProfileEditScreen() {
                     setAvatar(localUri);
                     setIsUploadingAvatar(true);
                     
-                    // Upload to Storage
+                    // Upload via Supabase Storage (proxied, reliable on all networks)
                     try {
-                        const uploadedKey = await storageService.uploadImage(localUri, 'avatars', currentUser?.id);
-                        if (uploadedKey) {
-                            await updateProfile({ avatar: uploadedKey });
+                        const uploadedUrl = await authService.uploadAvatar(currentUser!.id, localUri);
+                        if (uploadedUrl) {
+                            await updateProfile({ avatar: uploadedUrl });
+                        } else {
+                            throw new Error('Upload failed');
                         }
                     } catch (error: any) {
                         const errMsg = error?.message || String(error);
                         console.warn('Avatar upload error (camera):', errMsg);
-                        Alert.alert(
-                            'Sync Failed',
-                            `Photo saved locally, but upload failed:\n\n${errMsg}\n\nIt will retry later.`
-                        );
+                        Alert.alert('Upload Failed', `Could not update profile photo. Please try again.\n\n${errMsg}`);
                     } finally {
                         setIsUploadingAvatar(false);
                     }
@@ -527,23 +526,18 @@ export default function ProfileEditScreen() {
                     setAvatar(localUri);
                     setIsUploadingAvatar(true);
 
-                    // Upload to Storage
+                    // Upload via Supabase Storage (proxied, reliable on all networks)
                     try {
-                        const uploadedKey = await storageService.uploadImage(localUri, 'avatars', currentUser?.id);
-                        if (uploadedKey) {
-                            console.log('[ProfileEdit] Upload successful, updating profile with key:', uploadedKey);
-                            await updateProfile({ avatar: uploadedKey });
-                            Alert.alert('Success', 'Profile photo updated successfully!');
+                        const uploadedUrl = await authService.uploadAvatar(currentUser!.id, localUri);
+                        if (uploadedUrl) {
+                            await updateProfile({ avatar: uploadedUrl });
                         } else {
-                            throw new Error('Upload failed - no key returned');
+                            throw new Error('Upload failed');
                         }
                     } catch (error: any) {
                         const errMsg = error?.message || String(error);
-                        console.warn('[ProfileEdit] Avatar update sequence failed:', errMsg);
-                        Alert.alert(
-                            'Sync Pending',
-                            `Photo selected successfully, but sync failed:\n\n${errMsg}\n\nIt will retry when connection is restored.`
-                        );
+                        console.warn('[ProfileEdit] Avatar update failed:', errMsg);
+                        Alert.alert('Upload Failed', `Could not update profile photo. Please try again.\n\n${errMsg}`);
                     } finally {
                         setIsUploadingAvatar(false);
                     }

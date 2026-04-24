@@ -46,6 +46,15 @@ const isMissingUploadRouteError = (error: any): boolean => {
         || message.includes('Not found');
 };
 
+const isPayloadTooLargeError = (error: any): boolean => {
+    const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+    return message.includes('file too large')
+        || message.includes('too large')
+        || message.includes('payload too large')
+        || message.includes('worker returned 413')
+        || message.includes('status 413');
+};
+
 const inFlightUploads = new Map<string, Promise<string | null>>();
 
 export const storageService = {
@@ -92,15 +101,37 @@ export const storageService = {
         };
 
         if (map[ext]) return map[ext];
-
-        // 2. Special handling for Android content:// URIs which often lack extensions
-        if (uri.startsWith('content://')) {
-            if (uri.includes('image')) return 'image/jpeg';
-            if (uri.includes('video')) return 'video/mp4';
-            if (uri.includes('audio')) return 'audio/x-m4a';
-        }
+        
+        // 2. Special handling for common Android/iOS patterns if extension is missing
+        const lowerUri = uri.toLowerCase();
+        if (lowerUri.includes('image') || lowerUri.includes('photo')) return 'image/jpeg';
+        if (lowerUri.includes('video')) return 'video/mp4';
+        if (lowerUri.includes('audio')) return 'audio/x-m4a';
 
         return 'application/octet-stream';
+    },
+
+    /**
+     * Helper to ensure a filename has an extension based on its MIME type.
+     * Critical for Android FormData uploads.
+     */
+    ensureExtension(fileName: string, mimeType: string): string {
+        if (fileName.includes('.')) return fileName;
+        
+        const map: Record<string, string> = {
+            'image/jpeg': 'jpg',
+            'image/png': 'png',
+            'image/webp': 'webp',
+            'image/gif': 'gif',
+            'video/mp4': 'mp4',
+            'video/quicktime': 'mov',
+            'audio/x-m4a': 'm4a',
+            'audio/mpeg': 'mp3',
+            'audio/wav': 'wav',
+        };
+        
+        const ext = map[mimeType] || 'bin';
+        return `${fileName}.${ext}`;
     },
 
     async uploadViaServerProxy(
@@ -118,8 +149,12 @@ export const storageService = {
         }
 
         // React Native FormData: use { uri, type, name } object instead of Blob
-        const fileName = localUri.split('/').pop() || `upload-${Date.now()}`;
-        const normalizedUri = localUri.startsWith('file://') ? localUri : `file://${localUri}`;
+        let fileName = localUri.split('/').pop() || `upload-${Date.now()}`;
+        fileName = this.ensureExtension(fileName, contentType);
+        
+        const normalizedUri = (localUri.startsWith('file://') || localUri.startsWith('content://')) 
+            ? localUri 
+            : `file://${localUri}`;
 
         const formData = new FormData();
         formData.append('file', {
@@ -236,7 +271,11 @@ export const storageService = {
                         throw new Error('Upload requires an active session. Please log in again and retry.');
                     }
 
-                    if (!isNetworkLikeError(r2Error) && !SERVER_IS_PROXY) {
+                    const shouldFallbackToServer =
+                        !SERVER_IS_PROXY &&
+                        (isNetworkLikeError(r2Error) || isPayloadTooLargeError(r2Error));
+
+                    if (!shouldFallbackToServer) {
                         throw r2Error;
                     }
 

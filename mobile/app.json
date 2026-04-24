@@ -8,6 +8,7 @@
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
     "ios": {
+      "googleServicesFile": "./ios/mobile/GoogleService-Info.plist",
       "appleTeamId": "7842J35MTZ",
       "supportsTablet": true,
       "bundleIdentifier": "com.soul.mobile",
@@ -28,10 +29,13 @@
         ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
-        }
+        },
+        "UIFileSharingEnabled": true,
+        "LSSupportsOpeningDocumentsInPlace": true
       }
     },
     "android": {
+      "googleServicesFile": "./android/app/google-services.json",
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -64,6 +68,7 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "@react-native-firebase/app",
       "expo-router",
       [
         "expo-build-properties",
@@ -125,7 +130,7 @@
       [
         "@react-native-google-signin/google-signin",
         {
-          "iosUrlScheme": "com.googleusercontent.apps.REPLACE_WITH_REVERSED_IOS_CLIENT_ID"
+          "iosUrlScheme": "com.googleusercontent.apps.877230188228-kkv7igr07ffl641kjhn43p6estblsqkf"
         }
       ]
     ],

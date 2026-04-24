@@ -211,7 +211,9 @@ interface WebRTCCallbacks {
     onStateChange: (state: CallState) => void;
     onLocalStream: (stream: MediaStream | null) => void;
     onRemoteStream: (stream: MediaStream | null, userId?: string) => void;
+    onStreamUpdated?: (userId: string) => void;
     onPeerStateChange?: (userId: string, state: string) => void;
+    onStats?: (stats: any) => void;
     onError: (error: string) => void;
 }
 
@@ -642,6 +644,16 @@ class WebRTCService {
         });
 
         const pc = new RTCPeerConnection(config);
+        
+        // --- DEFENSIVE CONNECTION STABILITY WATCHDOG ---
+        // If we stay in 'checking' or 'new' for more than 12s, force an ICE restart.
+        const CONNECTION_STABILITY_TIMEOUT = 12000;
+        let stabilityTimer = setTimeout(() => {
+            if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'new') {
+                console.warn(`[WebRTCService] [${label}] 🚨 Connection hang detected (12s in ${pc.iceConnectionState}). Forcing proactive ICE restart.`);
+                this.attemptIceRestart().catch(() => {});
+            }
+        }, CONNECTION_STABILITY_TIMEOUT);
 
         // --- DEFENSIVE STATE LOGGING & RECOVERY ---
         pc.oniceconnectionstatechange = () => {
@@ -657,6 +669,10 @@ class WebRTCService {
             }
             if (state === 'connected' || state === 'completed') {
                 console.log('[WebRTCService] ✅ ICE connected — media path confirmed');
+                if (stabilityTimer) {
+                    clearTimeout(stabilityTimer);
+                    stabilityTimer = null;
+                }
                 this.setState('connected');
                 this.reconnectAttempts = 0; // Reset on successful connection
                 if (this.connectionWatchdog) {
@@ -704,11 +720,48 @@ class WebRTCService {
         };
 
         pc.ontrack = (event: any) => {
-            if (event.streams && event.streams[0]) {
-                console.log(`[WebRTCService] 📺 Remote stream received from ${userId}`);
-                this.remoteStreams.set(userId, event.streams[0]);
-                this.broadcast('onRemoteStream', event.streams[0], userId);
+            const track = event.track;
+            const stream = event.streams?.[0];
+
+            console.log(`[WebRTCService] [${label}] 📺 Track received from ${userId}: kind=${track?.kind}, id=${track?.id}`);
+
+            if (stream) {
+                console.log(`[WebRTCService] 📺 Stream attached in event for ${userId}`);
+                this.remoteStreams.set(userId, stream);
+                this.broadcast('onRemoteStream', stream, userId);
+            } else {
+                // UNIFIED PLAN FALLBACK: Some implementations send tracks without streams in the event.
+                // We must manually attach the track to a stream for this user.
+                console.log(`[WebRTCService] 🧪 Unified Plan: Manually attaching track ${track?.kind} for ${userId}`);
+                let existingStream = this.remoteStreams.get(userId);
+                if (!existingStream) {
+                    existingStream = new MediaStream();
+                    this.remoteStreams.set(userId, existingStream);
+                    this.broadcast('onRemoteStream', existingStream, userId);
+                }
+                
+                // Only add if not already there
+                const tracks = existingStream.getTracks();
+                if (!tracks.find(t => t.id === track.id)) {
+                    existingStream.addTrack(track);
+                    console.log(`[WebRTCService] ✅ Track ${track.kind} added to stream for ${userId}`);
+                    this.broadcast('onStreamUpdated', userId);
+                }
             }
+
+            // Monitor track state
+            track.onunmute = () => {
+                console.log(`[WebRTCService] 🔊 Track UNMUTED from ${userId}: ${track.kind}`);
+                this.broadcast('onStreamUpdated', userId);
+            };
+            track.onmute = () => {
+                console.log(`[WebRTCService] 🔇 Track MUTED from ${userId}: ${track.kind}`);
+                this.broadcast('onStreamUpdated', userId);
+            };
+            track.onended = () => {
+                console.log(`[WebRTCService] 🛑 Track ENDED from ${userId}: ${track.kind}`);
+                this.broadcast('onStreamUpdated', userId);
+            };
         };
 
         // For backward compatibility with older react-native-webrtc versions that use onaddstream
@@ -763,7 +816,7 @@ class WebRTCService {
             if (event.candidate) {
                 candidateBatch.push(event.candidate);
                 if (!batchTimer) {
-                    batchTimer = setTimeout(flushCandidates, 150);
+                    batchTimer = setTimeout(flushCandidates, 50); // FAST-TRACK ICE: 50ms instead of 150ms
                 }
                 return;
             }
@@ -1441,10 +1494,19 @@ class WebRTCService {
 
             this.localStream = await Promise.race([mediaPromise, timeoutPromise]);
             
+            if (!this.localStream) {
+                throw new Error('getUserMedia returned null stream');
+            }
+
             // CRITICAL: Explicitly enable tracks. Sometimes they are created in a disabled or muted state.
             this.localStream.getTracks().forEach(track => {
                 track.enabled = true;
-                console.log(`[WebRTCService] ✅ Local ${track.kind} track ready: ${track.id} (enabled: ${track.enabled})`);
+                console.log(`[WebRTCService] ✅ Local ${track.kind} track ready: ${track.id} (enabled: ${track.enabled}, muted: ${track.muted})`);
+                
+                // On some Android devices, the video track stays muted until the first frame is rendered.
+                // We add listeners to track this.
+                track.onunmute = () => console.log(`[WebRTCService] 🔊 Local ${track.kind} track UNMUTED`);
+                track.onmute = () => console.warn(`[WebRTCService] 🔇 Local ${track.kind} track MUTED`);
             });
             
             // If we already have a PeerConnection, add these tracks NOW

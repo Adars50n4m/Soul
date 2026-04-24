@@ -50,13 +50,13 @@ export default function RequestsScreen() {
             // Direct Supabase (instant)
             const { data: inReqs } = (await supabase
                 .from('connection_requests')
-                .select('id, sender_id, receiver_id, message, status, created_at')
+                .select('id, sender_id, receiver_id, message, status, sent_at')
                 .eq('receiver_id', userId)
                 .eq('status', 'pending')) as any;
 
             const { data: outReqs } = (await supabase
                 .from('connection_requests')
-                .select('id, sender_id, receiver_id, message, status, created_at')
+                .select('id, sender_id, receiver_id, message, status, sent_at')
                 .eq('sender_id', userId)
                 .eq('status', 'pending')) as any;
 
@@ -95,6 +95,28 @@ export default function RequestsScreen() {
         fetchRequests();
     }, [fetchRequests]);
 
+    // Realtime: refresh whenever a connection_request is inserted/updated/deleted for current user
+    useEffect(() => {
+        const userId = currentUser?.id;
+        if (!userId) return;
+
+        const channel = supabase
+            .channel(`requests-${userId}`)
+            .on(
+                'postgres_changes',
+                { event: '*', schema: 'public', table: 'connection_requests', filter: `receiver_id=eq.${userId}` },
+                () => { fetchRequests(); }
+            )
+            .on(
+                'postgres_changes',
+                { event: '*', schema: 'public', table: 'connection_requests', filter: `sender_id=eq.${userId}` },
+                () => { fetchRequests(); }
+            )
+            .subscribe();
+
+        return () => { supabase.removeChannel(channel); };
+    }, [currentUser?.id, fetchRequests]);
+
     const handleAction = async (requestId: string, action: 'accept' | 'reject' | 'cancel') => {
         setActionId(requestId);
         try {
@@ -103,14 +125,24 @@ export default function RequestsScreen() {
                 // Get the request to find sender/receiver
                 const request = incoming.find(r => r.id === requestId);
                 if (request) {
-                    // Update request status
-                    await supabase.from('connection_requests')
-                        .update({ status: 'accepted', responded_at: new Date().toISOString() })
-                        .eq('id', requestId);
-                    // Create connection (sorted IDs)
                     const ids = [request.sender_id, request.receiver_id].sort();
-                    await supabase.from('connections')
+                    const { error: connectionError } = await supabase.from('connections')
                         .upsert({ user_1_id: ids[0], user_2_id: ids[1] }, { onConflict: 'user_1_id,user_2_id' });
+                    if (connectionError) throw connectionError;
+
+                    const respondedAt = new Date().toISOString();
+                    const { error: requestError } = await supabase.from('connection_requests')
+                        .update({ status: 'accepted', responded_at: respondedAt })
+                        .eq('id', requestId);
+
+                    if (requestError) {
+                        await supabase.from('connections')
+                            .delete()
+                            .eq('user_1_id', ids[0])
+                            .eq('user_2_id', ids[1]);
+                        throw requestError;
+                    }
+
                     // Force a contact refresh so the new friend pops up immediately
                     await refreshLocalCache(true);
                 }
@@ -231,9 +263,12 @@ export default function RequestsScreen() {
                 ListHeaderComponent={
                     !loading && incoming.length === 0 && outgoing.length === 0 ? (
                         <View style={styles.emptyContainer}>
-                            <MaterialIcons name="people-outline" size={80} color="rgba(255,255,255,0.05)" />
-                            <Text style={styles.emptyText}>No pending requests</Text>
-                            <TouchableOpacity style={styles.findButton} onPress={() => router.push('/search')}>
+                            <View style={styles.emptyIconCircle}>
+                                <MaterialIcons name="people-outline" size={42} color="rgba(255,255,255,0.15)" />
+                            </View>
+                            <Text style={styles.emptyTitle}>No pending requests</Text>
+                            <Text style={styles.emptySubtitle}>Find other souls and start your story.</Text>
+                            <TouchableOpacity style={styles.findButton} onPress={() => router.push('/search?context=soulmate')}>
                                 <Text style={styles.findText}>Find People</Text>
                             </TouchableOpacity>
                         </View>
@@ -297,9 +332,21 @@ const styles = StyleSheet.create({
         borderColor: 'rgba(255,255,255,0.1)'
     },
     cancelText: { color: 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: '700' },
-    emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', marginTop: 100 },
-    emptyText: { color: 'rgba(255,255,255,0.2)', fontSize: 18, fontWeight: '600', marginTop: 20 },
-    findButton: { marginTop: 20, backgroundColor: 'rgba(255,255,255,0.1)', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 24, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
-    findText: { color: '#fff', fontWeight: '700' },
+    emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', marginTop: 120, paddingHorizontal: 40 },
+    emptyIconCircle: {
+        width: 100,
+        height: 100,
+        borderRadius: 50,
+        backgroundColor: 'rgba(255,255,255,0.03)',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginBottom: 24,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.05)',
+    },
+    emptyTitle: { color: 'rgba(255,255,255,0.4)', fontSize: 18, fontWeight: '700', marginBottom: 8 },
+    emptySubtitle: { color: 'rgba(255,255,255,0.25)', fontSize: 14, fontWeight: '600', textAlign: 'center', marginBottom: 24 },
+    findButton: { backgroundColor: 'rgba(255,255,255,0.08)', paddingHorizontal: 28, paddingVertical: 14, borderRadius: 28, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+    findText: { color: '#fff', fontWeight: '700', fontSize: 15 },
     loader: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.8)' }
 });

@@ -8,9 +8,10 @@ export interface PlaybackState {
     position: number;
     updatedAt: number;
     updatedBy: string;
+    scheduledStartTime?: number;
 }
 
-type PlaybackUpdateCallback = (state: PlaybackState) => void;
+type PlaybackUpdateCallback = (state: PlaybackState, eventType: 'update' | 'sync_request' | 'ping' | 'pong') => void;
 
 const MAX_RETRIES = 3;
 
@@ -82,7 +83,31 @@ class MusicSyncService {
             const state = payload as PlaybackState;
             if (this.userId && state.updatedBy !== this.userId) {
                 if (this.partnerId && state.updatedBy !== this.partnerId) return;
-                this.onUpdate?.(state);
+                this.onUpdate?.(state, 'update');
+            }
+        });
+
+        this.channel.on('broadcast', { event: 'sync_request' }, ({ payload }) => {
+            const state = payload as PlaybackState;
+            if (this.userId && state.updatedBy !== this.userId) {
+                if (this.partnerId && state.updatedBy !== this.partnerId) return;
+                this.onUpdate?.(state, 'sync_request');
+            }
+        });
+
+        this.channel.on('broadcast', { event: 'ping' }, ({ payload }) => {
+            const state = payload as PlaybackState;
+            if (this.userId && state.updatedBy !== this.userId) {
+                if (this.partnerId && state.updatedBy !== this.partnerId) return;
+                this.onUpdate?.(state, 'ping');
+            }
+        });
+
+        this.channel.on('broadcast', { event: 'pong' }, ({ payload }) => {
+            const state = payload as PlaybackState;
+            if (this.userId && state.updatedBy !== this.userId) {
+                if (this.partnerId && state.updatedBy !== this.partnerId) return;
+                this.onUpdate?.(state, 'pong');
             }
         });
 
@@ -145,10 +170,52 @@ class MusicSyncService {
             ...state
         } as PlaybackState;
 
+        // Ensure timestamp is ALWAYS fresh on broadcast
+        fullState.updatedAt = Date.now();
+
         this.channel.send({
             type: 'broadcast',
             event: 'playback_update',
             payload: fullState,
+        }).catch(() => {});
+    }
+
+    requestSync(): void {
+        if (!this.userId || !this.channel) return;
+        
+        console.log('[MusicSync] 🔄 Requesting initial sync from partner');
+        this.channel.send({
+            type: 'broadcast',
+            event: 'sync_request',
+            payload: {
+                updatedBy: this.userId,
+                updatedAt: Date.now(),
+            },
+        }).catch(() => {});
+    }
+
+    sendPing(): void {
+        if (!this.userId || !this.channel) return;
+        this.channel.send({
+            type: 'broadcast',
+            event: 'ping',
+            payload: {
+                updatedBy: this.userId,
+                updatedAt: Date.now(),
+            },
+        }).catch(() => {});
+    }
+
+    sendPong(pingTime: number): void {
+        if (!this.userId || !this.channel) return;
+        this.channel.send({
+            type: 'broadcast',
+            event: 'pong',
+            payload: {
+                updatedBy: this.userId,
+                updatedAt: Date.now(),
+                position: pingTime, // Use position field to store the original ping time
+            },
         }).catch(() => {});
     }
 

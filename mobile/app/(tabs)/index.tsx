@@ -388,9 +388,9 @@ const AnimatedMoreMenu = ({ router, isSearching }: { router: any, isSearching: b
 
               <View style={styles.moreMenuDividerMorph} />
 
-             <Pressable 
-                style={styles.moreMenuItemMorph}
-                onPress={() => { setExpanded(false); router.push('/search'); }}
+              <Pressable 
+                 style={styles.moreMenuItemMorph}
+                 onPress={() => { setExpanded(false); router.push('/search?context=soulmate'); }}
               >
                 <MaterialIcons name="person-search" size={20} color="#fff" style={styles.moreMenuIconMorph} />
                 <Text style={styles.moreMenuTextMorph}>Find Soulmates</Text>
@@ -591,8 +591,8 @@ export default function HomeScreen() {
 
   // Load persisted pin/mute on mount
   useEffect(() => {
-    AsyncStorage.getItem('ss_pinned_chats').then(v => { if (v) setPinnedChatIds(JSON.parse(v)); });
-    AsyncStorage.getItem('ss_muted_chats').then(v => { if (v) setMutedChatIds(JSON.parse(v)); });
+    AsyncStorage.getItem('ss_pinned_chats').then(v => { if (v) setPinnedChatIds(JSON.parse(v)); }).catch(() => {});
+    AsyncStorage.getItem('ss_muted_chats').then(v => { if (v) setMutedChatIds(JSON.parse(v)); }).catch(() => {});
   }, []);
 
   // Show welcome animation once for new users who have completed setup
@@ -1059,17 +1059,30 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
                 </View>
               ) : hasStatus ? (
                 <View style={StyleSheet.absoluteFill}>
-                  <StatusThumbnail 
-                    statusId={latestMyStatus.id}
-                    mediaKey={latestMyStatus.mediaKey}
-                    uriHint={latestMyStatus.mediaLocalPath || latestMyStatus.mediaUrl}
-                    mediaType={latestMyStatus.mediaType as any}
-                    style={styles.myStatusPreviewBgFull}
-                  />
-                  <LinearGradient
-                    colors={['rgba(0,0,0,0.5)', 'transparent']}
-                    style={styles.myStatusTopGradient}
-                  />
+                  {latestMyStatus.mediaType === 'text' ? (
+                    <LinearGradient
+                      colors={[latestMyStatus.backgroundColor || '#6366f1', (latestMyStatus.backgroundColor || '#6366f1') + 'CC']}
+                      style={[styles.myStatusPreviewBgFull, { justifyContent: 'center', alignItems: 'center', padding: 15 }]}
+                    >
+                      <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600', textAlign: 'center', marginTop: 10 }} numberOfLines={4}>
+                        {latestMyStatus.caption}
+                      </Text>
+                    </LinearGradient>
+                  ) : (
+                    <>
+                      <StatusThumbnail 
+                        statusId={latestMyStatus.id}
+                        mediaKey={latestMyStatus.mediaKey}
+                        uriHint={latestMyStatus.mediaLocalPath || latestMyStatus.mediaUrl}
+                        mediaType={latestMyStatus.mediaType as any}
+                        style={styles.myStatusPreviewBgFull}
+                      />
+                      <LinearGradient
+                        colors={['rgba(0,0,0,0.5)', 'transparent']}
+                        style={styles.myStatusTopGradient}
+                      />
+                    </>
+                  )}
                   <View style={styles.myStatusAvatarBadgeCorner} pointerEvents="none">
                     <SoulAvatar 
                        uri={proxySupabaseUrl(currentUser?.avatar)} 
@@ -1529,7 +1542,7 @@ const styles = StyleSheet.create({
     height: 175, 
     marginTop: 5, 
     borderRadius: 28, 
-    backgroundColor: 'transparent', 
+    backgroundColor: '#1a1a1a', 
     zIndex: 10, 
     overflow: 'visible',
     ...Platform.select({

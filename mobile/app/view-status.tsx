@@ -27,6 +27,7 @@ import { statusService } from '../services/StatusService';
 import { useApp } from '../context/AppContext';
 import { proxySupabaseUrl } from '../config/api';
 import { UserStatusGroup } from '../types';
+import { supabase } from '../config/supabase';
 
 const StatusProgressBar = ({ idx, currentIndex, progress }: any) => {
     const style = useAnimatedStyle(() => ({
@@ -123,6 +124,28 @@ export default function ViewStatusScreen() {
 
         if (statusGroup.isMine) {
             statusService.getMyStatusViewers(currentStatus.id).then(setViewers);
+            
+            // Realtime listener for new viewers
+            const channel = supabase
+                .channel(`status_views_${currentStatus.id}`)
+                .on(
+                    'postgres_changes',
+                    { 
+                        event: 'INSERT', 
+                        schema: 'public', 
+                        table: 'status_views',
+                        filter: `status_id=eq.${currentStatus.id}`
+                    },
+                    async () => {
+                        const updated = await statusService.getMyStatusViewers(currentStatus.id);
+                        setViewers(updated);
+                    }
+                )
+                .subscribe();
+
+            return () => {
+                supabase.removeChannel(channel);
+            };
         }
     }, [currentIndex, currentUser, progress, statusGroup]);
 

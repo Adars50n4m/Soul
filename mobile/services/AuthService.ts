@@ -36,12 +36,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { supabase, SHRI_ID, HARI_ID } from '../config/supabase';
+import { storageService } from './StorageService';
 
 import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Constants from 'expo-constants';
 import { GOOGLE_WEB_CLIENT_ID, GOOGLE_IOS_CLIENT_ID } from '../config/googleAuth';
 
 // Required for Google OAuth on Android/iOS (legacy browser flow fallback)
@@ -59,8 +61,9 @@ try {
   if (
     GoogleSignin &&
     GOOGLE_WEB_CLIENT_ID &&
-    !GOOGLE_WEB_CLIENT_ID.includes('REPLACE_WITH')
+    !GOOGLE_WEB_CLIENT_ID.includes('REPLACE_WITH_WEB')
   ) {
+    console.log('[Auth] Initializing Native Google Sign-In with ID:', GOOGLE_WEB_CLIENT_ID.substring(0, 10) + '...');
     GoogleSignin.configure({
       webClientId: GOOGLE_WEB_CLIENT_ID,
       iosClientId: GOOGLE_IOS_CLIENT_ID,
@@ -413,9 +416,23 @@ class AuthService {
       if (error) throw error;
       if (!data.user) return { success: false, error: 'Verification failed.' };
 
-      // Check if this user has already set up their profile
-      const profile = await this.getProfile(data.user.id);
-      const isNewUser = !profile || !profile.username;
+      // ── ROBUST PROFILE CHECK (Safety fallback for slow triggers) ────
+      let profile = await this.getProfile(data.user.id);
+      
+      if (!profile) {
+          console.log('[Auth] Profile not found after OTP verify, waiting for trigger...');
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          profile = await this.getProfile(data.user.id);
+      }
+
+      // ── TRIGGER FALLBACK ──────────────────────────────────────────
+      if (!profile) {
+          console.log('[Auth] Database trigger fallback: Manual profile creation for email user');
+          await this.ensureBasicProfile(data.user);
+          profile = await this.getProfile(data.user.id);
+      }
+
+      const isNewUser = !profile || !profile.username || profile.username.startsWith('user_');
 
       return {
         success: true,
@@ -518,7 +535,8 @@ class AuthService {
     try {
       let redirectUri: string;
       try {
-        redirectUri = makeRedirectUri({ scheme: 'mobile', path: 'auth/callback' });
+        const scheme = Constants.expoConfig?.scheme || 'mobile';
+        redirectUri = makeRedirectUri({ scheme, path: 'auth/callback' });
       } catch {
         redirectUri = 'mobile://auth/callback';
       }
@@ -959,36 +977,24 @@ class AuthService {
     await supabase.auth.signOut();
   }
 
-  // ── PRIVATE: Upload avatar to Supabase Storage ───────────────────────────
-  // Uses base64 conversion for better reliability in React Native
-  private async uploadAvatar(userId: string, localUri: string): Promise<string | null> {
-    try {
-      console.log(`[Auth] Uploading avatar: ${localUri}`);
-      
-      const res = await fetch(localUri);
-      const blob = await res.blob();
-      
-      const fileExt = localUri.split('.').pop()?.toLowerCase() || 'jpg';
-      const filePath = `${userId}/avatar-${Date.now()}.${fileExt}`;
+  // ── Upload avatar to Cloudflare R2 Storage ────────────────────────────────────
+  // Uses highest-level StorageService for robust Android/iOS URI resolution.
+  async uploadAvatar(userId: string, localUri: string): Promise<string | null> {
+    console.log(`[Auth] Uploading avatar for user ${userId}: ${localUri}`);
+    
+    // Bucket is 'avatars', folder is the user ID for organization.
+    // We let errors bubble up so profile-edit.tsx can show the real cause in the alert.
+    const storageKey = await storageService.uploadImage(
+      localUri, 
+      'avatars', 
+      userId
+    );
 
-      const { data, error } = await supabase.storage
-        .from('avatars')
-        .upload(filePath, blob, {
-          contentType: blob.type,
-          upsert: true,
-        });
-
-      if (error) throw error;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from('avatars')
-        .getPublicUrl(filePath);
-
-      return publicUrl;
-    } catch (err) {
-      console.error('[Auth] uploadAvatar failed:', err);
-      return null;
+    if (!storageKey) {
+      throw new Error('Upload failed: Storage service returned no key');
     }
+
+    return storageKey;
   }
 
   // ── PRIVATE: Email format check ───────────────────────────────────────────
@@ -1098,6 +1104,17 @@ class AuthService {
       return Math.max(0, expiresAt - now);
     } catch {
       return null;
+    }
+  }
+  /**
+   * Required for Google OAuth on Android/iOS (legacy browser flow fallback).
+   * Should be called when the auth screens mount.
+   */
+  maybeCompleteAuthSession() {
+    try {
+      WebBrowser.maybeCompleteAuthSession();
+    } catch (e) {
+      console.warn('[Auth] Error in maybeCompleteAuthSession:', e);
     }
   }
 }

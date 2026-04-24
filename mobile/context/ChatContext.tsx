@@ -190,11 +190,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     isHydratingRef.current = true;
     try {
       const dbStart = Date.now();
+      let isInitDone = false;
+      
       // Phase 1: DB Initialization (Blocking, but with more generous timeout)
       await Promise.race([
-        offlineService.initialize(),
+        offlineService.initialize().then(() => { isInitDone = true; }),
         new Promise<void>((resolve) => setTimeout(() => {
-          console.warn(`[ChatContext] SQLite init timed out after ${Date.now() - dbStart}ms (continuing anyway)`);
+          if (!isInitDone) {
+            console.warn(`[ChatContext] SQLite init timed out after ${Date.now() - dbStart}ms (continuing anyway)`);
+          }
           resolve();
         }, 12000))
       ]);
@@ -297,6 +301,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshContactsFromServer = useCallback(async (force = false) => {
     if (!currentUser) return;
 
+    const myUuid = LEGACY_TO_UUID[currentUser.id] || currentUser.id;
+    const superUserIds = [LEGACY_TO_UUID['shri'], LEGACY_TO_UUID['hari']];
+    const isSelfSuperUser = superUserIds.includes(myUuid) || 
+                           currentUser.username === 'hari' || 
+                           currentUser.username === 'shri' ||
+                           currentUser.id?.startsWith('f00f00f0');
+
     // Phase 1: Instant local load
     await hydrateFromLocalDb(currentUser.id);
 
@@ -310,14 +321,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (saved) lastServerSyncRef.current = parseInt(saved, 10);
     }
 
-    if (!force && now - lastServerSyncRef.current < FIVE_MINUTES) {
+    if (!force && !isSelfSuperUser && now - lastServerSyncRef.current < FIVE_MINUTES) {
       console.log('[ChatContext] Skipping server refresh (synced recently)');
       return;
     }
 
     (async () => {
       try {
-        const myUuid = LEGACY_TO_UUID[currentUser.id] || currentUser.id;
         let allVisibleProfiles: any[] = [];
         let serverSuccess = false;
 
@@ -355,17 +365,26 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         // 3. Superuser visibility: If the current user is a Superuser, show ALL users 
         // AND ensure Hari/Shri are always mutually connected.
-        const superUserIds = [LEGACY_TO_UUID['shri'], LEGACY_TO_UUID['hari']];
-        const isSelfSuperUser = superUserIds.includes(myUuid) || 
-                               currentUser.username === 'hari' || 
-                               currentUser.username === 'shri' ||
-                               currentUser.id?.startsWith('f00f00f0');
 
         if (isSelfSuperUser) {
-          console.log('[ChatContext] SuperUser detected: Ensuring mutual Shri/Hari connection');
-          // We no longer fetch 100 random profiles here to keep the list clean.
-          // Actual friends are fetched via 'connections'. 
-          // We just need to ensure the other SuperUser is always present.
+          console.log('[ChatContext] SuperUser detected: Fetching all profiles for discovery');
+          
+          // Fetch ALL active profiles for superusers so they can manage/contact anyone
+          const { data: allProfiles } = await supabase.from('profiles')
+            .select('*')
+            .neq('id', myUuid) // Don't include self
+            .limit(100); // Reasonable limit for now
+
+          if (allProfiles) {
+            // Merge with existing connections, avoiding duplicates
+            const existingIds = new Set(allVisibleProfiles.map(p => p.id));
+            allProfiles.forEach(p => {
+              if (!existingIds.has(p.id)) {
+                allVisibleProfiles.push(p);
+                existingIds.add(p.id);
+              }
+            });
+          }
 
           // Force inclusion of the "other" superuser to ensure they are always connected
           const otherSuperUserId = superUserIds.find(id => id !== myUuid);
@@ -481,6 +500,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setOnlineUsers([]);
       activeChatIdRef.current = null;
       chatService.cleanup();
+      lastServerSyncRef.current = 0; // Reset sync throttle for next user
       return;
     }
 
@@ -814,6 +834,28 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     };
   }, [currentUser]);
+
+  // Realtime: refresh contacts whenever a connection is added/removed for the current user
+  useEffect(() => {
+    const userId = currentUser?.id ? (LEGACY_TO_UUID[currentUser.id] || currentUser.id) : null;
+    if (!userId) return;
+
+    const channel = supabase
+      .channel(`connections-${userId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'connections', filter: `user_1_id=eq.${userId}` },
+        () => { refreshContactsFromServer(true); }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'connections', filter: `user_2_id=eq.${userId}` },
+        () => { refreshContactsFromServer(true); }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [currentUser?.id, refreshContactsFromServer]);
 
   const sendChatMessage = useCallback(async (chatId: string, text: string, media?: Message['media'], replyTo?: string, localUri?: string, id?: string) => {
     if (!currentUser) return;

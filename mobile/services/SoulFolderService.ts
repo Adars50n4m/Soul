@@ -255,5 +255,40 @@ export const soulFolderService = {
         await deleteAsync(sentPath + file, { idempotent: true });
       }
     }
+  },
+
+  async clearAllMedia(): Promise<void> {
+    console.log('[SoulFolderService] Purging all user media...');
+    try {
+      // Clear all standard media folders
+      const mediaTypes = ['images', 'videos', 'audio', 'documents', 'voiceNotes', 'profilePhotos', 'stickers', 'statuses', 'cache'];
+      for (const type of mediaTypes) {
+        const path = FOLDERS[type];
+        if (path) {
+          const info = await getInfoAsync(path);
+          if (info.exists) {
+            const files = await readDirectoryAsync(path);
+            for (const file of files) {
+              await deleteAsync(path + file, { idempotent: true });
+            }
+            
+            // Also check for 'Sent' subfolder
+            const sentPath = FOLDERS[type + 'Sent'];
+            if (sentPath) {
+              const sentInfo = await getInfoAsync(sentPath);
+              if (sentInfo.exists) {
+                const sentFiles = await readDirectoryAsync(sentPath);
+                for (const file of sentFiles) {
+                  await deleteAsync(sentPath + file, { idempotent: true });
+                }
+              }
+            }
+          }
+        }
+      }
+      console.log('[SoulFolderService] Media purge complete.');
+    } catch (error) {
+      console.error('[SoulFolderService] Failed to clear all media:', error);
+    }
   }
 };

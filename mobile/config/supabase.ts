@@ -24,14 +24,16 @@ export const LEGACY_TO_UUID: Record<string, string> = {
 class ProxyHealthTracker {
     private static isProxyDown = false;
     private static lastFailureTime = 0;
-    private static SKIP_DURATION = 120000; // 2 minutes
+    // Only skip proxy on mutations (writes). Reads always retry proxy because
+    // direct *.supabase.co is ISP-blocked on Indian networks — skipping proxy
+    // for reads causes a 2-min outage every time the proxy has a transient blip.
+    private static SKIP_DURATION = 30000; // 30s (was 2min — too long for reads)
 
-    static shouldTryProxy(): boolean {
+    static shouldTryProxy(isMutation = false): boolean {
         if (!this.isProxyDown) return true;
-        
+        if (!isMutation) return true; // reads always try proxy regardless of circuit state
         const now = Date.now();
         if (now - this.lastFailureTime > this.SKIP_DURATION) {
-            console.log('[Supabase] 🔄 Proxy skip duration expired. Attempting to use proxy again...');
             this.isProxyDown = false;
             return true;
         }
@@ -62,50 +64,46 @@ export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
             // Logic to rewrite direct Supabase URL to match the Proxy Worker subdomain
             const proxied = urlString.replace(Env.SUPABASE_URL, Env.SUPABASE_PROXY_URL);
             
-            // 🛡️ CIRCUIT BREAKER: If proxy is down, skip it for 2 minutes and go direct
-            if (ProxyHealthTracker.shouldTryProxy()) {
+            const method = (options?.method || 'GET').toUpperCase();
+            const isMutation = method === 'POST' || method === 'PATCH' || method === 'DELETE';
+
+            if (ProxyHealthTracker.shouldTryProxy(isMutation)) {
                 try {
                     const controller = new AbortController();
-                    const method = (options?.method || 'GET').toUpperCase();
-                    const isMutation = method === 'POST' || method === 'PATCH' || method === 'DELETE';
-                    const timeoutMs = isMutation ? 30000 : 10000; // Reduced read timeout to 10s for snappier fallback
+                    const timeoutMs = isMutation ? 30000 : 12000;
                     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-                    const response = await fetch(proxied, {
-                        ...options,
-                        signal: controller.signal
-                    });
-                    
+                    const response = await fetch(proxied, { ...options, signal: controller.signal });
                     clearTimeout(timeoutId);
                     ProxyHealthTracker.markProxyUp();
                     return response;
                 } catch (proxyError: any) {
                     const isTimeout = proxyError.name === 'AbortError' || proxyError.message?.includes('aborted');
                     const isOffline = proxyError.message?.includes('Network request failed') || proxyError.message?.includes('failed to fetch');
-                    
-                    if (isOffline) {
-                        // 🛡️ Also mark as down on network failure to stop the retries
-                        console.debug(`[Supabase Connectivity] Proxy unreachable. Marking down for 2 mins.`);
-                        ProxyHealthTracker.markProxyDown();
-                    } else if (isTimeout) {
-                        console.warn(`[Supabase Connectivity] Proxy timed out. Marking down for 2 mins.`);
+
+                    // Only circuit-break for mutations — reads always retry proxy on next call
+                    if (isMutation && (isOffline || isTimeout)) {
+                        console.warn(`[Supabase] Proxy ${isTimeout ? 'timeout' : 'offline'} on mutation — circuit open for 30s`);
                         ProxyHealthTracker.markProxyDown();
                     } else {
-                        console.warn(`[Supabase Connectivity] Proxy failed: ${proxyError.message}. Falling back.`);
+                        console.debug(`[Supabase] Proxy failed on read: ${proxyError.message}. Falling back to direct.`);
                     }
                 }
             }
 
-            // Direct Fallback
+            // Direct fallback (may be ISP-blocked on Indian networks — proxy is the preferred path)
             try {
-                // console.debug(`[Supabase Connectivity] Direct fallback to: ${urlString}`);
                 const fallbackOptions = { ...options };
                 delete fallbackOptions.signal;
                 return await fetch(urlString, fallbackOptions);
             } catch (directError: any) {
-                // If the circuit breaker is active, we don't want to flood the console with direct failures either
-                if (ProxyHealthTracker.shouldTryProxy()) {
-                    console.warn('[Supabase Connectivity] Direct fetch failed:', directError.message);
+                // If direct also fails (ISP block), re-try proxy as last resort for reads
+                if (!isMutation) {
+                    try {
+                        const retryOptions = { ...options };
+                        delete retryOptions.signal;
+                        return await fetch(proxied, retryOptions);
+                    } catch {}
                 }
                 throw directError;
             }
@@ -206,21 +204,6 @@ export interface FavoriteSong {
 
 // Database helpers
 export const DatabaseService = {
-    // Users
-    async getUsers() {
-        const { data, error } = await supabase.from('users').select('*');
-        if (error) throw error;
-        return data as User[];
-    },
-
-    async updateUserStatus(userId: string, status: 'online' | 'offline') {
-        const { error } = await supabase
-            .from('users')
-            .update({ status, last_seen: new Date().toISOString() })
-            .eq('id', userId);
-        if (error) throw error;
-    },
-
     // Messages
     async getMessages(userId1: string, userId2: string) {
         const { data, error } = await supabase

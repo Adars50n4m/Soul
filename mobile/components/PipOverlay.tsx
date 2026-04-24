@@ -29,7 +29,7 @@ export default function PipOverlay() {
     const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = useWindowDimensions();
     const router = useRouter();
     const segments = useSegments();
-    const { activeCall, contacts, toggleMinimizeCall, endCall } = useApp();
+    const { activeCall, contacts, currentUser, toggleMinimizeCall, endCall } = useApp();
     const contact = contacts.find(c => c.id === activeCall?.contactId);
 
     const position = useMemo(() => new Animated.ValueXY({
@@ -103,8 +103,9 @@ export default function PipOverlay() {
     if (!isVisible) return null;
 
     const isVideo = activeCall.type === 'video';
-    // Get the remote stream for the PiP window
+    // Get both streams for the robust split-screen PiP
     const remoteStream = webRTCService ? webRTCService.getRemoteStream() : null;
+    const localStream = webRTCService ? webRTCService.getLocalStream() : null;
 
     return (
         <Animated.View
@@ -118,20 +119,41 @@ export default function PipOverlay() {
                 <Pressable onPress={handlePress} style={styles.pressable}>
                     <View style={styles.contentContainer}>
                         {isVideo ? (
-                            remoteStream && RTCView ? (
-                                <RTCView
-                                    streamURL={typeof remoteStream.toURL === 'function' ? remoteStream.toURL() : remoteStream}
-                                    style={styles.videoStream}
-                                    objectFit="cover"
-                                    mirror={false}
-                                    zOrder={2}
-                                />
-                            ) : (
-                                <View style={styles.videoPlaceholder}>
-                                    <SoulAvatar uri={contact.avatar} size={50} />
-                                    <Text style={styles.placeholderLabel}>No Video</Text>
+                            <View style={styles.videoSplitWrapper}>
+                                <View style={styles.remoteVideoSection}>
+                                    {remoteStream && RTCView ? (
+                                        <RTCView
+                                            streamURL={typeof remoteStream.toURL === 'function' ? remoteStream.toURL() : remoteStream}
+                                            style={styles.videoStream}
+                                            objectFit="cover"
+                                            mirror={false}
+                                            zOrder={1}
+                                        />
+                                    ) : (
+                                        <View style={styles.videoPlaceholder}>
+                                            <SoulAvatar uri={contact.avatar} size={30} />
+                                        </View>
+                                    )}
                                 </View>
-                            )
+
+                                <View style={styles.splitDivider} />
+
+                                <View style={styles.localVideoSection}>
+                                    {localStream && RTCView ? (
+                                        <RTCView
+                                            streamURL={typeof localStream.toURL === 'function' ? localStream.toURL() : localStream}
+                                            style={styles.videoStream}
+                                            objectFit="cover"
+                                            mirror={true}
+                                            zOrder={2}
+                                        />
+                                    ) : (
+                                        <View style={styles.videoPlaceholder}>
+                                            <SoulAvatar uri={currentUser?.avatar} size={30} />
+                                        </View>
+                                    )}
+                                </View>
+                            </View>
                         ) : (
                             <GlassView intensity={60} tint="dark" style={styles.audioBlur}>
                                 <View style={styles.audioContent}>
@@ -201,10 +223,21 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
         backgroundColor: '#1C1C1E',
     },
-    placeholderLabel: {
-        color: 'rgba(255,255,255,0.5)',
-        fontSize: 10,
-        marginTop: 8,
+    videoSplitWrapper: {
+        flex: 1,
+        backgroundColor: '#000',
+    },
+    remoteVideoSection: {
+        flex: 1,
+        overflow: 'hidden',
+    },
+    localVideoSection: {
+        flex: 1,
+        overflow: 'hidden',
+    },
+    splitDivider: {
+        height: 1.5,
+        backgroundColor: 'rgba(255,255,255,0.2)',
     },
     audioBlur: {
         flex: 1,
