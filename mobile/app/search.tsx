@@ -15,6 +15,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeInDown, Easing, Extrapolation, interpolate, useAnimatedStyle, useSharedValue, withSpring, withTiming } from 'react-native-reanimated';
 import { hapticService } from '../services/HapticService';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { normalizeId } from '../utils/idNormalization';
 
 type SearchContext = 'chats' | 'calls' | 'settings' | 'soulmate';
 type SearchFilterId =
@@ -176,7 +177,6 @@ export default function SearchScreen() {
     const [activeFilter, setActiveFilter] = useState<SearchFilterId>('chats');
     const router = useRouter();
     const debounceRef = useRef<NodeJS.Timeout | null>(null);
-    const deferredQuery = useDeferredValue(query);
     const inputRef = useRef<TextInput | null>(null);
     const tabLayouts = useRef<Record<string, { x: number; width: number }>>({});
     // iOS-26 Liquid Glass: track LEFT and RIGHT edges independently. The
@@ -285,7 +285,7 @@ export default function SearchScreen() {
 
     const entryProgress = useSharedValue(0);
 
-    const normalizedQuery = normalizeText(deferredQuery);
+    const normalizedQuery = normalizeText(query);
 
     const filterOptions = useMemo<ContextOption[]>(() => {
         if (searchContext === 'calls') {
@@ -295,6 +295,7 @@ export default function SearchScreen() {
             return [{ key: 'settings', label: 'Settings' }];
         }
         return [
+            { key: 'people', label: 'People' },
             { key: 'chats', label: 'Chats' },
             { key: 'photos', label: 'Photos' },
             { key: 'videos', label: 'Videos' },
@@ -307,11 +308,12 @@ export default function SearchScreen() {
 
     useEffect(() => {
         setActiveFilter((prev) => {
-            const next = filterOptions.some((o) => o.key === prev) ? prev : (filterOptions[0]?.key ?? 'chats');
+            const defaultFilter = searchContext === 'soulmate' ? 'people' : (filterOptions[0]?.key ?? 'chats');
+            const next = filterOptions.some((o) => o.key === prev) ? prev : defaultFilter;
             console.log(`[Search] Filter set to: ${next}`);
             return next;
         });
-    }, [filterOptions]);
+    }, [filterOptions, searchContext]);
 
     useEffect(() => {
         entryProgress.value = withTiming(1, {
@@ -562,7 +564,14 @@ export default function SearchScreen() {
 
         setLoading(true);
         setSearchError(null);
-        const userId = currentUser?.id || '';
+        const rawUserId = currentUser?.id || '';
+        const userId = normalizeId(rawUserId);
+        
+        if (!userId || userId === '') {
+            console.warn('[Search] No valid user ID found for search');
+            setLoading(false);
+            return;
+        }
 
         try {
             let apiUsers: any[] = [];
@@ -586,16 +595,30 @@ export default function SearchScreen() {
                         }));
                     }
                 }
-            } catch {}
+            } catch (err: any) {
+                console.log('[Search] API search source skipped/failed:', err?.message);
+            }
+            
+            let profilesData: any[] = [];
+            try {
+                const { data, error: sbError } = await supabase
+                    .from('profiles')
+                    .select('id, username, display_name, name, avatar_url')
+                    .or(`username.ilike.%${text}%,display_name.ilike.%${text}%,name.ilike.%${text}%`)
+                    .neq('id', userId)
+                    .limit(50);
 
-            const { data: profilesData, error: sbError } = await supabase
-                .from('profiles')
-                .select('id, username, display_name, name, avatar_url')
-                .or(`username.ilike.%${text}%,display_name.ilike.%${text}%,name.ilike.%${text}%`)
-                .neq('id', userId)
-                .limit(20);
-
-            if (sbError) throw sbError;
+                if (sbError) {
+                    console.warn('[Search] Supabase profiles search failed:', sbError.message);
+                    // If we already have API users, don't throw, just log it
+                    if (apiUsers.length === 0) throw sbError;
+                } else {
+                    profilesData = data || [];
+                }
+            } catch (sbErr: any) {
+                console.warn('[Search] Supabase fetch error:', sbErr.message);
+                if (apiUsers.length === 0) throw sbErr;
+            }
             const profiles = (profilesData || []).map((profile: any) => ({
                 ...profile,
                 type: 'person',
@@ -921,13 +944,7 @@ export default function SearchScreen() {
         const nextRows: SearchRow[] = [];
 
         if (searchContext === 'chats' || searchContext === 'soulmate') {
-            if (activeFilter === 'chats' || searchContext === 'soulmate') {
-                if (chatResults.length > 0 && searchContext === 'chats') {
-                    nextRows.push({ type: 'section', id: 'section-chats', title: 'Chats' });
-                    nextRows.push(...chatResults);
-                }
-                
-                // Show all discovered people so users can easily start new chats
+            if (activeFilter === 'people' || searchContext === 'soulmate') {
                 const showPeople = peopleResults;
                 if (showPeople.length > 0) {
                     nextRows.push({ 
@@ -937,8 +954,18 @@ export default function SearchScreen() {
                     });
                     nextRows.push(...showPeople);
                 }
+
+                if (chatResults.length > 0 && searchContext === 'chats' && activeFilter === 'people') {
+                    nextRows.push({ type: 'section', id: 'section-chats', title: 'Chats' });
+                    nextRows.push(...chatResults);
+                }
+            } else if (activeFilter === 'chats') {
+                if (chatResults.length > 0) {
+                    nextRows.push({ type: 'section', id: 'section-chats', title: 'Chats' });
+                    nextRows.push(...chatResults);
+                }
                 
-                if (messageResults.length > 0 && searchContext === 'chats') {
+                if (messageResults.length > 0) {
                     nextRows.push({ type: 'section', id: 'section-messages', title: 'Messages' });
                     nextRows.push(...messageResults);
                 }
@@ -1335,7 +1362,7 @@ export default function SearchScreen() {
                         keyboardShouldPersistTaps="handled"
                         keyboardDismissMode="on-drag"
                         ListEmptyComponent={
-                            normalizedQuery.length > 0 && !loading ? (
+                            query.trim().length > 0 && !loading ? (
                                 <View style={styles.emptyContainer}>
                                     <View style={styles.emptyIconCircle}>
                                         <MaterialIcons name="favorite-border" size={42} color="rgba(255,255,255,0.15)" />

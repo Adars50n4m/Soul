@@ -1,5 +1,4 @@
 import { createClient } from '@supabase/supabase-js';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SupabaseSecureStorage } from './secureStorage';
 import * as Env from './env';
 
@@ -14,9 +13,25 @@ export const LEGACY_TO_UUID: Record<string, string> = {
     'hari_id': HARI_ID,
 };
 
-// Use DIRECT Supabase URL as base — Realtime WebSocket REQUIRES direct connection.
-// Cloudflare Workers CANNOT proxy WebSocket upgrade requests.
-// HTTP REST calls are routed through the proxy via custom fetch to bypass ISP blocks.
+// Use the Cloudflare proxy as the Supabase client base URL. This makes both
+// HTTP and Realtime WebSocket traffic go through the proxy, which is required
+// on networks where direct *.supabase.co access is blocked or flaky.
+const SUPABASE_CLIENT_URL = Env.SUPABASE_PROXY_URL || Env.SUPABASE_URL;
+
+const toProxyUrl = (urlString: string): string => {
+    if (urlString.startsWith(Env.SUPABASE_URL)) {
+        return urlString.replace(Env.SUPABASE_URL, Env.SUPABASE_PROXY_URL);
+    }
+    return urlString;
+};
+
+const toDirectUrl = (urlString: string): string | null => {
+    if (urlString.startsWith(Env.SUPABASE_PROXY_URL)) {
+        return urlString.replace(Env.SUPABASE_PROXY_URL, Env.SUPABASE_URL);
+    }
+    return null;
+};
+
 /**
  * State manager for tracking Supabase Proxy health.
  * Prevents constant timeouts by skipping the proxy if it's recently failed.
@@ -50,8 +65,6 @@ class ProxyHealthTracker {
     }
 }
 
-import { isOnlineCached } from '../services/NetworkMonitor';
-
 // Map to track last error log time per endpoint to prevent spamming the console.
 // Keyed by `METHOD path` (no query) so timestamp-paginated polls don't bypass the cooldown.
 const lastErrorLogTime = new Map<string, number>();
@@ -67,7 +80,7 @@ const errorLogKey = (method: string, urlString: string): string => {
     return `${method} ${urlString.slice(0, end)}`;
 };
 
-export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
+export const supabase = createClient(SUPABASE_CLIENT_URL, Env.SUPABASE_ANON_KEY, {
     auth: {
         storage: SupabaseSecureStorage,
         autoRefreshToken: true,
@@ -77,16 +90,19 @@ export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
     global: {
         fetch: async (url: RequestInfo | URL, options?: any) => {
             const urlString = typeof url === 'string' ? url : url.toString();
-            
-            // 1. Check if we are known to be offline - skip and throw immediately
-            // This prevents "Network request failed" spam when the OS knows there's no internet.
-            if (!isOnlineCached()) {
-                throw new Error('Network request failed'); // Match expected fetch error message
-            }
 
-            const proxied = urlString.replace(Env.SUPABASE_URL, Env.SUPABASE_PROXY_URL);
+            // NOTE: We deliberately do NOT short-circuit on isOnlineCached()
+            // here anymore. NetInfo on Android emulators (and some flaky
+            // captive networks) frequently reports isInternetReachable=false
+            // even when fetch() works fine — the early-throw was blocking
+            // EVERY Supabase mutation and stranding messages in 'pending'
+            // forever, even though the realtime channel was happily
+            // SUBSCRIBED. If we're truly offline, the underlying fetch will
+            // reject on its own, and the queue retry loop handles that.
+
+            const proxied = toProxyUrl(urlString);
+            const directFallbackUrl = toDirectUrl(proxied);
             const method = (options?.method || 'GET').toUpperCase();
-            const isMutation = method === 'POST' || method === 'PATCH' || method === 'DELETE';
 
             // Helper to log errors without spamming
             const logKey = errorLogKey(method, urlString);
@@ -120,9 +136,6 @@ export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
                         lastError = err;
                         const isAbort = err.name === 'AbortError';
                         const isNetwork = err.message?.includes('Network request failed');
-                        
-                        // If we are definitely offline now, stop retrying
-                        if (!isOnlineCached()) throw err;
 
                         if (i < retryCount && (isAbort || isNetwork)) {
                             const delay = 500 * (i + 1);
@@ -144,14 +157,21 @@ export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
 
                 if (isNetworkError) {
                     logError(`[Supabase Fetch] ❌ ${method} ${proxied} failed: Network/Timeout`);
-                    
-                    // 3. Fallback to Direct URL
-                    if (urlString !== proxied && isOnlineCached()) {
+
+                    // 3. Fallback to Direct URL — always try, regardless of
+                    // NetworkMonitor's cached `_isOnline`. On Android emulators
+                    // and flaky cellular networks NetInfo can report
+                    // isInternetReachable=false even when fetch() works, so
+                    // gating the fallback on isOnlineCached() was the actual
+                    // reason messages stayed pending forever once the proxy
+                    // had a transient blip. If the device is truly offline,
+                    // this fetch will reject and the queue retry handles it.
+                    if (directFallbackUrl && directFallbackUrl !== proxied) {
                         try {
-                            logError(`[Supabase Fetch] ↻ Falling back to direct: ${urlString}`);
-                            return await fetchWithTimeout(urlString, options, 8000, 0);
+                            logError(`[Supabase Fetch] ↻ Falling back to direct: ${directFallbackUrl}`);
+                            return await fetchWithTimeout(directFallbackUrl, options, 8000, 0);
                         } catch (directErr: any) {
-                            logError(`[Supabase Fetch] ❌ Direct fallback failed for ${method} ${urlString}`);
+                            logError(`[Supabase Fetch] ❌ Direct fallback failed for ${method} ${directFallbackUrl}`);
                             throw directErr;
                         }
                     }
@@ -173,10 +193,12 @@ export const supabase = createClient(Env.SUPABASE_URL, Env.SUPABASE_ANON_KEY, {
 
 /**
  * Get the Realtime WebSocket URL for connectivity testing.
- * Always uses the direct Supabase URL since the proxy can't handle WebSocket.
+ * Uses the same base URL as the Supabase client.
  */
 export const getRealtimeUrl = (): string => {
-    return Env.SUPABASE_URL.replace('https://', 'wss://') + '/realtime/v1';
+    return SUPABASE_CLIENT_URL
+        .replace(/^https:\/\//, 'wss://')
+        .replace(/^http:\/\//, 'ws://') + '/realtime/v1';
 };
 
 /**
@@ -204,7 +226,7 @@ export const checkRealtimeConnectivity = async (): Promise<{ ok: boolean; error?
 
             ws.onerror = (e: any) => {
                 clearTimeout(timeout);
-                try { ws.close(); } catch (err) {}
+                try { ws.close(); } catch {}
                 console.warn(`[Supabase] ❌ Realtime endpoint (${realtimeUrl}) unreachable:`, {
                     message: e?.message,
                     type: e?.type,

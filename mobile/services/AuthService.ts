@@ -37,6 +37,7 @@
 
 import { supabase, SHRI_ID, HARI_ID } from '../config/supabase';
 import { storageService } from './StorageService';
+import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 
 import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
@@ -101,6 +102,7 @@ export interface UserProfile {
 export interface AuthResult {
   success: boolean;
   error?: string;
+  cancelled?: boolean;
   isNewUser?: boolean;   // true = show onboarding, false = go to chat
   user?: UserProfile;
 }
@@ -481,9 +483,28 @@ class AuthService {
       await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
 
       await GoogleSignin.signOut().catch(() => {});
-      const userInfo: any = await GoogleSignin.signIn();
-      const idToken: string | undefined =
+      const signInResponse: any = await GoogleSignin.signIn();
+
+      if (signInResponse?.type === 'cancelled') {
+        console.log('[Auth] Native Google Sign-In cancelled by user');
+        return { success: false, cancelled: true };
+      }
+
+      const userInfo: any = signInResponse?.type === 'success'
+        ? signInResponse?.data
+        : signInResponse;
+
+      let idToken: string | undefined =
         userInfo?.idToken ?? userInfo?.data?.idToken;
+
+      if (!idToken && GoogleSignin.getTokens) {
+        try {
+          const tokens = await GoogleSignin.getTokens();
+          idToken = tokens?.idToken ?? undefined;
+        } catch (tokenError) {
+          console.warn('[Auth] Native Google getTokens fallback failed:', tokenError);
+        }
+      }
 
       if (!idToken) {
         console.error('[Auth] Native Google Sign-In returned no idToken', userInfo);
@@ -515,7 +536,7 @@ class AuthService {
     } catch (err: any) {
       const codes = googleStatusCodes;
       if (codes && err?.code === codes.SIGN_IN_CANCELLED) {
-        return { success: false, error: 'Sign-in cancelled.' };
+        return { success: false, cancelled: true };
       }
       if (codes && err?.code === codes.IN_PROGRESS) {
         return { success: false, error: 'Sign-in already in progress.' };
@@ -535,7 +556,7 @@ class AuthService {
     try {
       let redirectUri: string;
       try {
-        const scheme = Constants.expoConfig?.scheme || 'mobile';
+        const scheme = (Constants.expoConfig?.scheme as string) || 'mobile';
         redirectUri = makeRedirectUri({ scheme, path: 'auth/callback' });
       } catch {
         redirectUri = 'mobile://auth/callback';
@@ -549,7 +570,7 @@ class AuthService {
 
       const result = await WebBrowser.openAuthSessionAsync(data.url ?? '', redirectUri);
       if (result.type !== 'success') {
-        return { success: false, error: `Google sign-in was cancelled: ${result.type}` };
+        return { success: false, cancelled: true };
       }
 
       const urlString = result.url;
@@ -804,7 +825,7 @@ class AuthService {
       }
 
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: makeRedirectUri({ scheme: 'soul', path: 'forgot-password' }),
+        redirectTo: makeRedirectUri({ scheme: 'mobile', path: 'reset-password' }),
       });
 
       if (error) throw error;
@@ -981,12 +1002,27 @@ class AuthService {
   // Uses highest-level StorageService for robust Android/iOS URI resolution.
   async uploadAvatar(userId: string, localUri: string): Promise<string | null> {
     console.log(`[Auth] Uploading avatar for user ${userId}: ${localUri}`);
-    
+
+    // Resize + recompress before upload. Modern iPhone photos are ~4 MB even
+    // at picker quality 0.8, which makes the multipart fetch upload flake on
+    // iOS Simulator ("Network request failed") and is wasteful for an avatar
+    // anyway. 512px JPEG @ 0.7 lands well under 200 KB.
+    let uploadUri = localUri;
+    try {
+      const ctx = ImageManipulator.manipulate(localUri);
+      ctx.resize({ width: 512 });
+      const ref = await ctx.renderAsync();
+      const compressed = await ref.saveAsync({ compress: 0.7, format: SaveFormat.JPEG });
+      if (compressed?.uri) uploadUri = compressed.uri;
+    } catch (e: any) {
+      console.warn('[Auth] Avatar resize failed, uploading original:', e?.message || e);
+    }
+
     // Bucket is 'avatars', folder is the user ID for organization.
     // We let errors bubble up so profile-edit.tsx can show the real cause in the alert.
     const storageKey = await storageService.uploadImage(
-      localUri, 
-      'avatars', 
+      uploadUri,
+      'avatars',
       userId
     );
 

@@ -5,6 +5,7 @@ import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth, AuthProvider, PrivacySettings, PrivacyValue, DEFAULT_PRIVACY } from './AuthContext';
 import { useChat, ChatProvider } from './ChatContext';
+import { TheaterProvider } from './TheaterContext';
 import { useCall, CallProvider } from './CallContext';
 import { useMusic, MusicProvider, RepeatMode } from './MusicContext';
 import { useStatus, StatusProvider } from './StatusContext';
@@ -45,7 +46,7 @@ interface AppContextType {
     sendChatMessage: any;
     updateMessage: any;
     addReaction: any;
-    deleteMessage: any;
+    deleteMessage: (chatId: string, messageId: string, isAdmin?: boolean, deleteForMeOnly?: boolean) => Promise<void>;
     toggleHeart: any;
     sendMediaLikePulse: any;
     remoteLikePulse: { messageId: string; mediaIndex: number; nonce: number } | null;
@@ -142,6 +143,7 @@ interface AppContextType {
     playbackOwnerChatId: string | null;
     setPlaybackOwnerChatId: (chatId: string | null) => void;
     lyrics: any[];
+    lyricsLoading: boolean;
     currentLyricIndex: number;
     showLyrics: boolean;
     setShowLyrics: (v: boolean) => void;
@@ -336,6 +338,7 @@ const AppProviderInternal: React.FC<{ children: React.ReactNode }> = ({ children
         playbackOwnerChatId: music.playbackOwnerChatId,
         setPlaybackOwnerChatId: music.setPlaybackOwnerChatId,
         lyrics: music.lyrics,
+        lyricsLoading: music.lyricsLoading,
         currentLyricIndex: music.currentLyricIndex,
         showLyrics: music.showLyrics,
         setShowLyrics: music.setShowLyrics,
@@ -369,9 +372,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 <CallProvider>
                     <MusicProvider>
                         <StatusProvider>
-                            <AppProviderInternal>
-                                {children}
-                            </AppProviderInternal>
+                            <TheaterProvider>
+                                <AppProviderInternal>
+                                    {children}
+                                </AppProviderInternal>
+                            </TheaterProvider>
                         </StatusProvider>
                     </MusicProvider>
                 </CallProvider>
@@ -480,6 +485,7 @@ export const useAppContext = (): AppContextType => {
             playbackOwnerChatId: null,
             setPlaybackOwnerChatId: () => {},
             lyrics: [],
+            lyricsLoading: false,
             currentLyricIndex: 0,
             showLyrics: false,
             setShowLyrics: () => {},

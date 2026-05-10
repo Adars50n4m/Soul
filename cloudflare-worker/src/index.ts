@@ -5,7 +5,13 @@
 
 export interface Env {
   R2_BUCKET: R2Bucket;
+  // Legacy HS256 secret. Optional once the project moves to asymmetric keys,
+  // but kept for backward compatibility with old-style tokens.
   SUPABASE_JWT_SECRET: string;
+  // Required for modern Supabase projects (publishable key sb_publishable_*),
+  // which sign session tokens with RS256/ES256. Used to fetch JWKS at
+  // `${SUPABASE_URL}/auth/v1/.well-known/jwks.json`.
+  SUPABASE_URL: string;
   R2_PUBLIC_DOMAIN: string;
   MAX_FILE_SIZE_MB: string;
   MAX_AVATAR_SIZE_MB: string;
@@ -68,7 +74,7 @@ async function handleUpload(request: Request, env: Env, bucket: string): Promise
     if (token === 'DEV_BYPASS_TOKEN') {
       userId = 'dev-user';
     } else {
-      userId = await verifyJWT(token, env.SUPABASE_JWT_SECRET);
+      userId = await verifyJWT(token, env);
     }
 
     if (!userId) {
@@ -145,59 +151,114 @@ async function handleUpload(request: Request, env: Env, bucket: string): Promise
 }
 
 /**
- * Verify Supabase JWT token and extract user ID using HS256
+ * Verify a Supabase JWT and return its `sub` (user id), or null if invalid.
+ *
+ * Supports HS256 (legacy projects) plus RS256 / ES256 used by modern
+ * projects with publishable keys. Asymmetric algs are verified against the
+ * project's JWKS endpoint; HS256 falls back to SUPABASE_JWT_SECRET.
  */
-async function verifyJWT(token: string, secret: string): Promise<string | null> {
+let jwksCache: { keys: any[]; fetchedAt: number } | null = null;
+const JWKS_TTL_MS = 5 * 60 * 1000;
+
+async function fetchJWKS(supabaseUrl: string): Promise<any[]> {
+  if (jwksCache && Date.now() - jwksCache.fetchedAt < JWKS_TTL_MS) {
+    return jwksCache.keys;
+  }
+  const url = `${supabaseUrl.replace(/\/$/, '')}/auth/v1/.well-known/jwks.json`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`JWKS fetch failed: ${res.status} ${await res.text().catch(() => '')}`);
+  }
+  const json = (await res.json()) as { keys?: any[] };
+  jwksCache = { keys: json.keys || [], fetchedAt: Date.now() };
+  return jwksCache.keys;
+}
+
+function b64urlDecode(input: string): Uint8Array {
+  const b64 = input.replace(/-/g, '+').replace(/_/g, '/');
+  const padding = '='.repeat((4 - (b64.length % 4)) % 4);
+  return Uint8Array.from(atob(b64 + padding), (c) => c.charCodeAt(0));
+}
+
+async function verifyJWT(token: string, env: Env): Promise<string | null> {
   try {
-    // 1. Basic structure check
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-
     const [headerB64, payloadB64, signatureB64] = parts;
 
-    // 2. Decode payload to check expiration and sub
+    const header = JSON.parse(atob(headerB64.replace(/-/g, '+').replace(/_/g, '/')));
     const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')));
 
-    // Check expiration
     if (payload.exp && payload.exp < Date.now() / 1000) {
       console.warn('Token expired');
       return null;
     }
 
-    // Extract user ID (Supabase uses 'sub' claim)
-    const userId = payload.sub || payload.user_id;
+    const userId: string | undefined = payload.sub || payload.user_id;
     if (!userId) return null;
 
-    // 3. SECURE VERIFICATION: Verify HS256 signature
-    // HS256 uses HMAC with SHA-256
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(secret);
-    const dataToVerify = encoder.encode(`${headerB64}.${payloadB64}`);
+    const dataToVerify = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+    const signature = b64urlDecode(signatureB64);
+    const alg: string = header.alg;
 
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['verify']
-    );
-
-    // Decode signature from base64url
-    const signature = Uint8Array.from(atob(signatureB64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-
-    const isValid = await crypto.subtle.verify(
-      'HMAC',
-      cryptoKey,
-      signature,
-      dataToVerify
-    );
-
-    if (!isValid) {
-      console.error('Invalid JWT signature');
-      return null;
+    if (alg === 'HS256') {
+      if (!env.SUPABASE_JWT_SECRET) {
+        console.error('HS256 token but SUPABASE_JWT_SECRET is not set');
+        return null;
+      }
+      const cryptoKey = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(env.SUPABASE_JWT_SECRET),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['verify'],
+      );
+      const ok = await crypto.subtle.verify('HMAC', cryptoKey, signature, dataToVerify);
+      if (!ok) {
+        console.error('HS256 signature invalid - check SUPABASE_JWT_SECRET');
+        return null;
+      }
+      return userId;
     }
 
-    return userId;
+    if (alg === 'RS256' || alg === 'ES256') {
+      if (!env.SUPABASE_URL) {
+        console.error(`${alg} token received but SUPABASE_URL is not set; cannot fetch JWKS`);
+        return null;
+      }
+      const keys = await fetchJWKS(env.SUPABASE_URL);
+      const jwk =
+        keys.find((k) => k.kid === header.kid) ||
+        keys.find((k) => k.alg === alg);
+      if (!jwk) {
+        console.error(`No JWKS key matched kid=${header.kid} alg=${alg}`);
+        return null;
+      }
+      const importParams: any =
+        alg === 'RS256'
+          ? { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }
+          : { name: 'ECDSA', namedCurve: 'P-256' };
+      const verifyParams: any =
+        alg === 'RS256'
+          ? { name: 'RSASSA-PKCS1-v1_5' }
+          : { name: 'ECDSA', hash: 'SHA-256' };
+      const cryptoKey = await crypto.subtle.importKey(
+        'jwk',
+        jwk,
+        importParams,
+        false,
+        ['verify'],
+      );
+      const ok = await crypto.subtle.verify(verifyParams, cryptoKey, signature, dataToVerify);
+      if (!ok) {
+        console.error(`${alg} signature invalid for kid=${header.kid}`);
+        return null;
+      }
+      return userId;
+    }
+
+    console.error(`Unsupported JWT alg: ${alg}`);
+    return null;
   } catch (error) {
     console.error('JWT verification error:', error);
     return null;

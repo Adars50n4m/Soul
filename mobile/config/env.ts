@@ -18,7 +18,9 @@ export const SUPABASE_URL = getEnvVar('EXPO_PUBLIC_SUPABASE_URL', SUPABASE_BASE_
 export const SUPABASE_ANON_KEY = getEnvVar('EXPO_PUBLIC_SUPABASE_ANON_KEY', 'sb_publishable_9cVY_6oQHMZnV9CaxmMs9Q_7QlUxqlD');
 
 // 2. Gateway Proxy (Bypasses ISP blocks on Supabase)
-export const SUPABASE_PROXY_URL = getEnvVar('EXPO_PUBLIC_SUPABASE_PROXY_URL', 'https://soul-supabase-proxy.adarshark.workers.dev');
+let resolvedSupabaseProxyUrl = getEnvVar('EXPO_PUBLIC_SUPABASE_PROXY_URL', 'https://soul-supabase-proxy.adarshark.workers.dev');
+let resolvedR2WorkerUrl = getEnvVar('EXPO_PUBLIC_R2_WORKER_URL', 'https://soul-upload-worker.adarshark.workers.dev');
+let resolvedR2PublicUrl = getEnvVar('EXPO_PUBLIC_R2_PUBLIC_URL', 'https://pub-e61d644ab07147a8a1a45a3bbd84aa1d.r2.dev');
 
 // 3. App Server (Node.js/Localtunnel)
 export const IS_DEV = __DEV__;
@@ -69,6 +71,32 @@ const isAndroidEmulator = (): boolean => {
 if (IS_DEV) {
   const isRemote = resolvedServerUrl.includes('workers.dev') || resolvedServerUrl.includes('supabase.co');
   const debugHost = extractExpoDevHost();
+  const isAndroidDevEmulator = Platform.OS === 'android' && isAndroidEmulator();
+  const localDevServerUrl = isAndroidDevEmulator
+    ? 'http://10.0.2.2:3000'
+    : debugHost
+      ? `http://${debugHost}:3000`
+      : '';
+
+  if (localDevServerUrl && resolvedSupabaseProxyUrl.includes('workers.dev')) {
+    resolvedSupabaseProxyUrl = `${localDevServerUrl}/supabase`;
+    console.log(`[Env] Resolving SUPABASE_PROXY_URL to local dev proxy: ${resolvedSupabaseProxyUrl}`);
+  }
+
+  if (localDevServerUrl && isRemote) {
+    resolvedServerUrl = localDevServerUrl;
+    console.log(`[Env] Resolving SERVER_URL to local dev server: ${resolvedServerUrl}`);
+  }
+
+  if (localDevServerUrl && resolvedR2WorkerUrl.includes('workers.dev')) {
+    resolvedR2WorkerUrl = localDevServerUrl;
+    console.log(`[Env] Resolving R2_WORKER_URL to local dev server: ${resolvedR2WorkerUrl}`);
+  }
+
+  if (localDevServerUrl && resolvedR2PublicUrl.includes('r2.dev')) {
+    resolvedR2PublicUrl = `${localDevServerUrl}/r2`;
+    console.log(`[Env] Resolving R2_PUBLIC_URL to local dev proxy: ${resolvedR2PublicUrl}`);
+  }
 
   if (!isRemote) {
     if (Platform.OS !== 'android' && resolvedServerUrl.includes('10.0.2.2')) {
@@ -121,6 +149,7 @@ if (_isPhysicalDevice && (resolvedServerUrl.includes('localhost') || resolvedSer
 }
 
 export const SERVER_URL = resolvedServerUrl;
+export const SUPABASE_PROXY_URL = resolvedSupabaseProxyUrl;
 console.log(`[Env] Final Connectivity URL: ${SERVER_URL}`);
 
 
@@ -130,8 +159,8 @@ export const MUSIC_API_URL = getEnvVar('EXPO_PUBLIC_MUSIC_API_URL', 'https://saa
 // 5. Cloudflare R2 / Upload Worker
 // Defaults are the real production URLs so physical devices / standalone
 // builds still resolve media correctly when .env isn't bundled.
-export const R2_WORKER_URL = getEnvVar('EXPO_PUBLIC_R2_WORKER_URL', 'https://soul-upload-worker.adarshark.workers.dev');
-export const R2_PUBLIC_URL = getEnvVar('EXPO_PUBLIC_R2_PUBLIC_URL', 'https://pub-e61d644ab07147a8a1a45a3bbd84aa1d.r2.dev');
+export const R2_WORKER_URL = resolvedR2WorkerUrl;
+export const R2_PUBLIC_URL = resolvedR2PublicUrl;
 
 // 6. WebRTC TURN Servers
 // Default: OpenRelay Project free TURN (works from any network, no signup)
@@ -162,6 +191,12 @@ export const CALL_REQUIRE_CUSTOM_TURN = getEnvVar(
   'EXPO_PUBLIC_CALL_REQUIRE_CUSTOM_TURN',
   !IS_DEV ? 'true' : 'false'
 ) === 'true';
+
+// 6.2 YouTube Data API v3 (Theater Mode catalog)
+// Restrict the key in Google Cloud Console to bundle id / package + SHA-1 + the
+// YouTube Data API only before shipping. Never commit a key here — set it via
+// EXPO_PUBLIC_YOUTUBE_API_KEY in .env / EAS Secrets.
+export const YOUTUBE_API_KEY = getEnvVar('EXPO_PUBLIC_YOUTUBE_API_KEY', '');
 
 // 7. Feature Flags
 // Default to R2 ON because the proxy worker doesn't expose an upload route —

@@ -133,7 +133,7 @@ export default function OTPScreen() {
     }
 
     if (result.isNewUser) {
-      router.push('/username-setup');
+      router.push('/username-setup?oauthMode=false');
     } else {
       router.replace('/(tabs)');
     }

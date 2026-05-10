@@ -11,7 +11,7 @@ import { type Contact, type Message } from '../types';
 import { mergeGroupedMediaThumbnail } from '../utils/chatUtils';
 
 import { normalizeId, getSuperuserName, LEGACY_TO_UUID, isWithinEditWindow } from '../utils/idNormalization';
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 import { syncAvatar } from '../services/MediaDownloadService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -27,6 +27,19 @@ const isBlacklisted = (id: string, name?: string) => {
   if (INTERNAL_BLACKLIST.includes(normalizedId)) return true;
   if (name?.toLowerCase().includes('.internal@soul.dev')) return true;
   return false;
+};
+
+const GLOBAL_INBOX_FALLBACK_POLL_MS = 2000;
+const GLOBAL_INBOX_HEALTHY_POLL_MS = 15000;
+const GLOBAL_INBOX_LOOKBACK_MS = 10 * 60 * 1000;
+const GLOBAL_INBOX_MAX_ROWS = 100;
+
+const MESSAGE_STATUS_RANK: Record<string, number> = {
+  pending: 0,
+  failed: 0,
+  sent: 1,
+  delivered: 2,
+  read: 3,
 };
 
 interface ChatContextType {
@@ -45,7 +58,7 @@ interface ChatContextType {
   sendChatMessage: (chatId: string, text: string, media?: Message['media'], replyTo?: string, localUri?: string) => Promise<void>;
   updateMessage: (chatId: string, messageId: string, updates: Partial<Message>) => Promise<void>;
   addReaction: (chatId: string, messageId: string, emoji: string | null) => Promise<void>;
-  deleteMessage: (chatId: string, messageId: string, isAdmin?: boolean) => Promise<void>;
+  deleteMessage: (chatId: string, messageId: string, isAdmin?: boolean, deleteForMeOnly?: boolean) => Promise<void>;
   toggleHeart: (chatId: string, messageId: string) => Promise<void>;
   sendMediaLikePulse: (toUserId: string, messageId: string, mediaIndex: number) => void;
   remoteLikePulse: { messageId: string; mediaIndex: number; nonce: number } | null;
@@ -88,7 +101,11 @@ function mapChatMessage(message: ChatMessage, currentUserId: string): Message {
   const normalizedMedia = message.media
     ? {
         ...message.media,
-        url: proxySupabaseUrl(message.media.url),
+        // theater_session media.url is a YouTube videoId, not an R2/Supabase
+        // storage key — keep it as-is so the player can find the right video.
+        url: message.media.type === 'theater_session'
+          ? message.media.url
+          : proxySupabaseUrl(message.media.url),
       }
     : undefined;
 
@@ -105,6 +122,55 @@ function mapChatMessage(message: ChatMessage, currentUserId: string): Message {
     senderName: message.senderName,
     localFileUri: message.localFileUri,
   };
+}
+
+function mapServerRowToChatMessage(row: any): ChatMessage {
+  const isTheater = row.media_type === 'theater_session';
+  let rawUrl = row.media_url ?? '';
+  // Heal videoIds that an older proxySupabaseUrl build prefixed with the R2
+  // public base when they round-tripped through the queue. Without this both
+  // sides land on different Supabase presence channels for the same session.
+  if (isTheater && /^https:\/\/pub-[a-f0-9]+\.r2\.dev\/[A-Za-z0-9_-]{6,15}$/.test(rawUrl)) {
+    rawUrl = rawUrl.split('/').pop() || rawUrl;
+  }
+  const media = (row.media_url || row.media_type || row.media_thumbnail)
+    ? {
+        type: row.media_type ?? 'image',
+        url: isTheater ? rawUrl : proxySupabaseUrl(rawUrl),
+        caption: row.media_caption ?? undefined,
+        thumbnail: row.media_thumbnail ?? undefined,
+        duration: row.media_duration ?? undefined,
+      }
+    : undefined;
+
+  if (media && media.type === 'theater_session') {
+    const { hydrateTheaterMediaFromCaption } = require('../utils/theaterMetaCodec');
+    hydrateTheaterMediaFromCaption(media);
+  }
+
+  return {
+    id: row.id?.toString?.() ?? String(row.id),
+    sender_id: row.sender,
+    receiver_id: row.receiver,
+    group_id: row.group_id ?? undefined,
+    text: row.text ?? '',
+    timestamp: row.created_at ?? row.timestamp ?? new Date().toISOString(),
+    status: row.status ?? 'sent',
+    media,
+    reply_to: row.reply_to_id ? row.reply_to_id.toString() : undefined,
+    senderName: row.sender_name ?? undefined,
+    reactions: row.reaction ? [row.reaction] : undefined,
+  };
+}
+
+function mergeMessageStatus(existing?: Message['status'], next?: Message['status']): Message['status'] | undefined {
+  if (!existing) return next;
+  if (!next) return existing;
+  if (existing === 'failed' && next !== 'pending' && next !== 'failed') return next;
+  if (next === 'failed') return existing === 'pending' ? 'failed' : existing;
+  return (MESSAGE_STATUS_RANK[next] ?? 0) >= (MESSAGE_STATUS_RANK[existing] ?? 0)
+    ? next
+    : existing;
 }
 
 function mergeMessageMedia(
@@ -165,6 +231,19 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [otherUser, setOtherUser] = useState<any | null>(null);
   const [connectivity, setConnectivity] = useState(() => chatService.getConnectivityState());
   const presenceChannelRef = useRef<any>(null);
+  // Per-chat realtime channel for typing + media-likes. Splitting these off
+  // `presence-global` (which carries presence for ALL users) keeps each chat's
+  // ephemeral broadcasts on a small, stable channel — fewer subscribers, fewer
+  // CHANNEL_ERROR reconnect loops, less typing-event loss.
+  const chatChannelRef = useRef<any>(null);
+  const chatChannelKeyRef = useRef<string | null>(null);
+  const globalMessageChannelRef = useRef<any>(null);
+  const globalMessagePollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const globalMessageAppStateRef = useRef<{ remove: () => void } | null>(null);
+  const globalMessageUserIdRef = useRef<string | null>(null);
+  const globalMessageCursorRef = useRef<string | null>(null);
+  const globalMessagePollInFlightRef = useRef(false);
+  const globalRealtimeHealthyRef = useRef(false);
   const activeChatIdRef = useRef<string | null>(null);
   const lastServerSyncRef = useRef<number>(0);
 
@@ -249,6 +328,19 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 console.log('[ChatContext] Purging blacklisted contact from local DB:', c.id);
                 offlineService.deleteContact(c.id).catch(() => {});
                 return false;
+            }
+
+            // --- NUCLEAR PURGE: Delete any placeholder users with 0 messages ---
+            const placeholderNames = ['User', 'Check', 'Discovery'];
+            if (placeholderNames.includes(c.name) || !c.name) {
+               // We don't have messagesRef yet here, but we can check SQLite directly
+               // OR just hide them for now and let the sync-pruning handle the DB delete.
+               // For instant fix: hide them if they have no last message text
+               if (!c.lastMessage || c.lastMessage === 'Start a conversation') {
+                  console.log('[ChatContext] Hiding/Purging placeholder:', c.name);
+                  offlineService.deleteContact(c.id).catch(() => {});
+                  return false;
+               }
             }
 
             if (!myUuid) return true;
@@ -452,7 +544,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
               serverSuccess = true;
             }
           }
-        } catch (err) {
+        } catch {
           console.warn('[ChatContext] Server refresh failed, falling back to direct Supabase query');
         }
 
@@ -469,43 +561,39 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
 
-        // 3. Superuser visibility: If the current user is a Superuser, show ALL users 
-        // AND ensure Hari/Shri are always mutually connected.
-
+        // 3. Superuser pairing: when the logged-in user IS a superuser
+        // (Hari or Shri), force the *other* superuser into the visible
+        // contacts list so the two are always reachable from each other.
+        // We deliberately do NOT fetch all profiles here — that admin-style
+        // discovery was a separate experiment and is intentionally left off.
         if (isSelfSuperUser) {
-          console.log('[ChatContext] SuperUser detected: Fetching all profiles for discovery');
-          
-          // Fetch ALL active profiles for superusers so they can manage/contact anyone
-          const { data: allProfiles } = await supabase.from('profiles')
-            .select('*')
-            .neq('id', myUuid) // Don't include self
-            .limit(100); // Reasonable limit for now
-
-          if (allProfiles) {
-            // Merge with existing connections, avoiding duplicates
-            const existingIds = new Set(allVisibleProfiles.map(p => p.id));
-            allProfiles.forEach(p => {
-              if (!existingIds.has(p.id)) {
-                allVisibleProfiles.push(p);
-                existingIds.add(p.id);
-              }
-            });
-          }
-
-          // Force inclusion of the "other" superuser to ensure they are always connected
           const otherSuperUserId = superUserIds.find(id => id !== myUuid);
           if (otherSuperUserId && !allVisibleProfiles.some(p => p.id === otherSuperUserId)) {
-             const { data: otherProfile } = await supabase.from('profiles').select('*').eq('id', otherSuperUserId).maybeSingle();
-             if (otherProfile) allVisibleProfiles.push(otherProfile);
-             else {
+            try {
+              const { data: otherProfile } = await supabase
+                .from('profiles')
+                .select('*')
+                .eq('id', otherSuperUserId)
+                .maybeSingle();
+              if (otherProfile) {
+                allVisibleProfiles.push(otherProfile);
+              } else {
+                // Profile row missing on server — synthesize a minimal
+                // entry so the contact still renders. AuthService also
+                // upserts the superuser record on first login, so this
+                // fallback is just for a cold device that hasn't met the
+                // counterpart yet.
                 allVisibleProfiles.push({
-                    id: otherSuperUserId,
-                    username: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'shri' : 'hari',
-                    display_name: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'Shri' : 'Hari',
-                    avatar_type: 'teddy',
-                    teddy_variant: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'girl' : 'boy'
+                  id: otherSuperUserId,
+                  username: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'shri' : 'hari',
+                  display_name: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'Shri' : 'Hari',
+                  avatar_type: 'teddy',
+                  teddy_variant: otherSuperUserId === LEGACY_TO_UUID['shri'] ? 'girl' : 'boy',
                 });
-             }
+              }
+            } catch (err) {
+              console.warn('[ChatContext] Superuser pairing fetch failed:', err);
+            }
           }
         }
 
@@ -530,7 +618,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
               return n;
             });
-          
+
           contactsRef.current = normalized;
           setContacts(prev => {
             // MERGE: Keep existing ones that aren't in the server response 
@@ -551,7 +639,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             // Final safety filter
             return merged.filter(c => !isBlacklisted(c.id, c.name));
           });
-          
+
           const batchToSave: any[] = [];
           for (const profile of allVisibleProfiles) {
             const primaryId = LEGACY_TO_UUID[profile.id] || profile.id;
@@ -587,6 +675,25 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (batchToSave.length > 0) {
             await offlineService.saveContactsBatch(batchToSave);
             console.log(`[ChatContext] Batched save for ${batchToSave.length} contacts complete.`);
+          }
+
+          // --- ROBUST PRUNING ---
+          // Always prune stale discovery contacts after a server sync attempt
+          const remoteIds = new Set(batchToSave.map(c => c.id));
+          const currentContacts = [...contactsRef.current];
+          const staleContacts = currentContacts.filter(c => !c.isGroup && !remoteIds.has(c.id));
+
+          if (staleContacts.length > 0) {
+            console.log(`[ChatContext] Found ${staleContacts.length} potentially stale contacts to prune`);
+            for (const stale of staleContacts) {
+              const msgs = messagesRef.current[stale.id] || [];
+              if (msgs.length === 0) {
+                console.log(`[ChatContext] Pruning stale discovery contact: ${stale.id} (${stale.name})`);
+                await offlineService.deleteContact(stale.id).catch(() => {});
+                setContacts(prev => prev.filter(c => c.id !== stale.id));
+                contactsRef.current = contactsRef.current.filter(c => c.id !== stale.id);
+              }
+            }
           }
           lastServerSyncRef.current = Date.now();
           AsyncStorage.setItem('ss_last_contact_sync', lastServerSyncRef.current.toString()).catch(() => {});
@@ -641,6 +748,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updated[index] = {
           ...existing,
           ...nextMessage,
+          status: mergeMessageStatus(existing.status, nextMessage.status),
           media: mergeMessageMedia(existing.media, nextMessage.media),
           localFileUri: nextMessage.localFileUri || existing.localFileUri,
           thumbnailUri: nextMessage.thumbnailUri || existing.thumbnailUri
@@ -716,8 +824,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       updateContactPreview(partnerId, normalized);
     }
 
-    // WhatsApp-style: pre-fetch media in background when message arrives
-    if (normalized.media?.url && !normalized.localFileUri) {
+    // WhatsApp-style: pre-fetch media in background when message arrives.
+    // Skip theater_session — its `media.url` is a YouTube videoId, not an R2
+    // storage key, and the prefetch would treat it as an R2 download (which
+    // 404s and triggers a spurious server-side delete request).
+    if (
+      normalized.media?.url &&
+      !normalized.localFileUri &&
+      normalized.media.type !== 'theater_session'
+    ) {
       const mediaUrl = normalized.media.url;
       if (!mediaUrl.startsWith('file:') && !mediaUrl.startsWith('data:')) {
         downloadQueue.enqueue(normalized.id, mediaUrl, normalized.media.type, false, 2, false)
@@ -731,6 +846,58 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
   }, [currentUser, updateContactPreview, upsertMessage]);
+
+  const isServerMessageRowRelevant = useCallback((row: any) => {
+    if (!currentUser || !row) return false;
+    const myId = normalizeId(currentUser.id);
+    const senderId = row.sender ? normalizeId(row.sender) : '';
+    const receiverId = row.receiver ? normalizeId(row.receiver) : '';
+    if (senderId === myId || receiverId === myId) return true;
+
+    const groupId = row.group_id ? String(row.group_id) : '';
+    if (!groupId) return false;
+    return contactsRef.current.some((contact) => contact.isGroup && contact.id === groupId);
+  }, [currentUser]);
+
+  const advanceGlobalMessageCursor = useCallback((row: any) => {
+    const timestamp = row?.created_at ?? row?.timestamp;
+    if (!timestamp) return;
+    const current = globalMessageCursorRef.current;
+    if (!current || new Date(timestamp).getTime() > new Date(current).getTime()) {
+      globalMessageCursorRef.current = timestamp;
+    }
+  }, []);
+
+  const handleServerMessageRow = useCallback(async (row: any) => {
+    if (!currentUser || !isServerMessageRowRelevant(row)) return;
+
+    const message = mapServerRowToChatMessage(row);
+    const myId = normalizeId(currentUser.id);
+    const isMine = normalizeId(message.sender_id) === myId;
+    const chatId = message.group_id || (isMine ? message.receiver_id : message.sender_id);
+    if (!chatId) return;
+
+    await offlineService.saveMessage(chatId, {
+      id: message.id,
+      sender: isMine ? 'me' : 'them',
+      text: message.text,
+      timestamp: message.timestamp,
+      status: message.status,
+      media: message.media,
+      replyTo: message.reply_to,
+      senderName: message.senderName,
+      groupId: message.group_id,
+    });
+
+    await handleIncomingMessage(message);
+    advanceGlobalMessageCursor(row);
+
+    const isIncomingDirect = !isMine && normalizeId(message.receiver_id) === myId;
+    const isIncomingGroup = !!message.group_id && !isMine;
+    if ((isIncomingDirect || isIncomingGroup) && message.status !== 'delivered' && message.status !== 'read') {
+      chatService.updateMessageStatusOnServer(message.id, 'delivered');
+    }
+  }, [advanceGlobalMessageCursor, currentUser, handleIncomingMessage, isServerMessageRowRelevant]);
 
   const handleStatusUpdate = useCallback((messageId: string, status: ChatMessage['status'], newId?: string) => {
     setMessages((prev) => {
@@ -766,6 +933,121 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, []);
 
+  // Build a deterministic channel name for the chat. 1-on-1 sorts the two
+  // user IDs so both peers compute the same name regardless of who opens the
+  // chat first. Groups use the group's UUID.
+  const buildChatChannelName = useCallback((partnerId: string, isGroup: boolean): string | null => {
+    if (!currentUser?.id || !partnerId) return null;
+    if (isGroup) return `chat:group:${partnerId}`;
+    const a = normalizeId(currentUser.id);
+    const b = normalizeId(partnerId);
+    const [first, second] = [a, b].sort();
+    return `chat:${first}_${second}`;
+  }, [currentUser]);
+
+  // Tear down the per-chat broadcast channel (typing, media-like). Safe to
+  // call even if no channel is active.
+  const teardownChatChannel = useCallback(() => {
+    const ch = chatChannelRef.current;
+    chatChannelRef.current = null;
+    chatChannelKeyRef.current = null;
+    if (ch) {
+      try {
+        ch.unsubscribe();
+        supabase.removeChannel(ch);
+      } catch (err) {
+        console.warn('[ChatChannel] Teardown failed:', err);
+      }
+    }
+  }, []);
+
+  // Subscribe to the per-chat broadcast channel for typing + media-like
+  // events. Replaces the equivalent listeners that used to live on
+  // `presence-global` — keeps that global channel light (presence only).
+  const subscribeChatChannel = useCallback((channelName: string) => {
+    if (!currentUser) return;
+    if (chatChannelKeyRef.current === channelName && chatChannelRef.current) {
+      return; // already subscribed to the right channel
+    }
+    teardownChatChannel();
+
+    const channel = supabase.channel(channelName, {
+      config: { broadcast: { self: false } },
+    });
+    chatChannelRef.current = channel;
+    chatChannelKeyRef.current = channelName;
+
+    channel.on('broadcast', { event: 'typing' }, ({ payload }) => {
+      console.log('[Typing] received typing from', payload?.userId);
+      if (payload?.userId && payload.userId !== currentUser.id) {
+        const normalizedId = normalizeId(payload.userId);
+        setTypingUsers((prev) => Array.from(new Set([...prev, normalizedId])));
+      }
+    });
+
+    channel.on('broadcast', { event: 'stop-typing' }, ({ payload }) => {
+      console.log('[Typing] received stop-typing from', payload?.userId);
+      if (payload?.userId) {
+        const normalizedId = normalizeId(payload.userId);
+        setTypingUsers((prev) => prev.filter((id) => id !== normalizedId));
+      }
+    });
+
+    channel.on('broadcast', { event: 'media-like' }, ({ payload }) => {
+      if (!payload) return;
+      if (payload.toUserId !== currentUser.id) return;
+      if (payload.fromUserId === currentUser.id) return;
+      setRemoteLikePulse({
+        messageId: String(payload.messageId),
+        mediaIndex: Number.isFinite(payload.mediaIndex) ? payload.mediaIndex : 0,
+        nonce: Date.now() + Math.random(),
+      });
+    });
+
+    channel.on('broadcast', { event: 'theater-ended' }, ({ payload }) => {
+      // The host sends this when ending a theater session. Update the local
+      // message so the card flips from LIVE+Join → ENDED immediately, even
+      // before the next full DB sync pulls the updated media_caption.
+      if (!payload?.messageId || !payload?.chatId) return;
+      console.log(`[ChatChannel] theater-ended for message ${payload.messageId}`);
+      setMessages((prev) => {
+        // Search across all loaded chats since payload.chatId is relative to the sender
+        // and might not match the local key for this chat (e.g. guest uses hostId as key).
+        let targetChatId: string | null = null;
+        let hasMessage = false;
+
+        for (const [chatKey, msgs] of Object.entries(prev)) {
+          if (msgs.some((m) => m.id === payload.messageId)) {
+            targetChatId = chatKey;
+            hasMessage = true;
+            break;
+          }
+        }
+
+        if (!hasMessage || !targetChatId) return prev;
+
+        return {
+          ...prev,
+          [targetChatId]: prev[targetChatId].map((m) => {
+            if (m.id !== payload.messageId) return m;
+            return {
+              ...m,
+              media: {
+                ...m.media,
+                theater: { ...(m.media?.theater || {}), status: 'ended', viewerCount: 0, participants: [] },
+                caption: payload.caption || m.media?.caption,
+              },
+            };
+          }),
+        };
+      });
+    });
+
+    channel.subscribe((status) => {
+      console.log(`[ChatChannel] ${channelName} status:`, status);
+    });
+  }, [currentUser, teardownChatChannel]);
+
   const initializeChatSession = useCallback(async (partnerId: string, isGroup: boolean = false) => {
     if (!currentUser) return;
     activeChatIdRef.current = partnerId;
@@ -797,15 +1079,170 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       handleRemoteDelete
     );
     setConnectivity(chatService.getConnectivityState());
-  }, [currentUser, handleIncomingMessage, handleStatusUpdate]);
+
+    // Subscribe to the per-chat broadcast channel for typing + media-likes.
+    const channelName = buildChatChannelName(partnerId, finalIsGroup);
+    if (channelName) {
+      subscribeChatChannel(channelName);
+    }
+  }, [currentUser, handleIncomingMessage, handleStatusUpdate, handleRemoteDelete, buildChatChannelName, subscribeChatChannel]);
 
   const cleanupChatSession = useCallback((partnerId?: string) => {
     if (!partnerId || activeChatIdRef.current === partnerId) {
       activeChatIdRef.current = null;
       chatService.cleanup();
       setConnectivity(chatService.getConnectivityState());
+      teardownChatChannel();
+      // Clear typingUsers so we don't carry a stale typing indicator into the
+      // next chat the user opens.
+      setTypingUsers([]);
     }
-  }, []);
+  }, [teardownChatChannel]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      if (globalMessagePollTimerRef.current) {
+        clearInterval(globalMessagePollTimerRef.current);
+        globalMessagePollTimerRef.current = null;
+      }
+      if (globalMessageAppStateRef.current) {
+        globalMessageAppStateRef.current.remove();
+        globalMessageAppStateRef.current = null;
+      }
+      if (globalMessageChannelRef.current) {
+        supabase.removeChannel(globalMessageChannelRef.current);
+        globalMessageChannelRef.current = null;
+      }
+      globalMessageCursorRef.current = null;
+      globalMessageUserIdRef.current = null;
+      globalRealtimeHealthyRef.current = false;
+      return;
+    }
+
+    let cancelled = false;
+    const myId = normalizeId(currentUser.id);
+    if (globalMessageUserIdRef.current !== myId) {
+      globalMessageCursorRef.current = null;
+      globalMessageUserIdRef.current = myId;
+    }
+
+    const ensureCursor = async () => {
+      if (globalMessageCursorRef.current) return;
+      const latestLocal = await offlineService.getLatestGlobalMessageTimestamp?.();
+      globalMessageCursorRef.current =
+        latestLocal || new Date(Date.now() - GLOBAL_INBOX_LOOKBACK_MS).toISOString();
+    };
+
+    const pollGlobalInbox = async () => {
+      if (cancelled || AppState.currentState !== 'active' || globalMessagePollInFlightRef.current) return;
+      globalMessagePollInFlightRef.current = true;
+
+      try {
+        await ensureCursor();
+        const cursor = globalMessageCursorRef.current || new Date(Date.now() - GLOBAL_INBOX_LOOKBACK_MS).toISOString();
+        const groupIds = contactsRef.current
+          .filter((contact) => contact.isGroup)
+          .map((contact) => contact.id)
+          .filter(Boolean)
+          .slice(0, 50);
+        const filters = [`sender.eq.${myId}`, `receiver.eq.${myId}`];
+        if (groupIds.length > 0) {
+          filters.push(`group_id.in.(${groupIds.join(',')})`);
+        }
+
+        const { data, error } = await supabase
+          .from('messages')
+          .select('*')
+          .or(filters.join(','))
+          .gt('created_at', cursor)
+          .order('created_at', { ascending: true })
+          .limit(GLOBAL_INBOX_MAX_ROWS);
+
+        if (error || !data?.length) return;
+
+        for (const row of data) {
+          if (cancelled) break;
+          await handleServerMessageRow(row);
+          advanceGlobalMessageCursor(row);
+        }
+      } catch {
+        // Keep this silent. The interval is intentionally aggressive in
+        // fallback mode, and noisy network logs make real failures harder to see.
+      } finally {
+        globalMessagePollInFlightRef.current = false;
+      }
+    };
+
+    const setGlobalPollInterval = (intervalMs: number) => {
+      if (globalMessagePollTimerRef.current) {
+        clearInterval(globalMessagePollTimerRef.current);
+        globalMessagePollTimerRef.current = null;
+      }
+
+      globalMessagePollTimerRef.current = setInterval(pollGlobalInbox, intervalMs);
+      setTimeout(pollGlobalInbox, 250);
+    };
+
+    setGlobalPollInterval(GLOBAL_INBOX_FALLBACK_POLL_MS);
+
+    globalMessageAppStateRef.current = AppState.addEventListener('change', (state) => {
+      if (state === 'active') pollGlobalInbox();
+    });
+
+    const channel = supabase
+      .channel(`message-sync-${myId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        async (payload) => {
+          if (cancelled) return;
+          await handleServerMessageRow(payload.new);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'messages' },
+        async (payload) => {
+          if (cancelled) return;
+          await handleServerMessageRow(payload.new);
+        }
+      )
+      .subscribe((status) => {
+        if (cancelled) return;
+        if (status === 'SUBSCRIBED') {
+          globalRealtimeHealthyRef.current = true;
+          setGlobalPollInterval(GLOBAL_INBOX_HEALTHY_POLL_MS);
+          pollGlobalInbox();
+          return;
+        }
+
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          globalRealtimeHealthyRef.current = false;
+          setGlobalPollInterval(GLOBAL_INBOX_FALLBACK_POLL_MS);
+          pollGlobalInbox();
+        }
+      });
+
+    globalMessageChannelRef.current = channel;
+
+    return () => {
+      cancelled = true;
+      if (globalMessagePollTimerRef.current) {
+        clearInterval(globalMessagePollTimerRef.current);
+        globalMessagePollTimerRef.current = null;
+      }
+      if (globalMessageAppStateRef.current) {
+        globalMessageAppStateRef.current.remove();
+        globalMessageAppStateRef.current = null;
+      }
+      if (globalMessageChannelRef.current) {
+        supabase.removeChannel(globalMessageChannelRef.current);
+        globalMessageChannelRef.current = null;
+      }
+      globalMessagePollInFlightRef.current = false;
+      globalRealtimeHealthyRef.current = false;
+    };
+  }, [advanceGlobalMessageCursor, currentUser, handleServerMessageRow]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -833,28 +1270,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
     });
 
-    channel.on('broadcast', { event: 'typing' }, ({ payload }) => {
-      if (payload.userId !== currentUser.id) {
-        setTypingUsers((prev) => Array.from(new Set([...prev, payload.userId])));
-      }
-    });
-
-    channel.on('broadcast', { event: 'stop-typing' }, ({ payload }) => {
-      setTypingUsers((prev) => prev.filter((id) => id !== payload.userId));
-    });
-
-    channel.on('broadcast', { event: 'media-like' }, ({ payload }) => {
-      if (!payload) return;
-      if (payload.toUserId !== currentUser.id) return;
-      if (payload.fromUserId === currentUser.id) return;
-      setRemoteLikePulse({
-        messageId: String(payload.messageId),
-        mediaIndex: Number.isFinite(payload.mediaIndex) ? payload.mediaIndex : 0,
-        nonce: Date.now() + Math.random(),
-      });
-    });
+    // Typing + media-like broadcasts now live on a per-chat channel (see
+    // subscribeChatChannel) — presence-global stays presence-only so it
+    // doesn't get flooded and flap into CHANNEL_ERROR.
 
     channel.subscribe(async (status) => {
+      console.log('[Typing] presence-global channel status:', status);
       if (status === 'SUBSCRIBED') {
         await channel.track({ user_id: currentUser.id, online_at: new Date().toISOString() });
       }
@@ -969,9 +1390,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await initializeChatSession(chatId);
     }
     
-    // Pass current user name for group context if not already in session
-    const currentName = currentUser.name || 'You';
-
     const sent = await chatService.sendMessage(chatId, text, media, replyTo, localUri, id);
     if (sent) {
       const normalized = mapChatMessage(sent, currentUser.id);
@@ -1053,7 +1471,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await offlineService.updateMessageReaction(messageId, emoji);
   }, []);
 
-  const deleteMessage = useCallback(async (chatId: string, messageId: string, isAdminOverride?: boolean) => {
+  const deleteMessage = useCallback(async (chatId: string, messageId: string, isAdminOverride?: boolean, deleteForMeOnly?: boolean) => {
     // Read current message from state updater to avoid depending on `messages`
     let current: Message | undefined;
     setMessages((prev) => {
@@ -1065,12 +1483,30 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     try {
-      const canDeleteForEveryone = (current && current.sender === 'me' && isWithinEditWindow(current.timestamp)) || isAdminOverride;
-      
-      if (canDeleteForEveryone) {
-        await chatService.requestDeleteForEveryone(messageId);
+      // If explicit delete for me only, don't touch the server
+      if (deleteForMeOnly) {
+        console.log(`[ChatContext] Deleting message ${messageId} locally only (Delete for Me)`);
       } else {
-        await chatService.deleteMessageFromServer(messageId);
+        // theater_session bubbles aren't user content the sender might
+        // accidentally edit — they're "live room" invites. Without the
+        // server-side delete the row keeps re-hydrating from Supabase on
+        // every refresh, so the bubble appears to come back from the dead.
+        // Always allow delete-for-everyone on theater sessions the sender
+        // owns, regardless of age.
+        const isTheaterSession = current?.media?.type === 'theater_session';
+        const canDeleteForEveryone = (
+          current
+          && current.sender === 'me'
+          && (isTheaterSession || isWithinEditWindow(current.timestamp))
+        ) || isAdminOverride;
+
+        if (canDeleteForEveryone) {
+          await chatService.requestDeleteForEveryone(messageId);
+        } else {
+          // If it's old or not mine, and we didn't explicitly ask for global delete,
+          // just delete locally. This fixes the bug where "Delete for Me" was deleting from server.
+          console.log(`[ChatContext] Message ${messageId} is outside edit window or not mine, deleting locally only.`);
+        }
       }
     } catch (e) {
       console.warn('[ChatContext] Server deletion failed, proceeding with local-only delete:', e);
@@ -1090,9 +1526,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [addReaction]);
 
   const sendMediaLikePulse = useCallback((toUserId: string, messageId: string, mediaIndex: number) => {
-    if (!currentUser || !presenceChannelRef.current) return;
+    if (!currentUser) return;
+    const ch = chatChannelRef.current;
+    if (!ch) {
+      console.warn('[ChatContext] sendMediaLikePulse skipped: no chat channel');
+      return;
+    }
     try {
-      presenceChannelRef.current.send({
+      ch.send({
         type: 'broadcast',
         event: 'media-like',
         payload: {
@@ -1109,13 +1550,29 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentUser]);
 
   const sendTyping = useCallback((isTyping: boolean) => {
-    if (!currentUser || !otherUser) return;
-    presenceChannelRef.current?.send({
+    if (!currentUser) return;
+    const ch = chatChannelRef.current;
+    if (!ch) {
+      console.warn('[Typing] sendTyping skipped: no chat channel');
+      return;
+    }
+    if (ch.state !== 'joined') {
+      // Channel not yet subscribed (still SUBSCRIBING / errored). Drop the
+      // event silently rather than firing into the void; the next keystroke
+      // after the channel joins will trigger another `typing` broadcast.
+      console.log('[Typing] skipped — channel state:', ch.state);
+      return;
+    }
+    const result = ch.send({
       type: 'broadcast',
       event: isTyping ? 'typing' : 'stop-typing',
-      payload: { userId: currentUser.id },
+      payload: { userId: normalizeId(currentUser.id) },
     });
-  }, [currentUser, otherUser]);
+    console.log('[Typing] sent', isTyping ? 'typing' : 'stop-typing', 'as', currentUser.id);
+    if (result && typeof (result as any).then === 'function') {
+      (result as any).then((res: any) => console.log('[Typing] send result →', res)).catch((err: any) => console.warn('[Typing] send failed:', err));
+    }
+  }, [currentUser]);
 
   const clearChatMessages = useCallback(async (partnerId: string) => {
     if (!currentUser) return;

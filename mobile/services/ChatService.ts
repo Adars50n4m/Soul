@@ -7,6 +7,7 @@ import { supabase } from '../config/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import * as Crypto from 'expo-crypto';
 import { proxySupabaseUrl, SUPABASE_ENDPOINT } from '../config/api';
+import { SUPABASE_URL as DIRECT_SUPABASE_URL } from '../config/env';
 import { offlineService, getDb, type QueuedMessage, type MessageStatus } from './LocalDBService';
 import { storageService } from './StorageService';
 import { AppState, AppStateStatus } from 'react-native';
@@ -26,12 +27,13 @@ export interface ChatMessage {
   timestamp: string;
   status: MessageStatus;
   media?: {
-    type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
+    type: 'image' | 'video' | 'audio' | 'file' | 'status_reply' | 'theater_session';
     url: string;
     name?: string;
     caption?: string;
     thumbnail?: string;
     duration?: number;
+    theater?: import('../types').TheaterSessionMeta;
   };
   reply_to?: string;
   senderName?: string;
@@ -48,11 +50,10 @@ type UploadProgressCallback = (messageId: string, progress: number) => void;
 // RETRY CONFIGURATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MAX_RETRY_COUNT      = 5;
-const MAX_TOTAL_RETRIES    = 10;
+const MAX_TOTAL_RETRIES    = 200;
 const MAX_REALTIME_RETRIES = 5;
 const POLLING_INTERVAL_NORMAL = 30000;
-const POLLING_INTERVAL_FALLBACK = 12000;
+const POLLING_INTERVAL_FALLBACK = 1500;
 const INITIAL_RETRY_DELAY  = 1_000;   // 1 second
 const MAX_RETRY_DELAY      = 60_000;  // 1 minute cap
 
@@ -87,13 +88,14 @@ const withTimeout = async <T>(promise: PromiseLike<T>, timeoutMs: number, label:
 };
 
 type GroupMediaItem = {
-  type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
+  type: 'image' | 'video' | 'audio' | 'file' | 'status_reply' | 'theater_session';
   url?: string;
   localFileUri?: string;
   caption?: string;
   thumbnail?: string;
   name?: string;
   duration?: number;
+  theater?: import('../types').TheaterSessionMeta;
 };
 
 const decodeGroupedItems = (thumbnail?: string): GroupMediaItem[] => {
@@ -141,6 +143,7 @@ class ChatService {
   private networkListenerCleanup: (() => void) | null = null;
 
   private pollTimer:            ReturnType<typeof setInterval> | null = null;
+  private pollIntervalMs:       number | null = null;
   private lastPollAt:           string | null = null;
   private lastFetchTimestamps:  Map<string, number> = new Map();
   private isPolling:            boolean = false;
@@ -348,7 +351,12 @@ class ChatService {
 
             if (updated.media_url || updated.media_thumbnail) {
               const existing = await offlineService.getMessageById(messageId);
-              const nextMediaUrl = typeof updated.media_url === 'string' ? proxySupabaseUrl(updated.media_url) : '';
+              // theater_session media_url is a YouTube videoId — never run it
+              // through proxySupabaseUrl or it gets prefixed with the R2 base.
+              const isTheaterMedia = updated.media_type === 'theater_session';
+              const nextMediaUrl = typeof updated.media_url === 'string'
+                ? (isTheaterMedia ? updated.media_url : proxySupabaseUrl(updated.media_url))
+                : '';
               const nextThumbnail = typeof updated.media_thumbnail === 'string' ? updated.media_thumbnail : '';
               const needsMediaRefresh =
                 (!!nextMediaUrl && nextMediaUrl !== (existing?.media?.url ?? '')) ||
@@ -384,7 +392,14 @@ class ChatService {
           );
 
           if (this.isIncomingRowForCurrentUser(updated)) {
-            this.updateMessageStatusOnServer(incoming.id, 'delivered');
+            // Avoid downgrade ping-pong: skip the 'delivered' write if the
+            // server already advanced past it. Otherwise a `read`-state
+            // UPDATE relayed back to the receiver would cause their handler
+            // to immediately overwrite the row back to `delivered`, which
+            // makes the sender's UI flip-flop between gray and blue ticks.
+            if (updated.status !== 'delivered' && updated.status !== 'read') {
+              this.updateMessageStatusOnServer(incoming.id, 'delivered');
+            }
           }
         }
       )
@@ -403,12 +418,21 @@ class ChatService {
         if (status === 'SUBSCRIBED') {
           this.isRealtimeConnected = true;
           this.realtimeRetryCount = 0;
-          this.syncConnectivityState();
+          this.stopMessagePolling();
+          // SUBSCRIBED is *definitive* proof of server reachability — the
+          // websocket completed the join handshake. Use syncConnected() so
+          // isDeviceOnline/isServerReachable both flip true even if the prior
+          // checkConnectivity probe (against the Cloudflare proxy) had
+          // failed. Without this the "Connecting..." banner stays orange on
+          // Android emulators where the proxy probe sometimes flakes but
+          // direct Supabase wss:// to .supabase.co works fine.
+          this.syncConnected();
           this.startQueueProcessing();
           this.fetchMissedMessages();
-        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           this.isRealtimeConnected = false;
           this.syncConnectivityState();
+          this.startMessagePolling();
           this.handleRealtimeReconnect();
         }
       });
@@ -466,22 +490,48 @@ class ChatService {
   }
 
   private async checkConnectivity(): Promise<boolean> {
-    try {
-      const controller = new AbortController();
-      const timeoutId  = setTimeout(() => controller.abort(), 8_000);
-      await fetch(SUPABASE_ENDPOINT, { method: 'GET', signal: controller.signal, mode: 'no-cors', headers: { 'Cache-Control': 'no-cache' } });
-      clearTimeout(timeoutId);
+    // Already-subscribed realtime channel is the most reliable signal of
+    // server reachability we have — bypass the HTTP probe entirely. Without
+    // this, a flaky probe on Android emulators (where the Cloudflare proxy
+    // sometimes returns network errors due to AVD NAT quirks) would keep the
+    // "Connecting..." banner orange even though messages are flowing fine
+    // over the wss:// realtime channel.
+    if (this.isRealtimeConnected) {
+      this.isDeviceOnline = true;
+      this.isServerReachable = true;
+      this.syncConnectivityState();
+      return true;
+    }
+    // Try the proxy first, then fall back to the direct Supabase host. On
+    // Android emulators the AVD NAT path through the Cloudflare Workers
+    // proxy is often flaky even though direct supabase.co resolves fine.
+    // Probing only the proxy was leaving the banner orange and gating the
+    // outbound queue, so messages stayed pending despite a perfectly good
+    // network.
+    const probe = async (target: string, timeoutMs: number): Promise<boolean> => {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        await fetch(target, { method: 'GET', signal: ctrl.signal, mode: 'no-cors', headers: { 'Cache-Control': 'no-cache' } });
+        clearTimeout(t);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const reachable = await probe(SUPABASE_ENDPOINT, 6_000)
+      || await probe(DIRECT_SUPABASE_URL, 6_000);
+    if (reachable) {
       this.isDeviceOnline = true;
       this.isServerReachable = true;
       this.syncConnectivityState();
       this.startQueueProcessing();
       return true;
-    } catch (error: any) {
-      this.isServerReachable = false;
-      this.syncConnectivityState();
-      this.stopQueueProcessing();
-      return false;
     }
+    this.isServerReachable = false;
+    this.syncConnectivityState();
+    this.stopQueueProcessing();
+    return false;
   }
 
   private syncConnectivityState(): void {
@@ -499,7 +549,7 @@ class ChatService {
   }
 
   private startQueueProcessing(): void {
-    if (!this.isActuallyOnline) return;
+    if (!this.isDeviceOnline) return;
     this.clearQueueTimer();
     if (this.isProcessingQueue) {
       this.hasPendingProcessQueueTrigger = true;
@@ -525,7 +575,10 @@ class ChatService {
 
   private scheduleQueueProcessing(delayMs: number): void {
     this.clearQueueTimer();
-    if (!this.isActuallyOnline) return;
+    // Mirrors processQueue: gate only on device-level offline, not on the
+    // probe-based isServerReachable flag, so a flaky proxy doesn't strand
+    // the retry loop.
+    if (!this.isDeviceOnline) return;
 
     this.processQueueTimer = setTimeout(() => {
       this.processQueueTimer = null;
@@ -558,6 +611,20 @@ class ChatService {
 
       return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
     });
+  }
+
+  private getDelayUntilRetry(message: QueuedMessage): number {
+    if (!message.retryCount || !message.lastRetryAt) return 0;
+
+    const lastRetryAt = new Date(message.lastRetryAt).getTime();
+    if (!Number.isFinite(lastRetryAt)) return 0;
+
+    const backoff = Math.min(
+      INITIAL_RETRY_DELAY * Math.pow(2, Math.min(message.retryCount - 1, 6)),
+      MAX_RETRY_DELAY
+    );
+
+    return Math.max(0, backoff - (Date.now() - lastRetryAt));
   }
 
   private async findServerMessageById(messageId: string): Promise<ChatMessage | null> {
@@ -697,7 +764,14 @@ class ChatService {
 
   private async processQueue(): Promise<void> {
     this.clearQueueTimer();
-    if (!this.isActuallyOnline || this.isProcessingQueue) {
+    // Only short-circuit on a *device-level* offline signal. We deliberately
+    // don't gate on `isServerReachable` here anymore — that flag depends on
+    // a periodic HTTP probe that's flaky on Android emulators and was the
+    // root cause of "msg nahi jaa rha" while the banner showed
+    // "Connecting...". Let the actual Supabase fetch (with its proxy →
+    // direct fallback) determine reachability, and let the retry loop
+    // handle genuine failures.
+    if (!this.isDeviceOnline || this.isProcessingQueue) {
       if (this.isProcessingQueue) this.hasPendingProcessQueueTrigger = true;
       return;
     }
@@ -708,23 +782,35 @@ class ChatService {
     try {
       const pendingMessages = this.getPrioritizedPendingMessages(await offlineService.getPendingMessages());
       const pollInterval = this.isRealtimeConnected ? REALTIME_POLL_INTERVAL : IDLE_POLL_INTERVAL;
-      const nextInterval = pendingMessages.length > 0 ? ACTIVE_POLL_INTERVAL : pollInterval;
+      let attemptedSend = false;
+      let nextRetryDelay = Number.POSITIVE_INFINITY;
 
       for (const message of pendingMessages) {
         if (this.sendingIds.has(message.id)) continue;
+        const retryDelay = this.getDelayUntilRetry(message);
+        if (retryDelay > 0) {
+          nextRetryDelay = Math.min(nextRetryDelay, retryDelay);
+          continue;
+        }
+        attemptedSend = true;
         await this.sendMessageToSupabase(message);
       }
 
-      if (this.isActuallyOnline) {
+      if (this.isDeviceOnline) {
+        const nextInterval = pendingMessages.length === 0
+          ? pollInterval
+          : attemptedSend
+            ? ACTIVE_POLL_INTERVAL
+            : Math.min(nextRetryDelay, MAX_RETRY_DELAY);
         this.scheduleQueueProcessing(nextInterval);
       }
     } catch (error) {
-      if (this.isActuallyOnline) {
+      if (this.isDeviceOnline) {
         this.scheduleQueueProcessing(REALTIME_POLL_INTERVAL);
       }
     } finally {
       this.isProcessingQueue = false;
-      if (this.hasPendingProcessQueueTrigger && this.isActuallyOnline) {
+      if (this.hasPendingProcessQueueTrigger && this.isDeviceOnline) {
         this.hasPendingProcessQueueTrigger = false;
         this.scheduleQueueProcessing(0);
       }
@@ -903,9 +989,11 @@ class ChatService {
       console.warn(`[ChatService] Message ${message.id} send failed (attempt ${message.retryCount + 1}):`, errMsg);
       const newRetryCount = message.retryCount + 1;
       await offlineService.updateMessageRetry(message.id, newRetryCount, errMsg);
-      if (newRetryCount >= MAX_RETRY_COUNT) {
+      if (newRetryCount >= MAX_TOTAL_RETRIES) {
         await offlineService.markMessageAsFailed(message.id, errMsg);
         this.onStatusUpdate?.(message.id, 'failed');
+      } else {
+        this.onStatusUpdate?.(message.id, 'pending');
       }
     } finally {
       this.sendingIds.delete(message.id);
@@ -993,10 +1081,25 @@ class ChatService {
   }
 
   public async requestDeleteForEveryone(messageId: string): Promise<boolean> {
-    if (!this.userId || !this.partnerId || !this.channel) return false;
-    this.channel.send({ type: 'broadcast', event: 'delete-message', payload: { messageId } });
+    // The realtime broadcast is a UX speedup so the peer's chat removes the
+    // bubble instantly — but the *canonical* delete is the Supabase row drop,
+    // which RLS authorizes via the user's session token regardless of whether
+    // the chat channel is currently live. Previously this whole function
+    // bailed out when `this.channel` was null (e.g. host inside the Theater
+    // screen, where the Chat realtime channel had already been torn down),
+    // leaving the Supabase row alive and the bubble re-hydrating on refresh.
+    if (this.channel && this.partnerId) {
+      try {
+        this.channel.send({ type: 'broadcast', event: 'delete-message', payload: { messageId } });
+      } catch (e) {
+        console.warn('[ChatService] delete broadcast failed (non-fatal):', e);
+      }
+    }
     const { error } = await supabase.from('messages').delete().eq('id', messageId);
-    if (error) return false;
+    if (error) {
+      console.warn('[ChatService] requestDeleteForEveryone: supabase delete failed:', error);
+      return false;
+    }
     return true;
   }
 
@@ -1044,13 +1147,29 @@ class ChatService {
     };
 
     this.onNewMessage?.(uiMessage);
-    if (this.isActuallyOnline) this.startQueueProcessing();
+    // Kick the queue regardless of the probe-based isServerReachable. If the
+    // device has any network at all, let the queue try — the actual fetch
+    // (with its proxy → direct fallback) determines real reachability. This
+    // is the fix for "msg nahi jaa rha" while the banner says Connecting on
+    // Android emulators where the proxy probe is flaky.
+    if (this.isDeviceOnline) this.startQueueProcessing();
     return uiMessage;
   }
 
   async updateMessageStatusOnServer(messageId: string, status: 'delivered' | 'read'): Promise<void> {
     try {
-      await supabase.from('messages').update({ status }).eq('id', messageId);
+      // SQL-level monotonicity guard: status only ever moves forward
+      // (sent → delivered → read). Without this, a stale UPDATE event
+      // could re-trigger a `delivered` write after the message was already
+      // read, ping-ponging the sender's tick between blue and gray.
+      let query = supabase.from('messages').update({ status }).eq('id', messageId);
+      if (status === 'delivered') {
+        query = query.eq('status', 'sent');
+      } else {
+        // status === 'read' — allow upgrade from sent OR delivered, never re-write read.
+        query = query.neq('status', 'read');
+      }
+      await query;
       this.syncConnected();
     } catch (_) {}
   }
@@ -1058,7 +1177,12 @@ class ChatService {
   async markMessagesAsRead(messageIds: string[]): Promise<void> {
     if (!messageIds.length) return;
     try {
-      await supabase.from('messages').update({ status: 'read' }).in('id', messageIds);
+      // Same monotonicity guard — only flip rows that aren't already `read`.
+      await supabase
+        .from('messages')
+        .update({ status: 'read' })
+        .in('id', messageIds)
+        .neq('status', 'read');
       this.syncConnected();
       for (const id of messageIds) await offlineService.updateMessageStatus(id, 'read');
     } catch (_) {}
@@ -1069,7 +1193,7 @@ class ChatService {
     if (!message) return;
     await offlineService.updateMessageRetry(messageId, 0);
     await offlineService.updateMessageStatus(messageId, 'pending');
-    if (this.isActuallyOnline) this.startQueueProcessing();
+    if (this.isDeviceOnline) this.startQueueProcessing();
   }
 
   getNetworkStatus(): boolean {
@@ -1137,10 +1261,32 @@ class ChatService {
   }
 
   private mapDbRowToChatMessage(row: any): ChatMessage {
+    // theater_session stores a YouTube videoId in media_url, NOT an R2 key.
+    // proxySupabaseUrl() would otherwise prepend the R2 public base and turn
+    // "abcd1234XYZ" into "https://pub-...r2.dev/abcd1234XYZ", which then
+    // breaks every downstream consumer that expects a clean videoId.
+    const isTheater = row.media_type === 'theater_session';
+    let rawUrl = row.media_url ?? '';
+    // Heal rows written by an older build that ran proxySupabaseUrl on the
+    // videoId. Strip the R2 prefix back off so the picker → bubble → theater
+    // pipeline sees a clean videoId on both sender and receiver.
+    if (isTheater && /^https:\/\/pub-[a-f0-9]+\.r2\.dev\/[A-Za-z0-9_-]{6,15}$/.test(rawUrl)) {
+      rawUrl = rawUrl.split('/').pop() || rawUrl;
+    }
+    const media = (row.media_url || row.media_type || row.media_thumbnail)
+      ? { type: row.media_type ?? 'image', url: isTheater ? rawUrl : proxySupabaseUrl(rawUrl), caption: row.media_caption, thumbnail: row.media_thumbnail, duration: row.media_duration }
+      : undefined;
+    // Theater sessions encode their richer metadata into `caption` because the
+    // messages table only has flat media columns. Restore it here so the bubble
+    // and player both find `media.theater` populated.
+    if (media && media.type === 'theater_session') {
+      const { hydrateTheaterMediaFromCaption } = require('../utils/theaterMetaCodec');
+      hydrateTheaterMediaFromCaption(media);
+    }
     return {
       id: row.id.toString(), sender_id: row.sender, receiver_id: row.receiver, group_id: row.group_id, text: row.text ?? '', timestamp: row.created_at, status: (row.status as ChatMessage['status']) ?? 'sent',
-      media: (row.media_url || row.media_type || row.media_thumbnail) ? { type: row.media_type ?? 'image', url: proxySupabaseUrl(row.media_url ?? ''), caption: row.media_caption, thumbnail: row.media_thumbnail, duration: row.media_duration } : undefined,
-      reply_to: row.reply_to_id ? row.reply_to_id.toString() : undefined, 
+      media,
+      reply_to: row.reply_to_id ? row.reply_to_id.toString() : undefined,
       senderName: row.sender_name ?? undefined,
       reactions: row.reaction ? [row.reaction] : undefined,
     };
@@ -1148,10 +1294,18 @@ class ChatService {
 
   private startMessagePolling(): void {
     const currentFrequency = this.isRealtimeConnected ? POLLING_INTERVAL_NORMAL : POLLING_INTERVAL_FALLBACK;
-    if (this.pollTimer) return;
+    if (this.pollTimer && this.pollIntervalMs === currentFrequency) return;
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer as any);
+      this.pollTimer = null;
+    }
+    this.pollIntervalMs = currentFrequency;
     if (!this.lastPollAt) this.lastPollAt = new Date().toISOString();
 
     this.pollTimer = setInterval(() => { if (AppState.currentState === 'active') this.pollForNewMessages(); }, currentFrequency) as any;
+    if (AppState.currentState === 'active') {
+      setTimeout(() => this.pollForNewMessages(), 250);
+    }
 
     if (!this.appStateListener) {
       this.appStateListener = AppState.addEventListener('change', (state) => {
@@ -1162,11 +1316,12 @@ class ChatService {
 
   private stopMessagePolling(): void {
     if (this.pollTimer) { clearInterval(this.pollTimer as any); this.pollTimer = null; }
+    this.pollIntervalMs = null;
     if (this.appStateListener) { this.appStateListener.remove(); this.appStateListener = null; }
   }
 
   private async pollForNewMessages(): Promise<void> {
-    if (!this.userId || !this.partnerId || !this.lastPollAt || this.isPolling || !this.isActuallyOnline) return;
+    if (!this.userId || !this.partnerId || !this.lastPollAt || this.isPolling || !this.isDeviceOnline) return;
     this.isPolling = true;
     try {
       let query = supabase.from('messages').select('*');

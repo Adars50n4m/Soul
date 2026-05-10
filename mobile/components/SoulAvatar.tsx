@@ -77,7 +77,7 @@ export const SoulAvatar = forwardRef<View, SoulAvatarProps>(({
   const [hasFallbackToGlobalProxy, setHasFallbackToGlobalProxy] = useState(false);
 
   useEffect(() => {
-    if (preferredSource && preferredSource !== currentSource) {
+    if (preferredSource) {
       setCurrentSource(preferredSource);
       setImageLoaded(isAvatarSourceWarm(preferredSource));
     } else if (!preferredSource && lastSuccessfulSourceRef.current) {
@@ -89,7 +89,7 @@ export const SoulAvatar = forwardRef<View, SoulAvatarProps>(({
     setHasFallbackToDirect(false);
     setHasFallbackToGlobalProxy(false);
     setError(false);
-  }, [preferredSource, currentSource]);
+  }, [preferredSource]);
 
   useEffect(() => {
     if (!preferredSource || !preferredSource.startsWith('http')) return;

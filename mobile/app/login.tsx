@@ -311,7 +311,12 @@ export default function LoginScreen() {
     if (!userId) {
       return false;
     }
-    await setSession(userId);
+
+    await Promise.race([
+      setSession(userId),
+      new Promise((resolve) => setTimeout(resolve, 3500)),
+    ]);
+
     return true;
   };
 
@@ -395,6 +400,10 @@ export default function LoginScreen() {
     setError('');
     setStatus('loading');
     const result = await authService.signInWithGoogle();
+    if (result.cancelled) {
+      setStatus('idle');
+      return;
+    }
     if (result.success) {
       const synced = await syncAuthenticatedUser(result.user?.id);
       if (!synced) {

@@ -232,11 +232,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                             console.warn('[AuthContext] Profile lookup failed, restoring cached profile for:', userId);
                             setCurrentUser(cachedProfile);
                             await AsyncStorage.setItem('ss_current_user', userId);
+                            return;
                         }
                     } catch (parseError) {
                         console.warn('[AuthContext] Failed to parse cached profile during sync fallback:', parseError);
                     }
                 }
+
+                // New-email signup can briefly have a valid auth session before the
+                // profile row is readable. Seed a temporary user so onboarding can
+                // continue instead of getting stuck behind the splash/auth guard.
+                const tempUser: User = {
+                    id: userId,
+                    name: 'User',
+                    username: `user_${userId.substring(0, 8)}`,
+                    avatar: '',
+                    avatarType: 'default',
+                    bio: '',
+                    isSuperUser: isSuperUser(userId),
+                };
+                console.warn('[AuthContext] Profile lookup failed, seeding temporary onboarding user for:', userId);
+                setCurrentUser(tempUser);
+                await AsyncStorage.setItem('ss_current_user', userId);
+                await AsyncStorage.setItem('ss_cached_user_profile', JSON.stringify(tempUser));
+                await AsyncStorage.setItem('ss_cached_user_profile_at', String(Date.now()));
             }
 
             // Sync Push Token for reliable remote notifications
@@ -353,7 +372,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 setCurrentUser(null);
                 await AsyncStorage.multiRemove(['ss_current_user', 'ss_cached_user_profile', 'ss_cached_user_profile_at', 'ss_device_session_id']);
             } else if (event === 'PASSWORD_RECOVERY') {
-                router.push('/forgot-password?mode=reset' as any);
+                router.push('/reset-password' as any);
             }
         };
 

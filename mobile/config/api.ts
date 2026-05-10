@@ -117,6 +117,12 @@ export const SAAVN_API_URL = Env.MUSIC_API_URL;
 // Get the API URL
 export const getSaavnApiUrl = () => SAAVN_API_URL;
 
+export const getSaavnApiBaseUrl = () => {
+    const apiUrl = (SAAVN_API_URL || '').replace(/\/$/, '');
+    if (!apiUrl) return '';
+    return apiUrl.endsWith('/api') ? apiUrl : `${apiUrl}/api`;
+};
+
 /**
  * Smart URL Proxy: Rewrites direct Supabase Storage URLs to use the Cloudflare Workers proxy.
  * This bypasses ISP-level blocks on the .supabase.co domain for images/videos.

@@ -169,21 +169,21 @@ export default function ProfileEditScreen() {
     const contentOpacity = useSharedValue(hasHeroMorph ? 0 : 1);
     const backdropOpacity = useSharedValue(hasHeroMorph ? 0 : 1);
     const morphShellOpacity = useSharedValue(1);
+    // During dismiss the shell's opacity is driven by morphProgress (so it
+    // dissolves only as the shape converges on the destination, never mid-
+    // morph where the size/position mismatch reads as a ghost). Outside
+    // dismiss it's driven by `morphShellOpacity` like before.
+    const isDismissing = useSharedValue(false);
     const avatarRevealOpacity = useSharedValue(hasHeroMorph ? 0 : 1);
     const isClosingRef = useRef(false);
     const allowNativePopRef = useRef(false);
     const entryHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const sourceRevealTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const dismissFinishTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const clearMorphTimers = React.useCallback(() => {
         if (entryHideTimeoutRef.current) {
             clearTimeout(entryHideTimeoutRef.current);
             entryHideTimeoutRef.current = null;
-        }
-        if (sourceRevealTimeoutRef.current) {
-            clearTimeout(sourceRevealTimeoutRef.current);
-            sourceRevealTimeoutRef.current = null;
         }
         if (dismissFinishTimeoutRef.current) {
             clearTimeout(dismissFinishTimeoutRef.current);
@@ -365,13 +365,26 @@ export default function ProfileEditScreen() {
         };
     });
 
-    // All four chrome-layer styles read from their own dedicated shared
-    // values now (driven by the entry/dismiss effects) rather than from
-    // morphProgress directly. That decoupling is what fixes the dismiss
-    // pop: chrome/content/backdrop can fade out smoothly *during* the
-    // morph instead of holding 100% until the very end and then dropping.
+    // Chrome and content fade via their own time-driven shared values so
+    // they can be staggered independently from the morph reshape. The
+    // backdrop is the exception: during dismiss it has to track the shell
+    // exactly, otherwise it fades to transparent while the shell is still
+    // mid-shrink and the source pill peeks out around the smaller shell —
+    // a visible "card inside a card" frame. So during dismiss we drive
+    // the backdrop off morphProgress with the same curve the shell uses,
+    // and the source hero only reveals as the shell actually lands on it.
     const backdropAnimatedStyle = useAnimatedStyle(() => {
         'worklet';
+        if (isDismissing.value) {
+            return {
+                opacity: interpolate(
+                    morphProgress.value,
+                    [0, 0.22, 1],
+                    [0, 1, 1],
+                    Extrapolation.CLAMP,
+                ),
+            };
+        }
         return { opacity: backdropOpacity.value };
     });
 
@@ -399,12 +412,25 @@ export default function ProfileEditScreen() {
         return { opacity: avatarRevealOpacity.value };
     });
 
-    // Morphing shell hand-off opacity. Stays 1 for the entire entry morph so
-    // there's no gap between the shell and the destination avatar — once the
-    // destination is fully painted the shell fades out in 80ms (set in the
-    // entry effect's spring callback).
+    // Morphing shell hand-off opacity. During entry it's driven by
+    // `morphShellOpacity` (stays 1 for the entire morph, fades to 0 in
+    // 80 ms via the spring's settle callback). During dismiss it's tied
+    // directly to `morphProgress` so the shell stays fully opaque while
+    // the shape is reshaping and only dissolves over the last sliver of
+    // progress — by which point its size/position has converged on the
+    // destination, so there's no ghost overlap with the source hero.
     const morphShellHandoffStyle = useAnimatedStyle(() => {
         'worklet';
+        if (isDismissing.value) {
+            return {
+                opacity: interpolate(
+                    morphProgress.value,
+                    [0, 0.18, 1],
+                    [0, 1, 1],
+                    Extrapolation.CLAMP,
+                ),
+            };
+        }
         return { opacity: morphShellOpacity.value };
     });
 
@@ -433,12 +459,17 @@ export default function ProfileEditScreen() {
         }
 
         const DISMISS_DURATION = 320;
-        const dismissEasing = Easing.bezier(0.4, 0, 0.2, 1);
 
-        // Bring the morphing shell back so the destination avatar can hand
-        // off to it cleanly. The reveal opacity drops to 0 right away — the
-        // shell's image (same avatar URL) takes over the visual.
-        morphShellOpacity.value = withTiming(1, { duration: 60 });
+        // Switch the shell's opacity source from time-driven to
+        // morphProgress-driven (see `morphShellHandoffStyle`). The shell
+        // stays fully opaque while the shape is actively reshaping, then
+        // dissolves only over the final ~18% of progress — when its size and
+        // position have already converged on the destination hero, so the
+        // chrome behind reveals cleanly with no ghost overlap. Reset the
+        // time-driven opacity to 1 so the entry path remains correct on the
+        // next mount.
+        isDismissing.value = true;
+        morphShellOpacity.value = 1;
         avatarRevealOpacity.value = withTiming(0, {
             duration: 120,
             easing: Easing.out(Easing.cubic),
@@ -457,20 +488,23 @@ export default function ProfileEditScreen() {
             easing: Easing.out(Easing.cubic),
         });
 
-        // Backdrop fades in lockstep with the morph itself, so the settings
-        // screen behind reveals progressively — not in a sudden burst at the
-        // tail like before (which is what made the @hari + options "pop in").
+        // The settings hero behind is already at full opacity (settings owns
+        // a binary visible/hidden flag — no fade ramp). So the visible chrome
+        // reveal during dismiss is driven entirely by this backdrop fading
+        // 1→0: while it's opaque the hero is hidden, as it fades the chrome
+        // (name, @handle, edit pencil, blur, gradient) emerges in lockstep
+        // with the morphing shell shrinking. Tracks the spring's perceived
+        // settle so chrome reaches full visibility right as the shape lands.
         backdropOpacity.value = withTiming(0, {
-            duration: DISMISS_DURATION,
-            easing: dismissEasing,
+            duration: 280,
+            easing: Easing.out(Easing.cubic),
         });
 
-        // Reveal the source pill just before the morphing card lands so the
-        // viewer never sees an empty hole behind the shrinking shell.
-        sourceRevealTimeoutRef.current = setTimeout(() => {
-            setProfileEditSourceHidden(false);
-            sourceRevealTimeoutRef.current = null;
-        }, DISMISS_DURATION - 90);
+        // Reveal the source hero at the start of the dismiss. Settings owns
+        // the fade (timed to match DISMISS_DURATION), so the chrome — name,
+        // @handle, edit pencil, blur and gradient — reveals in lockstep with
+        // the morphing shell shrinking, instead of popping in at the end.
+        setProfileEditSourceHidden(false);
 
         // Symmetric spring — matches the entry's organic feel, but gently
         // overshoot-clamped so the close doesn't bounce in the source pill.
@@ -498,6 +532,7 @@ export default function ProfileEditScreen() {
         contentOpacity,
         finishDismiss,
         hasHeroMorph,
+        isDismissing,
         morphProgress,
         morphShellOpacity,
     ]);

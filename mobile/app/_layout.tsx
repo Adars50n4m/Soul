@@ -162,7 +162,7 @@ function RootContent() {
           return;
         }
 
-        const inAuthGroup = ['login', 'otp', 'username-setup', 'profile-setup', 'forgot-password'].includes(segments[0] as string);
+        const inAuthGroup = ['login', 'otp', 'username-setup', 'profile-setup', 'forgot-password', 'reset-password'].includes(segments[0] as string);
         const needsProfileSetup = !currentUser?.isSuperUser && !!currentUser?.username && (
           currentUser.username.startsWith('temp_') ||
           currentUser.username.startsWith('user_')
@@ -179,7 +179,17 @@ function RootContent() {
 
         if (currentUser && needsProfileSetup && segments[0] !== 'username-setup' && segments[0] !== 'profile-setup') {
             console.log('[RootLayout] New user needs setup, redirecting');
-            router.replace('/username-setup?oauthMode=true');
+            const redirectToOnboarding = async () => {
+                try {
+                    const { data } = await supabase.auth.getSession();
+                    const provider = data.session?.user?.app_metadata?.provider;
+                    const isOauthMode = !!provider && provider !== 'email';
+                    router.replace(isOauthMode ? '/username-setup?oauthMode=true' : '/username-setup');
+                } catch {
+                    router.replace('/username-setup');
+                }
+            };
+            void redirectToOnboarding();
             if (isNavSettled) setIsNavSettled(false);
             return;
         }
@@ -192,7 +202,14 @@ function RootContent() {
         }
 
         // ✅ Navigation Settlement
-        const matchesAuth = (currentUser && !inAuthGroup) || (!currentUser && inAuthGroup);
+        // Logged-in new users are expected to live inside the onboarding/auth
+        // routes (`username-setup`, `profile-setup`) for a while. Treat those
+        // routes as settled too, otherwise the splash/video overlay never
+        // unmounts and the screen appears permanently black.
+        const isOnboardingRoute = segments[0] === 'username-setup' || segments[0] === 'profile-setup';
+        const matchesAuth =
+          (!currentUser && inAuthGroup) ||
+          (!!currentUser && (!inAuthGroup || (needsProfileSetup && isOnboardingRoute)));
 
         if (matchesAuth && !isNavSettled) {
             console.log('[RootLayout] ✅ Navigation settled on target:', segments[0]);
@@ -258,8 +275,9 @@ function RootContent() {
         <Stack.Screen name="+not-found" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="login" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="otp" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="username-setup" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="profile-setup" options={{ headerShown: false, animation: 'slide_from_right' }} />
+        <Stack.Screen name="username-setup" options={{ headerShown: false, animation: 'none', gestureEnabled: false }} />
+        <Stack.Screen name="profile-setup" options={{ headerShown: false, animation: 'none', gestureEnabled: false }} />
+        <Stack.Screen name="reset-password" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ 
           headerShown: false,
           gestureEnabled: false 
@@ -351,6 +369,25 @@ function RootContent() {
           animation: 'none',
           headerShown: false,
           presentation: 'transparentModal',
+          contentStyle: { backgroundColor: 'transparent' },
+        }} />
+        <Stack.Screen name="theater/[sessionId]" options={{
+          // The screen drives its own card-to-fullscreen morph using
+          // Reanimated + a measured origin rect from the chat session card.
+          // We let Stack handle nothing visually so the morph reads cleanly
+          // — and the underlying chat stays visible during the transition,
+          // making the morph feel like the card itself is expanding.
+          presentation: 'transparentModal',
+          animation: 'none',
+          headerShown: false,
+          gestureEnabled: false,
+          contentStyle: { backgroundColor: 'transparent' },
+        }} />
+        <Stack.Screen name="theater/picker" options={{
+          presentation: 'transparentModal',
+          animation: 'fade',
+          headerShown: false,
+          gestureEnabled: true,
           contentStyle: { backgroundColor: 'transparent' },
         }} />
       </Stack>

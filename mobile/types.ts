@@ -1,6 +1,28 @@
 
 export type MediaStatus = 'not_downloaded' | 'downloading' | 'downloaded' | 'download_failed';
 
+export type TheaterStatus = 'live' | 'scheduled' | 'ended';
+
+export interface TheaterSessionMeta {
+    /** Stable per-session identifier used to scope the Realtime channel. */
+    sessionId?: string;
+    /** YouTube video id for cataloged playback (Theater Mode default source). */
+    youtubeVideoId?: string;
+    /** Channel/uploader name shown in the bubble + player header. */
+    channelTitle?: string;
+    mediaTitle?: string;
+    status?: TheaterStatus;
+    participants?: string[];
+    hostId?: string;
+    isLocked?: boolean;
+    scheduledAt?: string;
+    /** @deprecated user-uploaded path — Phase 1 prototype only. */
+    videoUrl?: string;
+    /** @deprecated host-side local file path — Phase 1 prototype only. */
+    videoLocalUri?: string;
+    viewerCount?: number;
+}
+
 export interface Message {
     id: string;
     sender: 'me' | 'them';
@@ -12,12 +34,13 @@ export interface Message {
     reactions?: string[];
     replyTo?: string;
     media?: {
-        type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
+        type: 'image' | 'video' | 'audio' | 'file' | 'status_reply' | 'theater_session';
         url: string;
         name?: string;
         caption?: string;
         thumbnail?: string;
         duration?: number;
+        theater?: TheaterSessionMeta;
     };
     // Offline media support
     localFileUri?: string;

@@ -9,7 +9,7 @@ import { Platform } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import { SERVER_URL, safeFetchJson } from '../config/api';
 import { R2_CONFIG } from '../config/r2';
-import { r2StorageService, UploadResponse, R2AuthError } from './R2StorageService';
+import { r2StorageService, UploadResponse } from './R2StorageService';
 import { offlineService } from './LocalDBService';
 import { mediaDownloadService } from './MediaDownloadService';
 import { soulFolderService } from './SoulFolderService';
@@ -19,40 +19,11 @@ const R2_PUBLIC_BASE = R2_CONFIG.PUBLIC_URL && !R2_CONFIG.PUBLIC_URL.includes('X
     ? R2_CONFIG.PUBLIC_URL.replace(/\/$/, '')
     : null;
 
-const isR2AuthFailure = (error: any): boolean => {
-    if (!error) return false;
-    if (error instanceof R2AuthError) return true;
-
-    const message = typeof error?.message === 'string' ? error.message : '';
-    return message.includes('Auth token missing')
-        || message.includes('Authentication required')
-        || message.includes('Worker auth rejected request')
-        || message.includes('Unauthorized');
-};
-
-const isNetworkLikeError = (error: any): boolean => {
-    const message = typeof error?.message === 'string' ? error.message : '';
-    return error?.name === 'AbortError'
-        || message.includes('timeout')
-        || message.includes('fetch')
-        || message.includes('Network')
-        || message.includes('Aborted');
-};
-
 const isMissingUploadRouteError = (error: any): boolean => {
     const message = typeof error?.message === 'string' ? error.message : '';
     return message.includes('status 404')
         || message.includes('status 405')
         || message.includes('Not found');
-};
-
-const isPayloadTooLargeError = (error: any): boolean => {
-    const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
-    return message.includes('file too large')
-        || message.includes('too large')
-        || message.includes('payload too large')
-        || message.includes('worker returned 413')
-        || message.includes('status 413');
 };
 
 const inFlightUploads = new Map<string, Promise<string | null>>();
@@ -291,31 +262,18 @@ export const storageService = {
                     }
                 }
 
-                // If USE_R2 is true OR the server is misconfigured to point to the proxy worker,
-                // we try R2 first, with a fallback to the proxy just in case.
+                // R2 is the only working upload path when SERVER_URL is the
+                // Supabase REST/Auth proxy — that proxy has no /api/media/upload
+                // route, so falling back there only hides the real error
+                // (auth, network, etc.) behind a misleading 404. Surface the
+                // R2 error directly so the user sees the actual cause.
                 console.log(`[StorageService] Attempting direct R2 upload: ${bucket}/${folder}`);
-                try {
-                    const r2Key = await r2StorageService.uploadImage(localUri, bucket, folder, onProgress, contentType);
-                    if (r2Key) {
-                        console.log(`[StorageService] ✅ R2 upload success: ${r2Key}`);
-                        return r2Key;
-                    }
-                    throw new Error('R2 upload returned no key');
-                } catch (r2Error: any) {
-                    if (isR2AuthFailure(r2Error)) {
-                        throw new Error('Upload requires an active session. Please log in again and retry.');
-                    }
-
-                    const shouldFallbackToServer =
-                        isNetworkLikeError(r2Error) || isPayloadTooLargeError(r2Error);
-
-                    if (!shouldFallbackToServer) {
-                        throw r2Error;
-                    }
-
-                    console.warn('[StorageService] R2 direct upload failed, falling back to server proxy:', r2Error.message);
-                    return await this.uploadViaServerProxy(localUri, bucket, folder, contentType, onProgress);
+                const r2Key = await r2StorageService.uploadImage(localUri, bucket, folder, onProgress, contentType);
+                if (r2Key) {
+                    console.log(`[StorageService] ✅ R2 upload success: ${r2Key}`);
+                    return r2Key;
                 }
+                throw new Error('R2 upload returned no key');
             } catch (e: any) {
                 console.warn(`[StorageService] Upload failed:`, e.message);
                 throw e;

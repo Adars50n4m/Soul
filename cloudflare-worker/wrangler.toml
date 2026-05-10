@@ -11,8 +11,12 @@ bucket_name = "soulsync"
 [vars]
 MAX_FILE_SIZE_MB = "50"
 MAX_AVATAR_SIZE_MB = "5"
+# Used to fetch JWKS for asymmetric (RS256/ES256) Supabase tokens. Required
+# for projects on the new publishable-key system; harmless for legacy ones.
+SUPABASE_URL = "https://xuipxbyvsawhuldopvjn.supabase.co"
 
 # IMPORTANT: Add these secrets using: wrangler secret put <NAME>
-# SUPABASE_JWT_SECRET - Your Supabase JWT secret (from Supabase Dashboard → Settings → API)
+# SUPABASE_JWT_SECRET - Legacy HS256 secret. Optional once your project is
+#                       on asymmetric keys, but kept for backward compat.
 # R2_PUBLIC_DOMAIN - Your R2.dev public URL (e.g., "https://pub-abc123xyz.r2.dev")
 #                     Get this from R2 Dashboard → soulsync → Settings → Public Access

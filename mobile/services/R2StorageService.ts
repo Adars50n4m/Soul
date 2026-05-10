@@ -3,7 +3,7 @@
  * Handles file uploads to Cloudflare R2 via Worker proxy
  */
 
-import { getInfoAsync } from 'expo-file-system';
+import { getInfoAsync, uploadAsync, FileSystemUploadType } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { R2_CONFIG } from '../config/r2';
 import { supabase } from '../config/supabase';
@@ -26,6 +26,11 @@ export class R2AuthError extends Error {
 }
 
 class R2StorageService {
+  private static readonly FALLBACK_TOKEN_KEY = 'ss_last_access_token';
+  private authSyncInitialized = false;
+  private authSyncPromise: Promise<void> | null = null;
+  private unsubscribeAuthSync: (() => void) | null = null;
+
   /**
    * Upload an image/video to R2 storage
    */
@@ -74,58 +79,57 @@ class R2StorageService {
         console.log(`[R2Direct] Uploading via fetch to ${uploadUrl} (${contentType}, ${fileSizeKB}KB)`);
         onProgress?.(0.05);
 
-        // React Native FormData: use { uri, type, name } object instead of Blob
-        const formData = new FormData();
-        formData.append('file', {
-          uri: normalizedUri,
-          type: contentType,
-          name: fileName,
-        } as any);
-        formData.append('folder', folder || '');
-
         // 🛡️ [Stall Prevention] Improved simulated progress
-        // Since fetch() doesn't support upload progress, we simulate up to 96%.
-        // Increment becomes smaller the closer it gets to 96% (simulated asymptotic approach)
+        // The native upload task doesn't surface progress here; simulate up to 96%
+        // so the UI never appears stuck during the upload.
         let simProgress = 0.05;
-        const estimatedMs = Math.max(2000, (fileSizeKB / 150) * 1000); // Slower estimation for safety
+        const estimatedMs = Math.max(2000, (fileSizeKB / 150) * 1000);
         const progressInterval = setInterval(() => {
           const remaining = 0.96 - simProgress;
-          const increment = Math.max(0.005, remaining * 0.15); // Smaller steps as we approach 96%
+          const increment = Math.max(0.005, remaining * 0.15);
           simProgress += increment;
           onProgress?.(simProgress);
         }, estimatedMs / 12);
 
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), R2_CONFIG.UPLOAD_TIMEOUT);
-
         let data: UploadResponse;
         try {
-          const response = await fetch(uploadUrl, {
-            method: 'POST',
+          // Use expo-file-system's native upload task instead of RN fetch+FormData.
+          // RN's fetch with multipart bodies is unreliable on iOS Simulator
+          // ("Network request failed" with no HTTP roundtrip). uploadAsync goes
+          // through NSURLSessionUploadTask, which streams the file robustly.
+          console.log(`[R2Direct] Sending request with token: ${token ? (token.substring(0, 10) + '...') : 'NULL'}`);
+          const result = await uploadAsync(uploadUrl, normalizedUri, {
+            httpMethod: 'POST',
+            uploadType: FileSystemUploadType.MULTIPART,
+            fieldName: 'file',
+            mimeType: contentType,
+            parameters: { folder: folder || '' },
             headers: {
               'Authorization': `Bearer ${token}`,
               'x-filename': fileName,
               'x-folder': folder || '',
             },
-            body: formData,
-            signal: controller.signal,
           });
-          clearTimeout(timeoutId);
           clearInterval(progressInterval);
           onProgress?.(0.92);
 
-          if (response.status === 401 || response.status === 403) {
-            throw new R2AuthError(`Worker auth rejected request (${response.status})`);
+          if (result.status === 401 || result.status === 403) {
+            console.warn(`[R2Direct] ❌ Worker Auth Failure (${result.status}): ${result.body}`);
+            throw new R2AuthError(`Worker auth rejected request (${result.status})`);
           }
-          if (!response.ok) {
-            const text = await response.text().catch(() => '');
-            throw new Error(`Worker returned ${response.status}: ${text}`);
+          if (result.status < 200 || result.status >= 300) {
+            console.warn(`[R2Direct] ❌ Worker Error (${result.status}): ${result.body}`);
+            throw new Error(`Worker returned ${result.status}: ${result.body}`);
           }
-          data = await response.json();
-        } catch (fetchErr) {
-          clearTimeout(timeoutId);
+          try {
+            data = JSON.parse(result.body) as UploadResponse;
+          } catch {
+            throw new Error(`Worker returned non-JSON body: ${result.body.substring(0, 100)}`);
+          }
+          console.log(`[R2Direct] ✅ Worker Response:`, data);
+        } catch (uploadErr) {
           clearInterval(progressInterval);
-          throw fetchErr;
+          throw uploadErr;
         }
         const normalizedKey = data.key
           ? data.key
@@ -160,7 +164,54 @@ class R2StorageService {
   private _cachedTokenAt: number = 0;
   private static readonly TOKEN_CACHE_TTL = 4 * 60 * 1000;
 
+  private async ensureAuthTokenSync(): Promise<void> {
+    if (this.authSyncInitialized) return;
+    if (this.authSyncPromise) return this.authSyncPromise;
+
+    this.authSyncPromise = (async () => {
+      this.authSyncInitialized = true;
+
+      const seedToken = async () => {
+        try {
+          const { data } = await supabase.auth.getSession();
+          const seededToken = data.session?.access_token ?? null;
+          if (seededToken) {
+            this._cachedToken = seededToken;
+            this._cachedTokenAt = Date.now();
+            await AsyncStorage.setItem(R2StorageService.FALLBACK_TOKEN_KEY, seededToken);
+          }
+        } catch (error: any) {
+          console.warn('[R2Storage] Failed to seed auth token cache:', error?.message || error);
+        }
+      };
+
+      await seedToken();
+
+      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+        const nextToken = session?.access_token ?? null;
+        this._cachedToken = nextToken;
+        this._cachedTokenAt = nextToken ? Date.now() : 0;
+
+        try {
+          if (nextToken) {
+            await AsyncStorage.setItem(R2StorageService.FALLBACK_TOKEN_KEY, nextToken);
+          } else {
+            await AsyncStorage.removeItem(R2StorageService.FALLBACK_TOKEN_KEY);
+          }
+        } catch (storageError) {
+          console.warn('[R2Storage] Failed to persist auth token cache:', storageError);
+        }
+      });
+
+      this.unsubscribeAuthSync = () => subscription.unsubscribe();
+    })();
+
+    return this.authSyncPromise;
+  }
+
   private async getAuthToken(): Promise<string | null> {
+    await this.ensureAuthTokenSync();
+
     if (this._cachedToken && (Date.now() - this._cachedTokenAt) < R2StorageService.TOKEN_CACHE_TTL) {
       return this._cachedToken;
     }
@@ -173,6 +224,14 @@ class R2StorageService {
       if (sessionResult && 'data' in sessionResult && sessionResult.data.session?.access_token) {
         this._cachedToken = sessionResult.data.session.access_token;
         this._cachedTokenAt = Date.now();
+        await AsyncStorage.setItem(R2StorageService.FALLBACK_TOKEN_KEY, this._cachedToken);
+        return this._cachedToken;
+      }
+
+      const persistedToken = await AsyncStorage.getItem(R2StorageService.FALLBACK_TOKEN_KEY);
+      if (persistedToken) {
+        this._cachedToken = persistedToken;
+        this._cachedTokenAt = Date.now();
         return this._cachedToken;
       }
 
@@ -183,6 +242,7 @@ class R2StorageService {
       if (refreshResult && 'data' in refreshResult && refreshResult.data.session?.access_token) {
         this._cachedToken = refreshResult.data.session.access_token;
         this._cachedTokenAt = Date.now();
+        await AsyncStorage.setItem(R2StorageService.FALLBACK_TOKEN_KEY, this._cachedToken);
         return this._cachedToken;
       }
 
@@ -193,6 +253,12 @@ class R2StorageService {
       return null;
     } catch (error: any) {
       console.warn('[R2Storage] Auth error:', error.message);
+      const persistedToken = await AsyncStorage.getItem(R2StorageService.FALLBACK_TOKEN_KEY);
+      if (persistedToken) {
+        this._cachedToken = persistedToken;
+        this._cachedTokenAt = Date.now();
+        return this._cachedToken;
+      }
       return null;
     }
   }

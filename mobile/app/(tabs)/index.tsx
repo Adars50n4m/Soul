@@ -277,9 +277,22 @@ const ChatListItem = React.memo(({ item, index, lastMsg, onSelect, onLongPress, 
   }, []);
 
   const handlePress = useCallback(() => {
-    itemRef.current?.measure((x, y, width, height, pageX, pageY) => {
-      onSelect(item, pageY);
-    });
+    const node = itemRef.current;
+    if (!node) {
+      onSelect(item, 0);
+      return;
+    }
+    try {
+      node.measure((_x, _y, _w, _h, _pageX, pageY) => {
+        // measure() can fire with undefined coords when the view is
+        // detaching, hidden, or mid-animation. Fall back to 0 so the
+        // navigation push doesn't crash with `Cannot read 'toString' of
+        // undefined` in handleUserSelect.
+        onSelect(item, typeof pageY === 'number' ? pageY : 0);
+      });
+    } catch {
+      onSelect(item, 0);
+    }
   }, [item, onSelect]);
 
   return (
@@ -895,12 +908,12 @@ export default function HomeScreen() {
   const statusRefs = useRef<Record<string, any>>({});
   // Telegram-style: status rail collapses as user scrolls down
   const RAIL_FULL_HEIGHT = 200;  // Full status rail height (cards + padding)
-  const RAIL_COLLAPSED_HEIGHT = 70; // Collapsed: just circle avatars
-  const COLLAPSE_SCROLL = 90;    // Scroll distance to fully collapse
+  const RAIL_COLLAPSED_HEIGHT = 80; // Increased from 70 for better breathing room
+  const COLLAPSE_SCROLL = 100;    // Scroll distance to fully collapse
 
   const statusRailAnimStyle = useAnimatedStyle(() => {
     'worklet';
-    const scrollY = scrollPosition.value;
+    const scrollY = Math.max(0, scrollPosition.value);
     const collapseProgress = interpolate(scrollY, [0, COLLAPSE_SCROLL], [0, 1], Extrapolation.CLAMP);
     const railHeight = interpolate(collapseProgress, [0, 1], [RAIL_FULL_HEIGHT, RAIL_COLLAPSED_HEIGHT], Extrapolation.CLAMP);
 
@@ -935,8 +948,20 @@ const homeContentAnimatedStyle = useAnimatedStyle(() => {
 
 const homeChromeFadeStyle = useAnimatedStyle(() => {
   'worklet';
+  // Title stays pinned at the top, we only fade it if needed
   return {
     opacity: interpolate(homeMorphProgress.value, [0, 0.9], [1, 0], Extrapolation.CLAMP),
+    transform: [{ translateY: 0 }] 
+  };
+});
+
+const headerBackgroundStyle = useAnimatedStyle(() => {
+  'worklet';
+  const scrollY = Math.max(0, scrollPosition.value);
+  // Become solid black quickly as user scrolls
+  const opacity = interpolate(scrollY, [0, 20], [0, 1], Extrapolation.CLAMP);
+  return {
+    backgroundColor: `rgba(0,0,0,${opacity})`,
   };
 });
 
@@ -1416,7 +1441,7 @@ const homeChromeFadeStyle = useAnimatedStyle(() => {
       }
   };
 
-  const handleUserSelect = useCallback((contact: Contact, y: number) => {
+  const handleUserSelect = useCallback((contact: Contact, y?: number) => {
     if (selectionMode) {
       toggleSelection(contact.id);
       return;
@@ -1427,11 +1452,14 @@ const homeChromeFadeStyle = useAnimatedStyle(() => {
       duration: HOME_MORPH_DURATION,
       easing: Easing.bezier(0.5, 0, 0.1, 1),
     });
+    // y can be undefined when measure() races with a view detach — coerce so
+    // the route push never throws "Cannot read 'toString' of undefined".
+    const safeY = typeof y === 'number' && Number.isFinite(y) ? y : 0;
     router.push({
       pathname: '/chat/[id]',
       params: {
         id: contact.id,
-        sourceY: y.toString(),
+        sourceY: safeY.toString(),
       }
     });
   }, [homeMorphProgress, router, selectionMode, toggleSelection]);
@@ -1762,7 +1790,7 @@ const homeChromeFadeStyle = useAnimatedStyle(() => {
 
 
   const renderHeader = useCallback(() => (
-    <View style={styles.homeHeaderWrapper}>
+    <Animated.View style={[styles.floatingHeader, headerBackgroundStyle]}>
       <Animated.View style={[styles.topHeader, homeChromeFadeStyle]}>
         {selectionMode ? (
           <View style={styles.headerActions}>
@@ -1822,8 +1850,8 @@ const homeChromeFadeStyle = useAnimatedStyle(() => {
           <MaterialIcons name="add" size={18} color="rgba(255,255,255,0.6)" />
         </GlassChipButton>
       </Animated.View>
-    </View>
-  ), [contactsWithStories, renderStatusItem, statusRailAnimStyle, router, chatFilter, selectionMode, selectedChatIds.length, exitSelectionMode, bulkDeleteSelected, homeChromeFadeStyle]);
+    </Animated.View>
+  ), [contactsWithStories, renderStatusItem, statusRailAnimStyle, router, chatFilter, selectionMode, selectedChatIds.length, exitSelectionMode, bulkDeleteSelected, homeChromeFadeStyle, headerBackgroundStyle]);
 
   return (
     <View style={styles.container}>
@@ -1853,7 +1881,10 @@ const homeChromeFadeStyle = useAnimatedStyle(() => {
                 data={filteredVisibleContacts}
                 keyExtractor={keyExtractor}
                 renderItem={renderItem}
-                contentContainerStyle={styles.listContent}
+                contentContainerStyle={[
+                  styles.listContent,
+                  { paddingTop: 330 } // Adjusted for compact header
+                ]}
                 bounces={false}
                 scrollEnabled={!isRefreshing}
                 showsVerticalScrollIndicator={false}
@@ -1865,7 +1896,7 @@ const homeChromeFadeStyle = useAnimatedStyle(() => {
                 }}
                 scrollEventThrottle={16}
                 ListEmptyComponent={() => (
-                  <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 100 }}>
+                  <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 200 }}>
                     <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.2)" />
                     <Text style={{ color: 'rgba(255,255,255,0.4)', marginTop: 16, fontSize: 16 }}>No chats yet</Text>
                   </View>
@@ -2049,7 +2080,15 @@ const styles = StyleSheet.create({
   homeContent: {
     flex: 1,
   },
-  homeHeaderWrapper: { paddingTop: Platform.OS === 'ios' ? 44 : 20, zIndex: 1000, elevation: 10 },
+  floatingHeader: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 1000,
+    elevation: 10,
+    paddingTop: Platform.OS === 'ios' ? 44 : 20,
+  },
   topHeader: { 
     paddingHorizontal: 20,
     paddingVertical: 4,
@@ -2106,7 +2145,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     justifyContent: 'center' 
   },
-  statusRail: { marginTop: 0, marginBottom: 0, overflow: 'visible' },
+  statusRail: { marginTop: 0, marginBottom: 4, overflow: 'visible' },
   statusContent: { paddingHorizontal: 20, paddingVertical: 8, paddingTop: 5, gap: 14, overflow: 'visible' },
   statusCard: { 
     width: 115, 
@@ -2185,6 +2224,8 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     borderRadius: 28,
     overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   contactAvatarPositioner: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 50, alignItems: 'center', justifyContent: 'center' },
   contactAvatarCorner: { position: 'absolute', top: 12, left: 12, zIndex: 10 },
@@ -2263,7 +2304,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 12,
     paddingBottom: 6,
-    marginTop: -1,
+    marginTop: -8,
     marginBottom: 8,
   },
   moreMenuItemMorph: {

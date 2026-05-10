@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const { Readable } = require('stream');
+const { WebSocketServer, WebSocket } = require('ws');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const R2Service = require('./services/r2Service');
@@ -23,6 +25,53 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100
 
 const app = express();
 app.use(cors());
+
+const SUPABASE_PROXY_PREFIX = '/supabase';
+const SUPABASE_UPSTREAM_URL = (process.env.SUPABASE_URL || 'https://xuipxbyvsawhuldopvjn.supabase.co').replace(/\/$/, '');
+const SUPABASE_UPSTREAM_HOST = new URL(SUPABASE_UPSTREAM_URL).host;
+const R2_PUBLIC_DOMAIN = (process.env.R2_PUBLIC_DOMAIN || '').replace(/\/$/, '');
+
+const copyProxyHeaders = (headers) => {
+    const next = { ...headers };
+    delete next.host;
+    delete next.connection;
+    delete next['content-length'];
+    delete next['accept-encoding'];
+    return next;
+};
+
+// LAN Supabase proxy for Android emulators/devices that cannot resolve workers.dev.
+// Must be registered before express.json() so request bodies can stream through.
+app.use(SUPABASE_PROXY_PREFIX, async (req, res, next) => {
+    if (req.headers.upgrade?.toLowerCase() === 'websocket') return next();
+
+    const targetUrl = `${SUPABASE_UPSTREAM_URL}${req.originalUrl.slice(SUPABASE_PROXY_PREFIX.length)}`;
+    try {
+        const upstream = await fetch(targetUrl, {
+            method: req.method,
+            headers: copyProxyHeaders(req.headers),
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : req,
+            duplex: req.method === 'GET' || req.method === 'HEAD' ? undefined : 'half',
+            redirect: 'manual',
+        });
+
+        res.status(upstream.status);
+        upstream.headers.forEach((value, key) => {
+            if (key.toLowerCase() !== 'content-encoding') res.setHeader(key, value);
+        });
+
+        if (!upstream.body) {
+            res.end();
+            return;
+        }
+
+        Readable.fromWeb(upstream.body).pipe(res);
+    } catch (err) {
+        console.error('[Supabase LAN Proxy] HTTP proxy failed:', err.message);
+        res.status(502).json({ error: 'Supabase LAN proxy failed', detail: err.message });
+    }
+});
+
 app.use(express.json());
 
 const SUPERUSERS = [
@@ -58,6 +107,69 @@ app.get('/health', async (req, res) => {
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: '*' }
+});
+
+const supabaseWss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+    let pathname = '';
+    try {
+        pathname = new URL(req.url || '/', 'http://localhost').pathname;
+    } catch {
+        socket.destroy();
+        return;
+    }
+
+    if (!pathname.startsWith(`${SUPABASE_PROXY_PREFIX}/realtime/`)) {
+        return;
+    }
+
+    supabaseWss.handleUpgrade(req, socket, head, (clientSocket) => {
+        const upstreamPath = (req.url || '').slice(SUPABASE_PROXY_PREFIX.length);
+        const upstreamUrl = `wss://${SUPABASE_UPSTREAM_HOST}${upstreamPath}`;
+        const upstreamSocket = new WebSocket(upstreamUrl, {
+            headers: copyProxyHeaders(req.headers),
+        });
+        const pendingClientMessages = [];
+
+        const closeBoth = (code = 1011, reason = 'proxy closed') => {
+            try { clientSocket.close(code, reason); } catch {}
+            try { upstreamSocket.close(code, reason); } catch {}
+        };
+
+        clientSocket.on('message', (data, isBinary) => {
+            if (upstreamSocket.readyState === WebSocket.OPEN) {
+                upstreamSocket.send(data, { binary: isBinary });
+            } else if (upstreamSocket.readyState === WebSocket.CONNECTING) {
+                pendingClientMessages.push({ data, isBinary });
+            }
+        });
+
+        upstreamSocket.on('open', () => {
+            while (pendingClientMessages.length > 0 && upstreamSocket.readyState === WebSocket.OPEN) {
+                const message = pendingClientMessages.shift();
+                upstreamSocket.send(message.data, { binary: message.isBinary });
+            }
+        });
+
+        upstreamSocket.on('message', (data, isBinary) => {
+            if (clientSocket.readyState === WebSocket.OPEN) {
+                clientSocket.send(data, { binary: isBinary });
+            }
+        });
+
+        clientSocket.on('close', (code, reason) => {
+            try { upstreamSocket.close(code, reason); } catch {}
+        });
+        upstreamSocket.on('close', (code, reason) => {
+            try { clientSocket.close(code, reason); } catch {}
+        });
+        clientSocket.on('error', () => closeBoth());
+        upstreamSocket.on('error', (err) => {
+            console.error('[Supabase LAN Proxy] Realtime proxy failed:', err.message);
+            closeBoth();
+        });
+    });
 });
 
 // Basic HTTP routes for R2 Pre-Signed URLs
@@ -102,22 +214,65 @@ app.post('/api/media/delete', async (req, res) => {
     }
 });
 
-// Direct multipart upload — fallback when R2 Worker is unreachable from mobile
-app.post('/api/media/upload', upload.single('file'), async (req, res) => {
+app.get(/^\/r2\/(.+)/, async (req, res) => {
+    if (!R2_PUBLIC_DOMAIN) {
+        return res.status(503).json({ error: 'R2 public domain not configured' });
+    }
+
+    const key = req.params[0];
+    const targetUrl = `${R2_PUBLIC_DOMAIN}/${key}`;
+
+    try {
+        const upstream = await fetch(targetUrl);
+        res.status(upstream.status);
+        upstream.headers.forEach((value, header) => {
+            if (!['content-encoding', 'transfer-encoding'].includes(header.toLowerCase())) {
+                res.setHeader(header, value);
+            }
+        });
+
+        if (!upstream.body) {
+            res.end();
+            return;
+        }
+
+        Readable.fromWeb(upstream.body).pipe(res);
+    } catch (err) {
+        console.error('[R2 LAN Proxy] Download proxy failed:', err.message);
+        res.status(502).json({ error: 'R2 download proxy failed' });
+    }
+});
+
+const uploadToR2 = async (req, res, bucketOverride = null) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-        const folder = req.body.folder || 'uploads';
-        const ext = (req.file.originalname || 'file').split('.').pop() || 'bin';
-        const key = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+        const folder = req.body.folder || req.headers['x-folder'] || 'uploads';
+        const bucket = bucketOverride || req.body.bucket || 'uploads';
+        const ext = (req.file.originalname || req.headers['x-filename'] || 'file').split('.').pop() || 'bin';
+        const filename = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+        const key = `${bucket}/${filename}`;
 
         await R2Service.uploadBuffer(key, req.file.buffer, req.file.mimetype);
-        res.json({ success: true, key });
+        res.json({
+            success: true,
+            key,
+            filename,
+            publicUrl: R2_PUBLIC_DOMAIN ? `${R2_PUBLIC_DOMAIN}/${key}` : undefined,
+            size: req.file.size,
+            contentType: req.file.mimetype,
+        });
     } catch (err) {
         console.error('Error uploading media:', err);
         res.status(500).json({ error: 'Upload failed' });
     }
-});
+};
+
+// Direct multipart upload — fallback when R2 Worker is unreachable from mobile
+app.post('/api/media/upload', upload.single('file'), (req, res) => uploadToR2(req, res));
+app.post('/upload/avatar', upload.single('file'), (req, res) => uploadToR2(req, res, 'avatars'));
+app.post('/upload/status', upload.single('file'), (req, res) => uploadToR2(req, res, 'status-media'));
+app.post('/upload/chat', upload.single('file'), (req, res) => uploadToR2(req, res, 'chat-media'));
 
 // REST Fallbacks for Messages
 app.post('/api/messages/send', async (req, res) => {
@@ -1085,6 +1240,43 @@ async function runCleanupDaemon() {
 // Start the daemon
 console.log(`[CleanupDaemon] Initializing background cleanup with ${RETENTION_WINDOW} retention window.`);
 setInterval(runCleanupDaemon, CLEANUP_INTERVAL_MS);
+
+// ─── YouTube API Proxy ────────────────────────────────────────────────────
+// Android emulators frequently have their system clock out of sync, which
+// breaks SSL certificate validation for googleapis.com. By proxying the
+// YouTube Data API through the dev server (running on the host machine with
+// correct time), the emulator only needs to reach http://10.0.2.2:3000
+// (plain HTTP, no SSL) while the server handles the HTTPS call.
+app.get('/api/youtube/proxy', async (req, res) => {
+    const targetPath = req.query.path;
+    const queryParams = { ...req.query };
+    delete queryParams.path;
+
+    if (!targetPath) {
+        return res.status(400).json({ error: 'Missing "path" query parameter (e.g. path=videos)' });
+    }
+
+    const allowed = ['videos', 'search'];
+    if (!allowed.includes(targetPath)) {
+        return res.status(400).json({ error: `Path "${targetPath}" not allowed. Use: ${allowed.join(', ')}` });
+    }
+
+    const qs = new URLSearchParams(queryParams).toString();
+    const url = `https://www.googleapis.com/youtube/v3/${targetPath}?${qs}`;
+
+    try {
+        const upstream = await fetch(url, {
+            headers: { 'Accept': 'application/json' },
+        });
+        const body = await upstream.text();
+        res.status(upstream.status);
+        res.setHeader('Content-Type', 'application/json');
+        res.send(body);
+    } catch (err) {
+        console.error('[YouTube Proxy] Upstream fetch failed:', err.message);
+        res.status(502).json({ error: 'YouTube API proxy failed', detail: err.message });
+    }
+});
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0'; // Listen on all interfaces so physical devices can connect

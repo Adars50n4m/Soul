@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ⬆️  Bump this number every time you change the schema.
-const DB_TARGET_VERSION = 35;
+const DB_TARGET_VERSION = 36;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — read the stored schema version (returns 0 if brand-new install)
@@ -143,6 +143,12 @@ async function migration_v1(db: any): Promise<void> {
     // ── indexes ────────────────────────────────────────────────────────────
     `CREATE INDEX IF NOT EXISTS idx_messages_chat_id
        ON messages(chat_id);`,
+
+    `CREATE INDEX IF NOT EXISTS idx_messages_timestamp
+       ON messages(timestamp);`,
+
+    `CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp
+       ON messages(chat_id, timestamp);`,
 
     `CREATE INDEX IF NOT EXISTS idx_messages_status
        ON messages(status);`,
@@ -1049,6 +1055,15 @@ async function migration_v35(db: any): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v36 — Index message catch-up cursors
+// ─────────────────────────────────────────────────────────────────────────────
+async function migration_v36(db: any): Promise<void> {
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);`);
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages(chat_id, timestamp);`);
+    console.log('[SQLite] Migration v36: Message catch-up indexes ready');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN EXPORT — call this once in your app's DB initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 export const MIGRATE_DB = async (db: any): Promise<void> => {
@@ -1108,6 +1123,7 @@ export const MIGRATE_DB = async (db: any): Promise<void> => {
         case 33: await migration_v33(db); break;
         case 34: await migration_v34(db); break;
         case 35: await migration_v35(db); break;
+        case 36: await migration_v36(db); break;
         default:
           console.error(`[SQLite] No migration logic for v${nextVersion}!`);
       }

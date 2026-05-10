@@ -1,0 +1,48 @@
+diff --git a/node_modules/react-native-youtube-iframe/src/YoutubeIframe.js b/node_modules/react-native-youtube-iframe/src/YoutubeIframe.js
+index 4bbf487..a555f8d 100644
+--- a/node_modules/react-native-youtube-iframe/src/YoutubeIframe.js
++++ b/node_modules/react-native-youtube-iframe/src/YoutubeIframe.js
+@@ -60,9 +60,41 @@ const YoutubeIframe = (props, ref) => {
+       if (!playerReady) {
+         return;
+       }
+-
++      // RN bridgeless mode: webViewRef.current.postMessage no longer reliably
++      // reaches window.message inside the WebView, so playVideo/pauseVideo/
++      // mute/unMute commands silently drop. Inject the call directly via
++      // injectJavaScript instead — those map 1:1 to YouTube IFrame API
++      // methods and don't need the message bus at all.
++      let script = '';
++      switch (eventName) {
++        case 'playVideo':
++          script = 'player.playVideo(); true;';
++          break;
++        case 'pauseVideo':
++          script = 'player.pauseVideo(); true;';
++          break;
++        case 'muteVideo':
++          script = 'player.mute(); true;';
++          break;
++        case 'unMuteVideo':
++          script = 'player.unMute(); true;';
++          break;
++        case 'setVolume':
++          script = `player.setVolume(${(meta && meta.volume) || 0}); true;`;
++          break;
++        case 'setPlaybackRate':
++          script = `player.setPlaybackRate(${(meta && meta.playbackRate) || 1}); true;`;
++          break;
++      }
++      if (script && webViewRef.current && webViewRef.current.injectJavaScript) {
++        webViewRef.current.injectJavaScript(script);
++        return;
++      }
++      // Fallback for any future event types we don't recognise.
+       const message = JSON.stringify({eventName, meta});
+-      webViewRef.current.postMessage(message);
++      if (webViewRef.current && webViewRef.current.postMessage) {
++        webViewRef.current.postMessage(message);
++      }
+     },
+     [playerReady],
+   );

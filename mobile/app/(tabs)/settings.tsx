@@ -7,6 +7,7 @@ import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import * as Linking from 'expo-linking';
 import Animated, {
     useAnimatedScrollHandler,
+    useAnimatedStyle,
     useSharedValue,
     runOnJS,
 } from 'react-native-reanimated';
@@ -55,6 +56,21 @@ export default function SettingsScreen() {
     );
 
     useEffect(() => subscribeProfileEditSourceHidden(setIsProfileHeroHidden), []);
+
+    // Source hero opacity. Both hide and show snap immediately — settings
+    // owns the *layout* of the source hero, not the transition fade. The
+    // visible reveal during dismiss is driven entirely by profile-edit's
+    // backdrop fading from 1→0 over the morph duration: while backdrop is
+    // opaque the chrome (name, @handle, edit pencil, blur, gradient) is
+    // hidden behind it; as it fades, the already-rendered chrome is
+    // revealed in lockstep with the morphing shell shrinking. This avoids
+    // multiplying two opacity ramps (backdrop × source), which always peaks
+    // mid-morph and makes the chrome read as appearing late.
+    const heroOpacity = useSharedValue(isProfileHeroHidden ? 0 : 1);
+    useEffect(() => {
+        heroOpacity.value = isProfileHeroHidden ? 0 : 1;
+    }, [isProfileHeroHidden, heroOpacity]);
+    const heroAnimatedStyle = useAnimatedStyle(() => ({ opacity: heroOpacity.value }));
 
     const openProfileEdit = () => {
         if (isNavigatingRef.current) return;
@@ -132,18 +148,19 @@ export default function SettingsScreen() {
                 scrollEventThrottle={16}
             >
                 {/* Cinematic Profile Card */}
-                <ProfileHeader
-                    image={currentUser?.avatar}
-                    name={currentUser?.name || 'User'}
-                    subtitle={currentUser?.bio}
-                    username={currentUser?.username || 'user'}
-                    avatarType={currentUser?.avatarType as any}
-                    teddyVariant={currentUser?.teddyVariant as any}
-                    onEditPress={openProfileEdit}
-                    heroRef={profileHeroRef}
-                    hidden={isProfileHeroHidden}
-                    scrollY={scrollY}
-                />
+                <Animated.View style={heroAnimatedStyle}>
+                    <ProfileHeader
+                        image={currentUser?.avatar}
+                        name={currentUser?.name || 'User'}
+                        subtitle={currentUser?.bio}
+                        username={currentUser?.username || 'user'}
+                        avatarType={currentUser?.avatarType as any}
+                        teddyVariant={currentUser?.teddyVariant as any}
+                        onEditPress={openProfileEdit}
+                        heroRef={profileHeroRef}
+                        scrollY={scrollY}
+                    />
+                </Animated.View>
 
                 {/* Theme Section */}
                 <View style={styles.section}>

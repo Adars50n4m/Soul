@@ -24,6 +24,7 @@ import { Message } from '../../types';
 import { ChatStyles } from './ChatStyles';
 import { getMessageMediaItems } from '../../utils/chatUtils';
 import VoiceNotePlayer from './VoiceNotePlayer';
+import TheaterSessionCard from './TheaterSessionCard';
 import { SpoilerView } from 'react-native-spoiler-view';
 import { R2_CONFIG } from '../../config/r2';
 
@@ -71,6 +72,7 @@ interface MessageBubbleProps {
     isHidden?: boolean;
     isAdmin?: boolean;
     senderRole?: string;
+    onTheaterEnd?: (msgId: string, theaterData: any) => void;
 }
 
 const URL_REGEX = /(https?:\/\/[^\s]+)/g;
@@ -201,6 +203,7 @@ const MessageBubble = React.memo(({
     isHidden,
     isAdmin = false,
     senderRole,
+    onTheaterEnd,
 }: MessageBubbleProps) => {
     // Fade-in when transitioning from hidden → visible (flying bubble handoff)
     const revealOpacity = useSharedValue(isHidden ? 0 : 1);
@@ -348,7 +351,7 @@ const MessageBubble = React.memo(({
     React.useEffect(() => {
         if (!isMe && onMediaDownload) {
             mediaItems.forEach((media, index) => {
-                if (media.type === 'status_reply') {
+                if (media.type === 'status_reply' || media.type === 'theater_session') {
                     return;
                 }
                 const usableLocalUri = invalidLocalIndexSet.has(index) ? undefined : media.localFileUri;
@@ -387,8 +390,19 @@ const MessageBubble = React.memo(({
 
     const hasText = !!msg.text;
     const hasCaption = !!msg.media?.caption;
-    const isMediaOnly = mediaItems.length > 0 && !hasText && !hasCaption && mediaItems[0].type !== 'audio';
-    const showStandaloneCaption = !!msg.media?.caption && msg.media?.type !== 'status_reply';
+    // theater_session smuggles meta through media.caption, so hasCaption is
+    // misleadingly true for fresh sends — treat it like a media-only bubble
+    // so the red sender background doesn't leak around the card.
+    const isTheaterCardMessage = mediaItems[0]?.type === 'theater_session';
+    const isMediaOnly = mediaItems.length > 0 && !hasText && (isTheaterCardMessage || !hasCaption) && mediaItems[0].type !== 'audio';
+    // theater_session reuses media.caption to smuggle structured meta through
+    // the flat-column DB schema. The codec strips it on DB-read, but a freshly
+    // sent local copy goes straight from picker → state → bubble without that
+    // hop, so the raw `__THEATER_META_V1__:{…}` blob would otherwise leak as a
+    // visible caption underneath the theater card. Always suppress here.
+    const showStandaloneCaption = !!msg.media?.caption
+        && msg.media?.type !== 'status_reply'
+        && msg.media?.type !== 'theater_session';
 
     const doubleTapGesture = Gesture.Tap()
         .numberOfTaps(2)
@@ -747,6 +761,51 @@ const MessageBubble = React.memo(({
             if (media.type === 'status_reply') {
                 return renderStatusReplyCard(media, 0);
             }
+            if (media.type === 'theater_session') {
+                const theaterMeta: any = (media as any).theater || {};
+                // A stale message could have media.url corrupted into an HTTPS
+                // URL (R2 public base prefixed onto the videoId by an old build
+                // of proxySupabaseUrl). Reject any URL-shaped fallback — both
+                // sessionId and videoId are short alphanumeric tokens, never
+                // hostnames. If nothing usable is left we leave the field
+                // undefined and TheaterSessionCard renders the orphan/Ended UI
+                // instead of routing the user to a broken player.
+                const looksLikeUrl = (s: any) =>
+                    typeof s === 'string' && (s.startsWith('http://') || s.startsWith('https://') || s.includes('/'));
+                const safeUrlFallback = looksLikeUrl(media.url) ? '' : (media.url || '');
+                const sessionId: string = theaterMeta.sessionId || safeUrlFallback;
+                const effectiveVideoId: string = theaterMeta.youtubeVideoId || safeUrlFallback;
+                const enhancedTheater = effectiveVideoId
+                    ? { ...theaterMeta, youtubeVideoId: effectiveVideoId }
+                    : theaterMeta;
+                const remoteVideoUrl = resolveMediaUrl(media.url);
+                return (
+                    <TheaterSessionCard
+                        sessionId={sessionId}
+                        title={media.name}
+                        thumbnail={media.thumbnail}
+                        duration={media.duration}
+                        theater={enhancedTheater}
+                        isMe={isMe}
+                        accent={activeTheme.primary}
+                        onJoin={() => onMediaTap?.({
+                            theaterSession: true,
+                            sessionId,
+                            messageId: msg.id,
+                            theater: enhancedTheater,
+                            youtubeVideoId: effectiveVideoId,
+                            title: media.name,
+                            thumbnail: media.thumbnail,
+                            remoteUrl: remoteVideoUrl,
+                        })}
+                        onEnd={() => {
+                            if (onTheaterEnd) {
+                                onTheaterEnd(msg.id, enhancedTheater);
+                            }
+                        }}
+                    />
+                );
+            }
             const usableLocalUri = invalidLocalIndexSet.has(0) ? undefined : media.localFileUri;
             const fallbackRemoteUri = resolveMediaUrl(media.url);
             const previewSource = usableLocalUri || fallbackRemoteUri || media.thumbnail;
@@ -816,7 +875,7 @@ const MessageBubble = React.memo(({
                                 }}
                                 onError={() => {
                                     if (usableLocalUri && !invalidLocalIndexSet.has(0)) {
-                                        setInvalidLocalIndices(prev => (prev.includes(0) ? prev : [...prev, index]));
+                                        setInvalidLocalIndices(prev => (prev.includes(0) ? prev : [...prev, 0]));
                                     }
                                 }}
                             />

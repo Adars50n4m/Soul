@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, memo, useCallback } from 'react';
 import {
     View, Text, Image, TextInput, Pressable, StyleSheet, StatusBar,
-    FlatList, useWindowDimensions, ImageBackground,
+    useWindowDimensions,
     KeyboardAvoidingView, Platform, Keyboard, ScrollView, BackHandler, PanResponder
 } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
@@ -22,15 +22,12 @@ import Animated, {
     Easing,
 } from 'react-native-reanimated';
 import { useApp } from '../context/AppContext';
-import { getSaavnApiUrl } from '../config/api';
-import { lyricsService, LyricLine } from '../services/LyricsService';
+import { getSaavnApiBaseUrl } from '../config/api';
 
 
 
 // Constants
 const MAGENTA = '#ff0080';
-const BG_DARK = '#050505';
-
 // Song Interface
 interface Song {
     id: string;
@@ -404,18 +401,18 @@ const ListHeader = memo(({
 });
 
 export default function MusicScreen() {
-    const { width, height } = useWindowDimensions();
+    const { height } = useWindowDimensions();
     const router = useRouter();
     const { 
         musicState, playSong, togglePlayMusic, toggleFavoriteSong, 
         seekTo, getPlaybackPosition, playNext, playPrevious, 
         repeatMode, toggleRepeat, shuffle, toggleShuffle,
-        addToQueue, leaveGroupMusicRoom, isSeeking, setIsSeeking,
-        activeTheme 
+        addToQueue, isSeeking, setIsSeeking,
+        activeTheme, queue, lyrics, lyricsLoading, currentLyricIndex, showLyrics, setShowLyrics,
     } = useApp() as any;
     const themeAccent = activeTheme?.primary || MAGENTA;
 
-    const [activeTab, setActiveTab] = useState<'music' | 'favorites' | 'lyrics' | 'queue'>('music');
+    const [activeTab, setActiveTab] = useState<'music' | 'favorites' | 'queue'>('music');
     const [searchQuery, setSearchQuery] = useState('');
     const [songs, setSongs] = useState<Song[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -424,16 +421,11 @@ export default function MusicScreen() {
     const lastClickTime = useRef<{ [key: string]: number }>({});
     const [keyboardVisible, setKeyboardVisible] = useState(false);
     const isMountedRef = useRef(true);
-
-    // Lyrics state
-    const [lyrics, setLyrics] = useState<LyricLine[]>([]);
-    const [lyricsLoading, setLyricsLoading] = useState(false);
-    const [currentLyricIndex, setCurrentLyricIndex] = useState(0);
-    const [showLyrics, setShowLyrics] = useState(false);
     const [recommendedSongs, setRecommendedSongs] = useState<Song[]>([]);
-    const lyricsListRef = useRef<FlatList>(null);
     const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
+    const searchSongsRef = useRef<(query: string, newSearch?: boolean) => Promise<void>>(async () => {});
+    const initialLoadRef = useRef(false);
 
     // Animations
     const slideY = useSharedValue(height);
@@ -441,14 +433,14 @@ export default function MusicScreen() {
     const allowNativePopRef = useRef(false);
 
     const navigation = useNavigation();
-    const closeScreen = () => {
+    const closeScreen = useCallback(() => {
         allowNativePopRef.current = true;
         if (navigation.canGoBack()) {
             navigation.goBack();
             return;
         }
         router.back();
-    };
+    }, [navigation, router]);
 
     const handleClose = useCallback(() => {
         if (isClosingRef.current) return;
@@ -461,9 +453,12 @@ export default function MusicScreen() {
                 runOnJS(closeScreen)();
             }
         });
-    }, [height, navigation, router, slideY]);
+    }, [closeScreen, height, slideY]);
 
     useEffect(() => {
+        if (initialLoadRef.current) return;
+        initialLoadRef.current = true;
+
         // Open the music overlay
         slideY.value = withTiming(0, {
             duration: 280,
@@ -472,7 +467,7 @@ export default function MusicScreen() {
 
         // Initial Load Logic:
         // Fetch Bollywood Trending but DO NOT auto-play.
-        searchSongs('Hindi Trending Top 20'); 
+        void searchSongsRef.current('Hindi Trending Top 20'); 
 
         const showSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setKeyboardVisible(true));
         const hideSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKeyboardVisible(false));
@@ -487,7 +482,7 @@ export default function MusicScreen() {
             showSub.remove();
             hideSub.remove();
         };
-    }, []);
+    }, [slideY]);
 
     useEffect(() => {
         const unsubscribe = navigation.addListener('beforeRemove', (event: any) => {
@@ -513,36 +508,49 @@ export default function MusicScreen() {
         transform: [{ translateY: slideY.value }]
     }));
 
-    const backgroundStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(slideY.value, [0, height], [1, 1], Extrapolation.CLAMP), // Keep base backdrop stable
-    }));
-
     const backdropBlurOpacity = useAnimatedStyle(() => ({
         opacity: interpolate(slideY.value, [0, height], [1, 0], Extrapolation.CLAMP),
     }));
 
+    useEffect(() => {
+        let cancelled = false;
+        const syncPosition = async () => {
+            const currentSong = musicState.currentSong;
+            if (!currentSong) {
+                setPlaybackMs(0);
+                setProgress(0);
+                return;
+            }
+
+            const pos = await getPlaybackPosition();
+            if (cancelled) return;
+
+            const duration = currentSong.duration || 240;
+            const progressPercent = duration > 0 ? (pos / (duration * 1000)) * 100 : 0;
+            setPlaybackMs(pos);
+            setProgress(clamp(progressPercent, 0, 100));
+        };
+
+        void syncPosition();
+        return () => { cancelled = true; };
+    }, [getPlaybackPosition, musicState.currentSong?.duration, musicState.currentSong?.id]);
+
     // Real Progress Sync
     useEffect(() => {
         let interval: any;
+        const currentSong = musicState.currentSong;
         if (musicState.isPlaying) {
             interval = setInterval(async () => {
                 const pos = await getPlaybackPosition();
-                const duration = musicState.currentSong?.duration || 240; // Default 4 mins if unknown
+                const duration = currentSong?.duration || 240; // Default 4 mins if unknown
                 // Convert duration to ms for calculation
                 const progressPercent = (pos / (duration * 1000)) * 100;
                 setProgress(progressPercent);
                 setPlaybackMs(pos);
-                // Sync lyrics highlight
-                if (lyrics.length > 0) {
-                    const idx = lyricsService.getCurrentLineIndex(lyrics, pos / 1000);
-                    if (idx !== currentLyricIndex) {
-                        setCurrentLyricIndex(idx);
-                    }
-                }
             }, 1000);
         }
         return () => clearInterval(interval);
-    }, [musicState.isPlaying, musicState.currentSong]);
+    }, [getPlaybackPosition, musicState.currentSong?.duration, musicState.currentSong?.id, musicState.isPlaying]);
 
     useEffect(() => {
         // Reset when switching songs
@@ -550,18 +558,11 @@ export default function MusicScreen() {
         setProgress(0);
         setShowLyrics(false);
 
-        // Fetch lyrics + recommended songs
         const song = musicState.currentSong;
         if (song) {
-            setLyricsLoading(true);
-            setLyrics([]);
-            lyricsService.getLyrics(song.name, song.artist, song.duration)
-                .then(result => { if (result) setLyrics(result.lines); })
-                .finally(() => setLyricsLoading(false));
-
-            const apiUrl = getSaavnApiUrl();
-            if (apiUrl) {
-                fetch(`${apiUrl}/songs/${song.id}/suggestions?limit=10`)
+            const baseApiUrl = getSaavnApiBaseUrl();
+            if (baseApiUrl) {
+                fetch(`${baseApiUrl}/songs/${song.id}/suggestions?limit=10`)
                     .then(r => r.ok ? r.json() : null)
                     .then((data: any) => {
                         if (data?.data) {
@@ -571,12 +572,13 @@ export default function MusicScreen() {
                     })
 
                     .catch(() => setRecommendedSongs([]));
+            } else {
+                setRecommendedSongs([]);
             }
         } else {
-            setLyrics([]);
             setRecommendedSongs([]);
         }
-    }, [musicState.currentSong?.id]);
+    }, [musicState.currentSong?.id, setShowLyrics]);
 
     const [page, setPage] = useState(1);
     const [hasMore, setHasMore] = useState(true);
@@ -647,29 +649,55 @@ export default function MusicScreen() {
 
             const currentPage = newSearch ? 1 : page;
             const limit = 40;
-            const apiUrl = getSaavnApiUrl();
-            const cleanBaseUrl = apiUrl.replace(/\/$/, '');
-            const baseApiUrl = cleanBaseUrl.endsWith('/api') ? cleanBaseUrl : `${cleanBaseUrl}/api`;
+            const baseApiUrl = getSaavnApiBaseUrl();
+            if (!baseApiUrl) {
+                if (isMountedRef.current) {
+                    if (newSearch) setSongs([]);
+                    setIsLoading(false);
+                }
+                return;
+            }
             const url = `${baseApiUrl}/search/songs?query=${encodeURIComponent(query)}&page=${currentPage}&limit=${limit}`;
 
             console.log(`[Music] Searching URL: ${url}`);
 
+            // Explicit headers fix the "songs load on iOS but not Android"
+            // class of bugs. Default RN fetch on Android sends a bare
+            // OkHttp User-Agent which Cloudflare-fronted APIs (saavn.sumit
+            // is behind CF) sometimes treat differently — returning HTML
+            // challenge pages, empty JSON, or 403 — vs. iOS's NSURLSession
+            // UA. Setting a stable cross-platform UA + Accept header makes
+            // both platforms look identical to the upstream API. Charles
+            // / network inspectors confirmed the divergence.
             const response = await fetch(url, {
-                signal: abortControllerRef.current.signal
+                signal: abortControllerRef.current.signal,
+                headers: {
+                    'Accept': 'application/json',
+                    'User-Agent': `Soul/1.0 (${Platform.OS})`,
+                },
             });
 
             if (!isMountedRef.current) return;
 
+            console.log(`[Music] Response status: ${response.status} ${response.statusText || ''}`);
+
             const text = await response.text();
             if (!isMountedRef.current) return;
 
-            // console.log('[Music] Response length:', text.length);
+            if (!response.ok) {
+                console.warn(`[Music] Non-OK response (${response.status}). Body preview:`, text.slice(0, 200));
+                if (isMountedRef.current) {
+                    if (newSearch) setSongs([]);
+                    setIsLoading(false);
+                }
+                return;
+            }
 
             let data;
             try {
                 data = JSON.parse(text);
             } catch (jsonError) {
-                console.warn('[Music] JSON Parse Error:', jsonError);
+                console.warn('[Music] JSON Parse Error:', jsonError, '| Body preview:', text.slice(0, 200));
                 if (isMountedRef.current) {
                     if (newSearch) setSongs([]);
                     setIsLoading(false);
@@ -678,6 +706,12 @@ export default function MusicScreen() {
             }
 
             if (!isMountedRef.current) return;
+
+            if (!data?.success || !data?.data?.results) {
+                console.warn('[Music] API returned no results. Shape:',
+                    JSON.stringify({ success: data?.success, hasData: !!data?.data, hasResults: !!data?.data?.results, message: data?.message }).slice(0, 300)
+                );
+            }
 
             if (data?.success && data?.data?.results) {
                 const resultsArray = Array.isArray(data.data.results) ? data.data.results : [];
@@ -691,14 +725,30 @@ export default function MusicScreen() {
                     return;
                 }
 
-                const rawResults = resultsArray
-                    .map((item: any) => transformSong(item))
-                    .filter((s: Song) => s.url); // Filter out songs without URL
+                const transformed = resultsArray.map((item: any) => transformSong(item)) as Song[];
+                const rawResults = transformed.filter((s: Song) => s.url); // Filter out songs without URL
+
+                // Diagnostic: if API returned songs but the URL filter
+                // dropped them all, that's an upstream shape mismatch
+                // (e.g. saavn.sumit returning the raw item without
+                // `downloadUrl` array on certain platforms / regions).
+                // Logging both counts makes that scenario obvious instead
+                // of just reading "Found 0 valid songs" with no context.
+                if (transformed.length > 0 && rawResults.length === 0) {
+                    const sample = transformed[0];
+                    const rawSample = resultsArray[0];
+                    console.warn('[Music] All songs dropped by URL filter — upstream shape mismatch.', {
+                        transformedCount: transformed.length,
+                        sampleTransformed: { id: sample?.id, name: sample?.name, url: sample?.url, image: sample?.image?.slice(0, 60) },
+                        rawSampleKeys: rawSample ? Object.keys(rawSample) : [],
+                        rawDownloadUrlType: rawSample ? typeof rawSample.downloadUrl : 'n/a',
+                    });
+                }
 
                 // Deduplicate by ID
                 const uniqueResults = Array.from(new Map(rawResults.map((s: Song) => [s.id, s])).values()) as Song[];
 
-                console.log(`[Music] Found ${uniqueResults.length} valid songs`);
+                console.log(`[Music] Found ${uniqueResults.length} valid songs (of ${transformed.length} returned by API)`);
 
                 if (!isMountedRef.current) return;
 
@@ -722,6 +772,7 @@ export default function MusicScreen() {
                 if (isMountedRef.current) {
                     if (newSearch) setSongs([]);
                     setHasMore(false);
+                    setIsLoading(false);
                 }
             }
         } catch (error: any) {
@@ -737,6 +788,9 @@ export default function MusicScreen() {
             }
         }
     }, [page]);
+    useEffect(() => {
+        searchSongsRef.current = searchSongs;
+    }, [searchSongs]);
 
     const loadMore = () => {
         if (activeTab !== 'music') return;
@@ -795,7 +849,7 @@ export default function MusicScreen() {
     , [musicState.favorites]);
 
     const displaySongs = activeTab === 'favorites' ? musicState.favorites
-        : activeTab === 'queue' ? musicState.queue
+        : activeTab === 'queue' ? queue
         : songs;
 
     const handleSeek = useCallback((targetMs: number) => {
@@ -814,38 +868,6 @@ export default function MusicScreen() {
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
-    const memoizedTopPanel = useMemo(() => (
-        <ListHeader
-            currentSong={musicState.currentSong}
-            isPlaying={musicState.isPlaying}
-            progress={progress}
-            playbackMs={playbackMs}
-            onTogglePlay={togglePlayMusic}
-            onSeek={handleSeek}
-            onNext={playNext}
-            onPrevious={playPrevious}
-            repeatMode={repeatMode}
-            onToggleRepeat={toggleRepeat}
-            shuffle={shuffle}
-            onToggleShuffle={toggleShuffle}
-            searchQuery={searchQuery}
-            onSearchChange={handleSearchInput}
-            activeTab={activeTab}
-            isKeyboardVisible={keyboardVisible}
-            formatClock={formatClock}
-            showLyrics={showLyrics}
-            onToggleLyrics={() => setShowLyrics(prev => !prev)}
-            lyricsAvailable={lyrics.length > 0}
-            lyricsLines={lyrics}
-            lyricsLoading={lyricsLoading}
-            currentLyricIndex={currentLyricIndex}
-            onSeekLyric={seekTo}
-            magentaColor={themeAccent}
-            isSeeking={isSeeking}
-            setIsSeeking={setIsSeeking}
-        />
-    ), [musicState.currentSong, musicState.isPlaying, progress, playbackMs, searchQuery, activeTab, keyboardVisible, repeatMode, shuffle, showLyrics, lyrics, lyricsLoading, currentLyricIndex, themeAccent, isSeeking, setIsSeeking]);
-
     const handleSongLongPress = useCallback((song: Song) => {
         addToQueue(song);
     }, [addToQueue]);
@@ -859,7 +881,7 @@ export default function MusicScreen() {
             onLongPress={handleSongLongPress}
             magentaColor={themeAccent}
         />
-    ), [musicState.currentSong?.id, musicState.favorites, handleSongInteraction, handleSongLongPress]);
+    ), [handleSongInteraction, handleSongLongPress, isFavorite, musicState.currentSong?.id, themeAccent]);
 
     return (
         <View style={styles.container}>
@@ -883,7 +905,35 @@ export default function MusicScreen() {
                 >
                     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
                         <View style={styles.dragHandle} />
-                        {memoizedTopPanel}
+                        <ListHeader
+                            currentSong={musicState.currentSong}
+                            isPlaying={musicState.isPlaying}
+                            progress={progress}
+                            playbackMs={playbackMs}
+                            onTogglePlay={togglePlayMusic}
+                            onSeek={handleSeek}
+                            onNext={playNext}
+                            onPrevious={playPrevious}
+                            repeatMode={repeatMode}
+                            onToggleRepeat={toggleRepeat}
+                            shuffle={shuffle}
+                            onToggleShuffle={toggleShuffle}
+                            searchQuery={searchQuery}
+                            onSearchChange={handleSearchInput}
+                            activeTab={activeTab}
+                            isKeyboardVisible={keyboardVisible}
+                            formatClock={formatClock}
+                            showLyrics={showLyrics}
+                            onToggleLyrics={() => setShowLyrics((prev: boolean) => !prev)}
+                            lyricsAvailable={lyrics.length > 0}
+                            lyricsLines={lyrics}
+                            lyricsLoading={lyricsLoading}
+                            currentLyricIndex={currentLyricIndex}
+                            onSeekLyric={seekTo}
+                            magentaColor={themeAccent}
+                            isSeeking={isSeeking}
+                            setIsSeeking={setIsSeeking}
+                        />
 
                         {FlashList ? (
                             <FlashList
@@ -937,7 +987,7 @@ export default function MusicScreen() {
                                     <View style={{ marginTop: 50, alignItems: 'center' }}>
                                         <SoulLoader size={200} />
                                     </View>
-                                ) : activeTab === 'queue' && musicState.queue.length === 0 ? (
+                                ) : activeTab === 'queue' && queue.length === 0 ? (
                                     <View style={{ alignItems: 'center', marginTop: 40 }}>
                                         <MaterialIcons name="queue-music" size={40} color="rgba(255,255,255,0.1)" />
                                         <Text style={{ color: 'rgba(255,255,255,0.25)', fontSize: 13, marginTop: 12 }}>Queue is empty</Text>

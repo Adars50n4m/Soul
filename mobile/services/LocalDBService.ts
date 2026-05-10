@@ -35,12 +35,13 @@ export interface QueuedMessage {
   timestamp: string;
   status: MessageStatus;
   media?: {
-    type: 'image' | 'video' | 'audio' | 'file' | 'status_reply';
+    type: 'image' | 'video' | 'audio' | 'file' | 'status_reply' | 'theater_session';
     url: string;
     name?: string;
     caption?: string;
     thumbnail?: string;
     duration?: number;
+    theater?: import('../types').TheaterSessionMeta;
   };
   replyTo?: string;
   senderName?: string;
@@ -212,14 +213,35 @@ function setupWalCheckpoint(db: SQLite.SQLiteDatabase): void {
 function rowToQueuedMessage(row: any): QueuedMessage {
   let media: QueuedMessage['media'] | undefined;
   if (row.media_url != null || row.media_type || row.local_file_uri) {
+    // theater_session stores a YouTube videoId in media_url. proxySupabaseUrl
+    // would prefix it with the R2 public base (because the videoId looks like
+    // an R2 key — alphanumeric, no `:`/`/`/`http`), turning "v5jVX0QYwQo"
+    // into "https://pub-…r2.dev/v5jVX0QYwQo". That breaks the picker→bubble→
+    // theater handoff because MessageBubble falls back to media.url when the
+    // theater meta is missing, and host/guest end up on different Supabase
+    // presence channels — making each user see only themselves.
+    const isTheater = row.media_type === 'theater_session';
+    let rawUrl = row.media_url ?? '';
+    // Heal rows persisted by an older build of proxySupabaseUrl: strip the R2
+    // public-base prefix back off the videoId. We match strictly so legitimate
+    // R2-hosted media URLs are untouched.
+    if (isTheater && /^https:\/\/pub-[a-f0-9]+\.r2\.dev\/[A-Za-z0-9_-]{6,15}$/.test(rawUrl)) {
+      rawUrl = rawUrl.split('/').pop() || rawUrl;
+    }
     media = {
       type: row.media_type ?? 'image',
-      url: proxySupabaseUrl(row.media_url ?? ''),
+      url: isTheater ? rawUrl : proxySupabaseUrl(rawUrl),
       name: row.media_name ?? undefined,
       caption: row.media_caption ?? undefined,
       thumbnail: row.media_thumbnail ?? undefined,
       duration: row.media_duration ?? undefined,
     };
+    // Theater sessions stash their meta inside the caption column — decode it
+    // back so consumers (UI, sync, player) read the structured `theater` object.
+    if (media && media.type === 'theater_session') {
+      const { hydrateTheaterMediaFromCaption } = require('../utils/theaterMetaCodec');
+      hydrateTheaterMediaFromCaption(media);
+    }
   }
   return {
     id: row.id,
@@ -527,6 +549,14 @@ class OfflineService {
     return row?.timestamp ?? null;
   }
 
+  async getLatestGlobalMessageTimestamp(): Promise<string | null> {
+    const db = await getDb();
+    const row = await db.getFirstAsync<{ timestamp: string }>(
+      `SELECT timestamp FROM messages ORDER BY timestamp DESC LIMIT 1;`
+    );
+    return row?.timestamp ?? null;
+  }
+
   async getPendingMessages(): Promise<QueuedMessage[]> {
     const db = await getDb();
     const rows = await db.getAllAsync(`SELECT * FROM messages WHERE status = 'pending' ORDER BY timestamp ASC;`);
@@ -749,6 +779,15 @@ class OfflineService {
   async deleteMessage(messageId: string): Promise<void> {
     const db = await getDb();
     await db.runAsync('DELETE FROM messages WHERE id = ?', [messageId]);
+    // Also drop any pending sync ops queued for this message — otherwise an
+    // earlier `insert` op for the same id replays on the next sync drain and
+    // recreates the row on Supabase, causing the deleted bubble to zombie
+    // back on refresh. (This was the actual root cause of "delete krne ke
+    // baad bhi bar bar aa rha hai".)
+    await db.runAsync(
+      `DELETE FROM pending_sync_ops WHERE entity_type = 'message' AND entity_id = ?;`,
+      [messageId]
+    );
   }
 
   async deleteChat(chatId: string): Promise<void> {

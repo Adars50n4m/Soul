@@ -2,6 +2,14 @@ import { supabase } from '../config/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { Song } from '../types';
 
+export type PlaybackAction =
+    | 'play'
+    | 'pause'
+    | 'seek'
+    | 'track-change'
+    | 'heartbeat'
+    | 'sync';
+
 export interface PlaybackState {
     currentSong: Song | null;
     isPlaying: boolean;
@@ -9,6 +17,7 @@ export interface PlaybackState {
     updatedAt: number;
     updatedBy: string;
     scheduledStartTime?: number;
+    action?: PlaybackAction;
 }
 
 export type MusicSyncScope =
@@ -36,6 +45,13 @@ class MusicSyncService {
     private retryTimeout: NodeJS.Timeout | null = null;
     private errorHandled = false;
     private scope: MusicSyncScope = { type: 'none' };
+    // Tracks whether at least one ping→pong cycle has produced a usable
+    // clock offset. Consumers (MusicContext) call markClockSynced() after
+    // the first successful pong so playSong/togglePlayMusic know whether
+    // it's safe to schedule a coordinated start time. Without this the
+    // scheduledStartTime feature was always undefined and the two devices
+    // played independently with whatever drift their wall clocks had.
+    private clockSynced = false;
 
     private isChannelReady(): boolean {
         return !!this.channel && this.channel.state === 'joined';
@@ -44,11 +60,17 @@ class MusicSyncService {
     private sendBroadcast(event: 'playback_update' | 'sync_request' | 'ping' | 'pong', payload: Record<string, any>): void {
         if (!this.isChannelReady()) return;
 
+        // Surface broadcast failures so a dead channel or auth issue is
+        // visible during diagnosis rather than silently dropping music
+        // events. Pings/pongs fire every 15s so a non-throttled log is
+        // fine here — if it spams, the channel is genuinely broken.
         this.channel!.send({
             type: 'broadcast',
             event,
             payload,
-        }).catch(() => {});
+        }).catch((err) => {
+            console.warn(`[MusicSync] broadcast(${event}) failed:`, err);
+        });
     }
 
     get partnerId(): string | null {
@@ -78,6 +100,7 @@ class MusicSyncService {
         if (this.scope.type === 'direct' && this.scope.targetId === partnerId) return;
         this.scope = { type: 'direct', targetId: partnerId };
         this.retryCount = 0;
+        this.clockSynced = false;
         if (this.isInitialized) {
             this.setupBroadcastListener();
         }
@@ -86,6 +109,7 @@ class MusicSyncService {
     clearPartner(): void {
         if (this.scope.type !== 'direct') return;
         this.scope = { type: 'none' };
+        this.clockSynced = false;
         this.teardownChannel();
     }
 
@@ -93,6 +117,7 @@ class MusicSyncService {
         if (this.scope.type === 'group' && this.scope.targetId === groupId) return;
         this.scope = { type: 'group', targetId: groupId };
         this.retryCount = 0;
+        this.clockSynced = false;
         if (this.isInitialized) {
             this.setupBroadcastListener();
         }
@@ -102,7 +127,16 @@ class MusicSyncService {
         if (this.scope.type !== 'group') return;
         if (groupId && this.scope.targetId !== groupId) return;
         this.scope = { type: 'none' };
+        this.clockSynced = false;
         this.teardownChannel();
+    }
+
+    markClockSynced(): void {
+        this.clockSynced = true;
+    }
+
+    isClockSynced(): boolean {
+        return this.clockSynced;
     }
 
     private buildChannelName(): string | null {
@@ -137,7 +171,7 @@ class MusicSyncService {
             this.retryTimeout = null;
         }
         if (this.channel) {
-            try { supabase.removeChannel(this.channel); } catch (_) {}
+            try { supabase.removeChannel(this.channel); } catch (e) { console.warn('[MusicSync] removeChannel failed:', e); }
             this.channel = null;
         }
         this.errorHandled = true;
@@ -204,7 +238,7 @@ class MusicSyncService {
         }
 
         if (this.channel) {
-            try { supabase.removeChannel(this.channel); } catch (_) {}
+            try { supabase.removeChannel(this.channel); } catch (e) { console.warn('[MusicSync] removeChannel failed:', e); }
             this.channel = null;
         }
 
@@ -308,6 +342,20 @@ class MusicSyncService {
         this.setupBroadcastListener();
     }
 
+    // Force-tear-down + re-subscribe even when a (possibly zombie) channel
+    // exists. retryNow() bails out if `this.channel` is non-null, which is
+    // the right behavior for transient errors but wrong for token refresh
+    // and post-network-reconnect cases — there the channel object is still
+    // around but the underlying socket is invalid. forceReconnect() handles
+    // those by always tearing down first.
+    forceReconnect(): void {
+        if (!this.isInitialized || this.scope.type === 'none') return;
+        console.log('[MusicSync] 🔁 forceReconnect — tearing down existing channel and re-subscribing');
+        this.teardownChannel();
+        this.retryCount = 0;
+        this.setupBroadcastListener();
+    }
+
     broadcastUpdate(state: Partial<PlaybackState>): void {
         if (!this.userId) return;
 
@@ -319,6 +367,18 @@ class MusicSyncService {
             updatedBy: this.userId,
             ...state,
         } as PlaybackState;
+
+        // Hard guard against null-song broadcasts. The receiving side
+        // historically interpreted {currentSong: null, isPlaying: false} as
+        // "partner stopped playback" and force-paused its own player, which
+        // turned every transient empty-state broadcast (sync_request response
+        // when no song loaded, lock-screen events that forgot currentSong)
+        // into a cross-device pause loop. Refusing to send the message at the
+        // service boundary makes the bug structurally impossible regardless
+        // of which caller forgets to attach currentSong.
+        if (!fullState.currentSong) {
+            return;
+        }
 
         fullState.updatedAt = Date.now();
 
@@ -372,6 +432,7 @@ class MusicSyncService {
         this.userId = null;
         this.scope = { type: 'none' };
         this.retryCount = 0;
+        this.clockSynced = false;
     }
 }
 

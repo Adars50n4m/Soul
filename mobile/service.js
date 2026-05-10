@@ -9,10 +9,18 @@ module.exports = async function() {
     const player = TrackPlayer.default || TrackPlayer;
 
     if (typeof player.addEventListener === 'function') {
-      player.addEventListener(Event.RemotePlay, () => player.play());
-      player.addEventListener(Event.RemotePause, () => player.pause());
-      player.addEventListener(Event.RemoteNext, () => player.skipToNext());
-      player.addEventListener(Event.RemotePrevious, () => player.skipToPrevious());
+      player.addEventListener(Event.RemotePlay, async () => {
+        try { await player.play(); } catch (e) { console.warn('[SyncService] RemotePlay failed:', e?.message || e); }
+      });
+      player.addEventListener(Event.RemotePause, async () => {
+        try { await player.pause(); } catch (e) { console.warn('[SyncService] RemotePause failed:', e?.message || e); }
+      });
+      player.addEventListener(Event.RemoteNext, async () => {
+        try { await player.skipToNext(); } catch (e) { console.warn('[SyncService] RemoteNext failed:', e?.message || e); }
+      });
+      player.addEventListener(Event.RemotePrevious, async () => {
+        try { await player.skipToPrevious(); } catch (e) { console.warn('[SyncService] RemotePrevious failed:', e?.message || e); }
+      });
     } else {
       console.warn('[SyncService] TrackPlayer.addEventListener not found on module');
     }

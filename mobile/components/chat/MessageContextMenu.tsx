@@ -226,13 +226,18 @@ const MessageContextMenu = ({
                                         <MaterialIcons name="check-circle-outline" size={20} color="#fff" />
                                         <Text style={ChatStyles.contextActionText}>Select</Text>
                                     </Pressable>
-                                    <Pressable style={ChatStyles.contextActionBtn} onPress={() => { 
+                                    <Pressable style={ChatStyles.contextActionBtn} onPress={() => {
                                         const msgTime = new Date(msg.timestamp).getTime();
                                         const now = new Date().getTime();
                                         const diffMinutes = (now - msgTime) / (1000 * 60);
-                                        const canDeleteForEveryone = (isMe || isAdmin) && diffMinutes <= 5;
-                                        onAction(canDeleteForEveryone ? 'delete' : 'deleteForMe'); 
-                                        handleClose(); 
+                                        // theater_session bubbles aren't user-typed content; they're
+                                        // "live room" invites and the sender must always be able to
+                                        // tear them down for everyone, otherwise old LIVE bubbles
+                                        // zombie back from Supabase on every refresh.
+                                        const isTheater = msg.media?.type === 'theater_session';
+                                        const canDeleteForEveryone = (isMe || isAdmin) && (isTheater || diffMinutes <= 5);
+                                        onAction(canDeleteForEveryone ? 'delete' : 'deleteForMe');
+                                        handleClose();
                                     }}>
                                         <MaterialIcons name="delete-outline" size={20} color="#ff4444" />
                                         <Text style={[ChatStyles.contextActionText, { color: '#ff4444' }]}>
@@ -240,8 +245,9 @@ const MessageContextMenu = ({
                                                 const msgTime = new Date(msg.timestamp).getTime();
                                                 const now = new Date().getTime();
                                                 const diffMinutes = (now - msgTime) / (1000 * 60);
-                                                const canDeleteForEveryone = (isMe || isAdmin) && diffMinutes <= 5;
-                                                
+                                                const isTheater = msg.media?.type === 'theater_session';
+                                                const canDeleteForEveryone = (isMe || isAdmin) && (isTheater || diffMinutes <= 5);
+
                                                 if (canDeleteForEveryone) {
                                                     return isGroupedMedia ? `Delete for Everyone (${mediaItems.length})` : 'Delete for Everyone';
                                                 }

@@ -13,11 +13,13 @@ import {
   Platform,
   StatusBar,
   Modal,
+  SafeAreaView,
 } from 'react-native';
 import { SoulLoader } from '../components/ui/SoulLoader';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather, MaterialIcons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import Animated from 'react-native-reanimated';
 import * as ImagePicker from 'expo-image-picker';
 import { authService } from '../services/AuthService';
 import { useApp } from '../context/AppContext';
@@ -27,7 +29,7 @@ import { GlassView } from '../components/ui/GlassView';
 
 export default function ProfileSetupScreen() {
   const router = useRouter();
-  const { username, password } = useLocalSearchParams<{ username: string; password: string }>();
+  const { username, password, oauthMode } = useLocalSearchParams<{ username: string; password: string; oauthMode?: string }>();
   const { activeTheme, setSession } = useApp();
   const themeAccent = activeTheme.primary;
 
@@ -78,6 +80,17 @@ export default function ProfileSetupScreen() {
     }
   };
 
+  const handleBack = () => {
+    router.replace({
+      pathname: '/username-setup',
+      params: {
+        username: username ?? '',
+        password: password ?? '',
+        oauthMode: oauthMode ?? 'false',
+      },
+    });
+  };
+
   const handleFinish = async () => {
     setError('');
 
@@ -124,6 +137,7 @@ export default function ProfileSetupScreen() {
       style={{ flex: 1, backgroundColor: activeTheme.background }}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
+      <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" backgroundColor="#000000" />
       <View style={styles.bgOrbOne} />
       <View style={styles.bgOrbTwo} />
@@ -139,129 +153,119 @@ export default function ProfileSetupScreen() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <GlassView intensity={Platform.OS === 'ios' ? 80 : 60} tint="dark" style={styles.card}>
+        <View style={styles.heroBlock}>
           <View style={styles.stepPill}>
-            <Text style={[styles.stepPillText, { color: themeAccent }]}>Step 2 of 2</Text>
+            <Text style={[styles.stepPillText, { color: themeAccent }]}>STEP 2 / 2</Text>
           </View>
-
           <View style={styles.header}>
             <Text style={styles.title}>Set up your profile</Text>
             <Text style={styles.subtitle}>Add the basics so your Soul feels personal from the first message.</Text>
           </View>
+        </View>
 
-          <View style={styles.progressRow}>
-            <View style={[styles.progressSegment, styles.progressSegmentDone, { backgroundColor: themeAccent }]} />
-            <View style={[styles.progressSegment, { backgroundColor: themeAccent }]} />
+        <Animated.View sharedTransitionTag="onboarding-setup-card" style={styles.sharedCardWrap}>
+        <GlassView intensity={Platform.OS === 'ios' ? 80 : 60} tint="dark" style={styles.card}>
+          <View style={styles.cardTopRow}>
+            <TouchableOpacity onPress={handleBack} style={styles.backButton} activeOpacity={0.85}>
+              <Feather name="arrow-left" size={18} color={themeAccent} />
+              <Text style={[styles.backButtonText, { color: themeAccent }]}>Back</Text>
+            </TouchableOpacity>
+
+            <View style={styles.progressRail}>
+              <View style={[styles.progressFill, { backgroundColor: themeAccent }]} />
+            </View>
           </View>
 
-        {/* Avatar picker */}
-        <View style={styles.avatarSection}>
+          <View style={styles.avatarSection}>
+            <TouchableOpacity
+              style={styles.avatarTouchable}
+              onPress={() => setPickerModal(true)}
+              activeOpacity={0.85}
+            >
+              {avatarUri ? (
+                <Image source={{ uri: avatarUri }} style={[styles.avatarImage, { borderColor: themeAccent }]} />
+              ) : (
+                <View style={[styles.avatarPlaceholder, { borderColor: themeAccent }]}>
+                  <Text style={[styles.avatarInitials, { color: themeAccent }]}>
+                    {initials || '?'}
+                  </Text>
+                </View>
+              )}
+              <View style={[styles.cameraOverlay, { backgroundColor: themeAccent }]}>
+                <Feather name="camera" size={16} color="#fff" />
+              </View>
+            </TouchableOpacity>
+            <Text style={styles.avatarTitle}>Choose your profile vibe</Text>
+            <Text style={styles.avatarHint}>
+              {avatarUri ? 'Tap to change photo' : 'Tap to add photo. You can skip this for now.'}
+            </Text>
+            {avatarUri && (
+              <TouchableOpacity onPress={() => setAvatarUri(null)}>
+                <Text style={styles.removePhoto}>Remove photo</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={styles.label}>Display Name</Text>
+            <View style={styles.inputWrapper}>
+              <Feather name="type" size={16} color="#8E8EA0" style={styles.inputIcon} />
+              <TextInput
+                style={styles.input}
+                placeholder="How should we call you?"
+                placeholderTextColor="#555566"
+                value={displayName}
+                onChangeText={(t) => { setDisplayName(t); setError(''); }}
+                autoCapitalize="words"
+                autoCorrect={false}
+                maxLength={40}
+                returnKeyType="done"
+                onSubmitEditing={handleFinish}
+              />
+              <Text style={styles.charCount}>{displayName.length}/40</Text>
+            </View>
+            <Text style={styles.fieldNote}>
+              This is shown to others — can be your real name or a nickname
+            </Text>
+          </View>
+
+          <View style={styles.fieldGroup}>
+            <Text style={styles.label}>Country</Text>
+            <TouchableOpacity 
+              style={styles.inputWrapper}
+              onPress={() => setCountryModal(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.fieldIcon}>{country ? country.flag : '🌍'}</Text>
+              <Text style={[styles.input, !country && { color: '#555566' }]}>
+                {country ? `${country.name} (${country.dialCode})` : 'Choose your country'}
+              </Text>
+              <MaterialIcons name="keyboard-arrow-down" size={20} color="#8E8EA0" />
+            </TouchableOpacity>
+            <Text style={styles.fieldNote}>
+              Used to show your country in your profile and for connectivity
+            </Text>
+          </View>
+
+          {!!error && <Text style={styles.errorText}>{error}</Text>}
+
           <TouchableOpacity
-            style={styles.avatarTouchable}
-            onPress={() => setPickerModal(true)}
+            style={[styles.finishBtn, { backgroundColor: themeAccent }, loading && styles.btnDisabled]}
+            onPress={handleFinish}
+            disabled={loading}
             activeOpacity={0.85}
           >
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={[styles.avatarImage, { borderColor: themeAccent }]} />
-            ) : (
-              <View style={[styles.avatarPlaceholder, { borderColor: themeAccent }]}>
-                <Text style={[styles.avatarInitials, { color: themeAccent }]}>
-                  {initials || '?'}
-                </Text>
-              </View>
-            )}
-            <View style={[styles.cameraOverlay, { backgroundColor: themeAccent }]}>
-              <Feather name="camera" size={16} color="#fff" />
-            </View>
+            {loading
+              ? <SoulLoader size={40} />
+              : <Text style={styles.finishBtnText}>Finish setup</Text>
+            }
           </TouchableOpacity>
-          <Text style={styles.avatarTitle}>Choose your profile vibe</Text>
-          <Text style={styles.avatarHint}>
-            {avatarUri ? 'Tap to change photo' : 'Tap to add photo. You can skip this for now.'}
+
+          <Text style={styles.footerNote}>
+            You can always update your photo, display name, and country later from profile settings.
           </Text>
-          {avatarUri && (
-            <TouchableOpacity onPress={() => setAvatarUri(null)}>
-              <Text style={styles.removePhoto}>Remove photo</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        <View style={styles.profilePreviewCard}>
-          <View style={[styles.previewAvatarLarge, { borderColor: themeAccent }]}>
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.previewAvatarLargeImg} />
-            ) : (
-              <Text style={[styles.previewInitialsLarge, { color: themeAccent }]}>{initials || '?'}</Text>
-            )}
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.previewEyebrow}>Preview</Text>
-            <Text style={styles.previewName}>{displayName.trim() || 'Your Display Name'}</Text>
-            <Text style={styles.previewUsername}>@{username}</Text>
-            <Text style={styles.previewMeta}>{country ? `${country.flag} ${country.name}` : 'Add your country for a more complete profile'}</Text>
-          </View>
-        </View>
-
-        {/* Display Name */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Display Name</Text>
-          <View style={styles.inputWrapper}>
-            <Feather name="type" size={16} color="#8E8EA0" style={styles.inputIcon} />
-            <TextInput
-              style={styles.input}
-              placeholder="How should we call you?"
-              placeholderTextColor="#555566"
-              value={displayName}
-              onChangeText={(t) => { setDisplayName(t); setError(''); }}
-              autoCapitalize="words"
-              autoCorrect={false}
-              maxLength={40}
-              returnKeyType="done"
-              onSubmitEditing={handleFinish}
-            />
-            <Text style={styles.charCount}>{displayName.length}/40</Text>
-          </View>
-          <Text style={styles.fieldNote}>
-            This is shown to others — can be your real name or a nickname
-          </Text>
-        </View>
-
-        {/* Country Picker */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Country</Text>
-          <TouchableOpacity 
-            style={styles.inputWrapper}
-            onPress={() => setCountryModal(true)}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.fieldIcon}>{country ? country.flag : '🌍'}</Text>
-            <Text style={[styles.input, !country && { color: '#555566' }]}>
-              {country ? `${country.name} (${country.dialCode})` : 'Choose your country'}
-            </Text>
-            <MaterialIcons name="keyboard-arrow-down" size={20} color="#8E8EA0" />
-          </TouchableOpacity>
-          <Text style={styles.fieldNote}>
-            Used to show your country in your profile and for connectivity
-          </Text>
-        </View>
-
-        {!!error && <Text style={styles.errorText}>{error}</Text>}
-
-        <TouchableOpacity
-          style={[styles.finishBtn, { backgroundColor: themeAccent }, loading && styles.btnDisabled]}
-          onPress={handleFinish}
-          disabled={loading}
-          activeOpacity={0.85}
-        >
-                    {loading
-                        ? <SoulLoader size={40} />
-                        : <Text style={styles.finishBtnText}>Finish setup</Text>
-                    }
-        </TouchableOpacity>
-
-        <Text style={styles.footerNote}>
-          You can always update your photo, display name, and country later from profile settings.
-        </Text>
         </GlassView>
+        </Animated.View>
       </ScrollView>
 
       {/* Image picker modal */}
@@ -310,6 +314,7 @@ export default function ProfileSetupScreen() {
         selectedCountry={country?.name}
         themeColor={themeAccent}
       />
+      </SafeAreaView>
     </KeyboardAvoidingView>
   );
 }
@@ -319,6 +324,9 @@ const BG     = '#000000';
 const BORDER = '#252535';
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+  },
   root: { flex: 1, backgroundColor: BG },
   bgOrbOne: {
     position: 'absolute',
@@ -345,17 +353,21 @@ const styles = StyleSheet.create({
     right: 0,
     height: 280,
   },
-  scrollContent: { paddingHorizontal: 24, paddingTop: 44, paddingBottom: 40, alignItems: 'center' },
+  scrollContent: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24, alignItems: 'center' },
+  heroBlock: { width: '100%', alignItems: 'center', marginBottom: 14, paddingHorizontal: 8 },
   card: {
     width: '100%',
     backgroundColor: 'rgba(26, 26, 28, 0.40)',
     borderRadius: 36,
-    paddingHorizontal: 24,
-    paddingTop: 24,
-    paddingBottom: 28,
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 20,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.10)',
     overflow: 'hidden',
+  },
+  sharedCardWrap: {
+    width: '100%',
   },
   stepPill: {
     alignSelf: 'center',
@@ -365,90 +377,82 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
-    marginBottom: 14,
+    marginBottom: 10,
   },
   stepPillText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.8,
     textTransform: 'uppercase',
   },
-  progressRow: {
+  header: { width: '100%' },
+  title: { fontSize: 26, fontWeight: '900', color: '#E8E8F0', marginBottom: 6, textAlign: 'center', lineHeight: 29 },
+  subtitle: { fontSize: 12, color: '#888899', lineHeight: 18, textAlign: 'center' },
+  cardTopRow: {
     flexDirection: 'row',
-    gap: 8,
-    marginBottom: 22,
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 14,
   },
-  progressSegment: {
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+  },
+  backButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  progressRail: {
     flex: 1,
-    height: 6,
+    height: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    width: '100%',
+    height: '100%',
     borderRadius: 999,
   },
-  progressSegmentDone: {
-    opacity: 0.45,
-  },
-  header: { width: '100%', marginBottom: 18 },
-  title: { fontSize: 32, fontWeight: '900', color: '#E8E8F0', marginBottom: 8, textAlign: 'center' },
-  subtitle: { fontSize: 14, color: '#888899', lineHeight: 20, textAlign: 'center' },
-  avatarSection: { alignItems: 'center', marginBottom: 24 },
+  avatarSection: { alignItems: 'center', marginBottom: 16 },
   avatarTouchable: { position: 'relative', marginBottom: 10 },
-  avatarImage: { width: 118, height: 118, borderRadius: 59, borderWidth: 3 },
+  avatarImage: { width: 92, height: 92, borderRadius: 46, borderWidth: 2.5 },
   avatarPlaceholder: {
-    width: 118, height: 118, borderRadius: 59, backgroundColor: '#1C1408',
+    width: 92, height: 92, borderRadius: 46, backgroundColor: '#1C1408',
     borderWidth: 2, borderStyle: 'dashed',
     alignItems: 'center', justifyContent: 'center',
   },
-  avatarInitials: { fontSize: 36, fontWeight: '700' },
+  avatarInitials: { fontSize: 28, fontWeight: '700' },
   cameraOverlay: {
-    position: 'absolute', bottom: 4, right: 4, width: 34, height: 34,
-    borderRadius: 17, alignItems: 'center', justifyContent: 'center',
+    position: 'absolute', bottom: 2, right: 2, width: 30, height: 30,
+    borderRadius: 15, alignItems: 'center', justifyContent: 'center',
   },
-  avatarTitle: { color: '#FFFFFF', fontSize: 18, fontWeight: '700', marginBottom: 4 },
-  avatarHint: { color: '#888899', fontSize: 13, marginBottom: 4, textAlign: 'center', lineHeight: 18 },
-  removePhoto: { color: '#FF6B6B', fontSize: 13, marginTop: 4 },
-  fieldGroup: { width: '100%', marginBottom: 24 },
-  label: { color: '#AAAABC', fontSize: 13, fontWeight: '600', letterSpacing: 0.5, marginBottom: 8, textTransform: 'uppercase' },
+  avatarTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', marginBottom: 3 },
+  avatarHint: { color: '#888899', fontSize: 12, marginBottom: 3, textAlign: 'center', lineHeight: 17 },
+  removePhoto: { color: '#FF6B6B', fontSize: 12, marginTop: 2 },
+  fieldGroup: { width: '100%', marginBottom: 16 },
+  label: { color: '#AAAABC', fontSize: 12, fontWeight: '600', letterSpacing: 0.5, marginBottom: 6, textTransform: 'uppercase' },
   inputWrapper: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#13131C',
-    borderRadius: 16, borderWidth: 1.5, borderColor: BORDER, paddingHorizontal: 16, height: 58,
+    borderRadius: 16, borderWidth: 1.5, borderColor: BORDER, paddingHorizontal: 14, height: 54,
   },
   fieldIcon: { fontSize: 16, marginRight: 10 },
   inputIcon: { marginRight: 10 },
-  input: { flex: 1, color: '#E8E8F0', fontSize: 16 },
+  input: { flex: 1, color: '#E8E8F0', fontSize: 15 },
   charCount: { color: '#444455', fontSize: 12 },
-  fieldNote: { color: '#555566', fontSize: 12, marginTop: 6, marginLeft: 4, lineHeight: 17 },
-  profilePreviewCard: {
-    width: '100%', flexDirection: 'row', alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.045)', borderRadius: 20, padding: 16,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', marginBottom: 26, gap: 14,
-  },
-  previewAvatarLarge: {
-    width: 64, height: 64, borderRadius: 32, backgroundColor: '#1C1408',
-    alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
-    borderWidth: 1.5,
-  },
-  previewAvatarLargeImg: { width: 64, height: 64 },
-  previewInitialsLarge: { fontSize: 22, fontWeight: '800' },
-  previewEyebrow: {
-    color: 'rgba(255,255,255,0.48)',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginBottom: 4,
-  },
-  previewName: { fontSize: 16, fontWeight: '600', color: '#E8E8F0', marginBottom: 2 },
-  previewUsername: { fontSize: 13, color: '#888899' },
-  previewMeta: { fontSize: 12, color: '#77778A', marginTop: 4 },
+  fieldNote: { color: '#555566', fontSize: 11, marginTop: 5, marginLeft: 4, lineHeight: 16 },
   errorText: { color: '#FF6B6B', fontSize: 14, textAlign: 'center', marginBottom: 16, width: '100%' },
-  finishBtn: { width: '100%', borderRadius: 16, height: 56, alignItems: 'center', justifyContent: 'center' },
+  finishBtn: { width: '100%', borderRadius: 16, height: 52, alignItems: 'center', justifyContent: 'center' },
   btnDisabled: { opacity: 0.6 },
-  finishBtnText: { color: '#0A0A0F', fontSize: 16, fontWeight: '800' },
+  finishBtnText: { color: '#0A0A0F', fontSize: 15, fontWeight: '800' },
   footerNote: {
     color: '#767688',
-    fontSize: 12,
-    lineHeight: 18,
+    fontSize: 11,
+    lineHeight: 16,
     textAlign: 'center',
-    marginTop: 14,
+    marginTop: 10,
   },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' },
   modalSheet: { backgroundColor: '#13131C', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40 },
