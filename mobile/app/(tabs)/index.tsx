@@ -1735,11 +1735,12 @@ const headerBackgroundStyle = useAnimatedStyle(() => {
       <SwipeableRow
         onArchive={() => archiveContact(item.id, true)}
         onDelete={() => {
-          Alert.alert('Delete Chat', `Are you sure?`, [
+          Alert.alert('Delete Chat', 'Are you sure?', [
             { text: 'Cancel', style: 'cancel' },
-            { text: 'Delete', style: 'destructive', onPress: () => clearChatMessages(item.id) }
+            { text: 'Delete', style: 'destructive', onPress: () => clearChatMessages(item.id) },
           ]);
         }}
+        onDeleteDirect={() => clearChatMessages(item.id)}
         onUnfriend={() => unfriendContact(item.id)}
       >
         <ChatListItem 

@@ -1040,7 +1040,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(({
             {replyingTo && (
                 <GlassView intensity={35} tint="dark" style={styles.replyPreview}>
                     <View style={styles.replyContent}>
-                        <View style={[ChatStyles.quoteBar, { backgroundColor: accent }]} />
+                        <View style={[ChatStyles.quoteBar, { backgroundColor: accent, marginRight: 8 }]} />
                         <View style={styles.replyTextContainer}>
                             <Text style={[styles.replySender, { color: accent }]}>
                                 {replyingTo.sender === 'me' ? 'You' : contactName || 'Them'}

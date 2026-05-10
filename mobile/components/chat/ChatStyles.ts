@@ -29,10 +29,12 @@ export const ChatStyles = StyleSheet.create({
         zIndex: -1,
     },
     replyIconContainerMe: {
-        left: 0,
+        // Sent bubble swipes LEFT — icon revealed at the right edge of the row.
+        right: 0,
     },
     replyIconContainerThem: {
-        right: 0,
+        // Received bubble swipes RIGHT — icon revealed at the left edge.
+        left: 0,
     },
     replyIcon: {
         // Shared value handles this

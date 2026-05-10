@@ -450,18 +450,22 @@ const MessageBubble = React.memo(({
         .onUpdate((e) => {
             if (!selectionMode && !isClone) {
                 if (isMe) {
-                    // Sent message (Right side): Swipe to the right (positive)
-                    translateX.value = Math.max(0, Math.min(e.translationX, 80));
-                } else {
-                    // Received message (Left side): Swipe to the left (negative)
+                    // Sent message (right side): swipe LEFT toward the chat
+                    // body to reply — matches WhatsApp/iMessage convention
+                    // where the gesture direction points away from the
+                    // bubble's edge of the screen.
                     translateX.value = Math.min(0, Math.max(e.translationX, -80));
+                } else {
+                    // Received message (left side): swipe RIGHT toward the
+                    // chat body to reply.
+                    translateX.value = Math.max(0, Math.min(e.translationX, 80));
                 }
             }
         })
         .onEnd(() => {
             const threshold = 60;
-            const isTriggered = isMe ? translateX.value > threshold : translateX.value < -threshold;
-            
+            const isTriggered = isMe ? translateX.value < -threshold : translateX.value > threshold;
+
             if (isTriggered && onReply && !isClone) {
                 runOnJS(hapticService.notification)(Haptics.NotificationFeedbackType.Success);
                 runOnJS(onReply)(msg);
@@ -512,9 +516,15 @@ const MessageBubble = React.memo(({
         const absX = Math.abs(translateX.value);
         const opacity = absX / 60;
         const scale = Math.min(opacity, 1);
-        
-        // Slide icon inward as we swipe
-        const iconX = isMe ? (absX - 60) : (60 - absX);
+
+        // Slide the icon in from the side opposite to the swipe direction:
+        //  - isMe (right bubble) swipes LEFT, so the icon is anchored to the
+        //    bubble's right edge and slides inward (rightward → leftward) as
+        //    the swipe progresses. Starts offscreen-right (iconX=+60), settles
+        //    at iconX=0 once threshold is reached.
+        //  - !isMe (left bubble) swipes RIGHT — icon anchored on the left edge,
+        //    slides inward from the left (iconX=-60 → 0).
+        const iconX = isMe ? (60 - absX) : (absX - 60);
 
         return {
             opacity,
