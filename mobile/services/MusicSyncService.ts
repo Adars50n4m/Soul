@@ -38,6 +38,7 @@ const MAX_RETRIES = 3;
 
 class MusicSyncService {
     private onUpdate: PlaybackUpdateCallback | null = null;
+    private onInvite: ((song: Song, senderId: string) => void) | null = null;
     private userId: string | null = null;
     private isInitialized = false;
     private channel: RealtimeChannel | null = null;
@@ -57,7 +58,23 @@ class MusicSyncService {
         return !!this.channel && this.channel.state === 'joined';
     }
 
-    private sendBroadcast(event: 'playback_update' | 'sync_request' | 'ping' | 'pong', payload: Record<string, any>): void {
+    setInviteCallback(cb: ((song: Song, senderId: string) => void) | null): void {
+        this.onInvite = cb;
+    }
+
+    sendMusicInvite(song: Song, attempt = 0): void {
+        if (!this.userId) return;
+        if (!this.isChannelReady()) {
+            // Channel not yet subscribed — retry up to 5×400ms before giving up
+            if (attempt < 5) {
+                setTimeout(() => this.sendMusicInvite(song, attempt + 1), 400);
+            }
+            return;
+        }
+        this.sendBroadcast('music_invite', { song, senderId: this.userId, sentAt: Date.now() });
+    }
+
+    private sendBroadcast(event: 'playback_update' | 'sync_request' | 'ping' | 'pong' | 'music_invite', payload: Record<string, any>): void {
         if (!this.isChannelReady()) return;
 
         // Surface broadcast failures so a dead channel or auth issue is
@@ -281,6 +298,12 @@ class MusicSyncService {
             if (this.isEventRelevant(state)) {
                 this.onUpdate?.(state, 'pong');
             }
+        });
+
+        this.channel.on('broadcast', { event: 'music_invite' }, ({ payload }) => {
+            if (!payload?.song || payload.senderId === this.userId) return;
+            if (this.scope.type === 'direct' && payload.senderId !== this.scope.targetId) return;
+            this.onInvite?.(payload.song as Song, payload.senderId);
         });
 
         if (this.scope.type === 'group') {

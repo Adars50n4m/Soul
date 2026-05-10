@@ -90,8 +90,22 @@ const decodeHTMLEntities = (text: string): string => {
 };
 
 const REMOTE_SEEK_LOCK_MS = 3000;
-const HEARTBEAT_SUPPRESS_MS = 1500;
-const HEARTBEAT_INTERVAL_MS = 1500;
+const HEARTBEAT_SUPPRESS_MS = 2000;
+// 3 s between heartbeats. 1.5 s was too aggressive on Android: every cycle
+// fired 3-4 async TrackPlayer calls (getState/getPosition/seekTo/play) which
+// blocked the audio thread and made buttons feel unresponsive. 3 s still keeps
+// partners within ~3 s of each other which is imperceptible for casual listening.
+const HEARTBEAT_INTERVAL_MS = 3000;
+
+const getPlaybackStateValue = (state: any) =>
+    state && typeof state === 'object' && 'state' in state ? state.state : state;
+
+const isTrackPlayerActiveState = (state: any) => {
+    const value = getPlaybackStateValue(state);
+    return value === (TrackPlayerEvents.State?.Playing || 'playing') ||
+        value === (TrackPlayerEvents.State?.Buffering || 'buffering') ||
+        value === (TrackPlayerEvents.State?.Loading || 'loading');
+};
 
 const songToTrack = (song: Song) => ({
     id: song.id,
@@ -115,6 +129,11 @@ const trackToSong = (track: any): Song | null => {
 };
 
 export type RepeatMode = 'off' | 'all' | 'one';
+
+export interface MusicInvite {
+    song: Song;
+    senderId: string;
+}
 
 interface MusicContextType {
     musicState: MusicState;
@@ -148,6 +167,10 @@ interface MusicContextType {
     // time can be the owner because the device only plays one track.
     playbackOwnerChatId: string | null;
     setPlaybackOwnerChatId: (chatId: string | null) => void;
+    // Music invite — partner started playing and is inviting us to listen together.
+    pendingMusicInvite: MusicInvite | null;
+    acceptMusicInvite: () => Promise<void>;
+    declineMusicInvite: () => void;
     // Lyrics — fetched once per song, current line tracked while playing.
     // Lifted to context so the chat-header karaoke view can subscribe even when
     // the player overlay is closed.
@@ -169,6 +192,12 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
     const musicStateRef = useRef(musicState);
     musicStateRef.current = musicState;
+    const commitMusicState = useCallback((updater: (prev: MusicState) => MusicState) => {
+        const nextState = updater(musicStateRef.current);
+        musicStateRef.current = nextState;
+        setMusicState(nextState);
+        return nextState;
+    }, []);
     const [isPlayerReady, setIsPlayerReady] = useState(false);
     const [isSeeking, setIsSeeking] = useState(false);
     const isSeekingRef = useRef(false);
@@ -181,8 +210,11 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const isProcessingRemoteUpdate = useRef(false);
     const seekLockRef = useRef<number>(0); // Timestamp until which remote noise is ignored
     const heartbeatSuppressUntilRef = useRef<number>(0);
+    const lastSyncResponseRef = useRef<number>(0); // Cooldown: don't respond to sync_requests too often
     const activeTrackIndexRef = useRef(0);
     const ignoreNextTrackChangeBroadcastRef = useRef(false);
+    const playSessionIdRef = useRef(0);
+    const isPlaySongInProgressRef = useRef(false);
     // Refs for callbacks that the TrackPlayer remote-event listener
     // dispatches to. The listener is registered once via useTrackPlayerEvents
     // and its handler closes over its initial render. Without these refs,
@@ -211,6 +243,48 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const [queue, setQueue] = useState<Song[]>([]);
     const queueRef = useRef<Song[]>(queue);
     queueRef.current = queue;
+    const playbackAnchorRef = useRef<{
+        songId: string | null;
+        positionMs: number;
+        updatedAt: number;
+        isPlaying: boolean;
+    }>({
+        songId: null,
+        positionMs: 0,
+        updatedAt: Date.now(),
+        isPlaying: false,
+    });
+
+    const getEstimatedPlaybackPosition = useCallback((song: Song | null = musicStateRef.current.currentSong) => {
+        const anchor = playbackAnchorRef.current;
+        const now = Date.now();
+        const sameSong = !!song && anchor.songId === song.id;
+        let positionMs = sameSong ? anchor.positionMs : 0;
+
+        if (sameSong && anchor.isPlaying) {
+            positionMs += now - anchor.updatedAt;
+        }
+
+        const durationMs = song?.duration ? Number(song.duration) * 1000 : 0;
+        if (durationMs > 0) {
+            positionMs = Math.min(positionMs, Math.max(0, durationMs - 250));
+        }
+
+        return Math.max(0, Math.round(positionMs));
+    }, []);
+
+    const setPlaybackAnchor = useCallback((
+        positionMs: number,
+        isPlayingValue: boolean,
+        song: Song | null = musicStateRef.current.currentSong
+    ) => {
+        playbackAnchorRef.current = {
+            songId: song?.id ?? null,
+            positionMs: Math.max(0, Math.round(positionMs || 0)),
+            updatedAt: Date.now(),
+            isPlaying: isPlayingValue,
+        };
+    }, []);
 
     const markLocalInteraction = useCallback((remoteLockMs = REMOTE_SEEK_LOCK_MS, heartbeatMs = HEARTBEAT_SUPPRESS_MS) => {
         const now = Date.now();
@@ -235,12 +309,12 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
             const activeSong = songs[resolvedIndex] || fallbackSong || null;
             if (activeSong && musicStateRef.current.currentSong?.id !== activeSong.id) {
-                setMusicState(prev => ({ ...prev, currentSong: activeSong }));
+                commitMusicState(prev => ({ ...prev, currentSong: activeSong }));
             }
         } catch (error) {
             console.warn('[MusicContext] Failed to refresh native queue snapshot:', error);
         }
-    }, [isPlayerReady]);
+    }, [commitMusicState, isPlayerReady]);
 
     const broadcastPlaybackState = useCallback(async (
         action: PlaybackAction,
@@ -249,11 +323,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const currentSong = overrides.currentSong ?? musicStateRef.current.currentSong;
         if (!currentSong) return;
 
-        const positionMs = overrides.positionMs ?? (
-            TrackPlayer
-                ? await TrackPlayer.getPosition().then((pos: number) => pos * 1000).catch(() => 0)
-                : 0
-        );
+        const positionMs = overrides.positionMs ?? getEstimatedPlaybackPosition(currentSong);
 
         musicSyncService.broadcastUpdate({
             currentSong,
@@ -262,7 +332,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             scheduledStartTime: overrides.scheduledStartTime,
             action,
         });
-    }, []);
+    }, [getEstimatedPlaybackPosition]);
 
     // Internal seek function that doesn't broadcast (used for sync)
     const internalSeek = useCallback(async (seconds: number, shouldPlay = true) => {
@@ -270,21 +340,52 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         try {
             console.log(`[MusicSync] 🎯 Internal Seek to: ${seconds.toFixed(2)}s (shouldPlay: ${shouldPlay})`);
             await TrackPlayer.seekTo(seconds);
-            
-            // Wait for a small buffer window if needed
+
+            // Suppress outgoing heartbeat for a full cycle after a remote-driven seek
+            // so we don't immediately echo our newly-synced position back, which was
+            // creating a ping-pong loop that made lyric lines repeat continuously.
+            heartbeatSuppressUntilRef.current = Date.now() + HEARTBEAT_INTERVAL_MS;
+
+            // Update lastSeekTimeRef so the state-update debounce (isPlaying sync)
+            // doesn't immediately overwrite our local pause state with remote's.
+            lastSeekTimeRef.current = Date.now();
+
             if (shouldPlay) {
-                // Short timeout to let native buffer stabilize
+                // Guard: if the user explicitly paused recently, do NOT force-play
+                // after seeking. Without this, a partner heartbeat (isPlaying:true)
+                // would call internalSeek with shouldPlay=true and override the pause
+                // — this was the main reason "pause doesn't stick" on Android.
+                const userPausedRecently =
+                    userIntentRef.current.state === 'paused' &&
+                    (Date.now() - userIntentRef.current.at) < 30_000;
+                if (userPausedRecently) {
+                    setPlaybackAnchor(seconds * 1000, false, musicStateRef.current.currentSong);
+                    return;
+                }
+
+                setPlaybackAnchor(seconds * 1000, true, musicStateRef.current.currentSong);
+
+                // Short timeout to let native buffer stabilize before verifying state
                 setTimeout(async () => {
+                    // Re-check user intent inside the timeout — the user may have
+                    // paused between the seek and this callback firing (150 ms gap).
+                    const intentNow =
+                        userIntentRef.current.state === 'paused' &&
+                        (Date.now() - userIntentRef.current.at) < 30_000;
+                    if (intentNow) return;
+
                     const state = await TrackPlayer.getState();
                     if (state !== (TrackPlayerEvents.State?.Playing || 'playing')) {
                         await TrackPlayer.play();
                     }
                 }, 150);
+            } else {
+                setPlaybackAnchor(seconds * 1000, false, musicStateRef.current.currentSong);
             }
         } catch (e) {
             console.warn('[MusicContext] Internal seek failed:', e);
         }
-    }, [isPlayerReady]);
+    }, [isPlayerReady, setPlaybackAnchor]);
 
     const seekTo = useCallback(async (position: number) => {
         if (!isPlayerReady || !TrackPlayer) return;
@@ -297,13 +398,14 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             markLocalInteraction();
             
             await TrackPlayer.seekTo(seconds);
+            setPlaybackAnchor(position, musicStateRef.current.isPlaying, musicStateRef.current.currentSong);
             
             // Manual user seek SHOULD broadcast
             const isSynced = musicSyncService?.isClockSynced();
-            await broadcastPlaybackState('seek', {
+            void broadcastPlaybackState('seek', {
                 positionMs: position,
                 scheduledStartTime: isSynced ? Date.now() + 100 : undefined,
-            });
+            }).catch(e => console.warn('[MusicContext] seek broadcast failed:', e));
 
             // Unlock UI after a delay
             setTimeout(() => setIsSeeking(false), 800);
@@ -311,9 +413,13 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             console.error('[MusicContext] Seek Error:', error);
             setIsSeeking(false);
         }
-    }, [broadcastPlaybackState, isPlayerReady, markLocalInteraction]);
+    }, [broadcastPlaybackState, isPlayerReady, markLocalInteraction, setPlaybackAnchor]);
     const [sleepTimerMinutes, setSleepTimerMinutes] = useState<number | null>(null);
     const [musicSyncScope, setMusicSyncScope] = useState<MusicSyncScope>({ type: 'none' });
+    const [pendingMusicInvite, setPendingMusicInvite] = useState<MusicInvite | null>(null);
+    const pendingMusicInviteRef = useRef<MusicInvite | null>(null);
+    pendingMusicInviteRef.current = pendingMusicInvite;
+
     const [playbackOwnerChatId, _setPlaybackOwnerChatId] = useState<string | null>(null);
     const setPlaybackOwnerChatId = useCallback((chatId: string | null) => {
         const normalized = chatId ? normalizeId(chatId) : null;
@@ -328,11 +434,18 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     
     // Safely use hooks
     const playbackState = TrackPlayerHooks.usePlaybackState();
-    const isPlaying = playbackState?.state === (TrackPlayerEvents.State?.Playing || 'playing');
+    const isPlaying = isTrackPlayerActiveState(playbackState);
 
     useEffect(() => {
-        setMusicState(prev => ({ ...prev, isPlaying }));
-    }, [isPlaying]);
+        const intent = userIntentRef.current;
+        const intentAge = Date.now() - intent.at;
+
+        if (intent.state === 'playing' && intentAge < 1200 && !isPlaying) return;
+        if (intent.state === 'paused' && intentAge < 30_000 && isPlaying) return;
+
+        setPlaybackAnchor(getEstimatedPlaybackPosition(), isPlaying, musicStateRef.current.currentSong);
+        commitMusicState(prev => (prev.isPlaying === isPlaying ? prev : { ...prev, isPlaying }));
+    }, [commitMusicState, getEstimatedPlaybackPosition, isPlaying, setPlaybackAnchor]);
 
     const suspendGroupRoomPlayback = useCallback(async () => {
         if (!TrackPlayer) return;
@@ -344,8 +457,8 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             console.warn('[MusicContext] suspendGroupRoomPlayback pause failed:', e);
         }
 
-        setMusicState(prev => ({ ...prev, isPlaying: false }));
-    }, []);
+        commitMusicState(prev => ({ ...prev, isPlaying: false }));
+    }, [commitMusicState]);
 
     // Initialize TrackPlayer
     useEffect(() => {
@@ -363,7 +476,11 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 } catch {
                     console.log('[MusicContext] Initializing TrackPlayer...');
                     await TrackPlayer.setupPlayer({
-                        waitForBuffer: true,
+                        waitForBuffer: Platform.OS !== 'android',
+                        minBuffer: Platform.OS === 'android' ? 3 : 10,
+                        maxBuffer: Platform.OS === 'android' ? 15 : 30,
+                        playBuffer: Platform.OS === 'android' ? 0.25 : 0.5,
+                        backBuffer: Platform.OS === 'android' ? 5 : 15,
                         maxCacheSize: 1024 * 100, // 100MB cache
                         iosCategory: 'playback', // Explicitly set for background play
                         iosCategoryMode: 'default',
@@ -378,11 +495,10 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     android: {
                         appKilledPlaybackBehavior: TrackPlayerEvents.AppKilledPlaybackBehavior?.StopPlaybackAndRemoveNotification,
                     },
-                    // Aggressive buffering for instant seeking
-                    minBuffer: 10, // 10s min buffer
-                    maxBuffer: 30, // 30s max buffer
-                    playBuffer: 0.5, // 0.5s buffer to start playing (FAST!)
-                    backBuffer: 15, // 15s back buffer
+                    minBuffer: Platform.OS === 'android' ? 3 : 10,
+                    maxBuffer: Platform.OS === 'android' ? 15 : 30,
+                    playBuffer: Platform.OS === 'android' ? 0.25 : 0.5,
+                    backBuffer: Platform.OS === 'android' ? 5 : 15,
                     capabilities: [
                         TrackPlayerEvents.Capability.Play,
                         TrackPlayerEvents.Capability.Pause,
@@ -403,7 +519,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                         TrackPlayerEvents.Capability.SkipToPrevious,
                         TrackPlayerEvents.Capability.Stop,
                     ],
-                    progressUpdateEventInterval: 0.25,
+                    progressUpdateEventInterval: Platform.OS === 'android' ? 1 : 0.5,
                 });
 
                 setIsPlayerReady(true);
@@ -493,7 +609,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
             if (!nextSong) return;
             const previousSongId = musicStateRef.current.currentSong?.id;
-            setMusicState(prev => ({
+            commitMusicState(prev => ({
                 ...prev,
                 currentSong: nextSong,
             }));
@@ -502,6 +618,13 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
             if (ignoreNextTrackChangeBroadcastRef.current) {
                 ignoreNextTrackChangeBroadcastRef.current = false;
+                // Native player is now active on this track — safe to seek.
+                // On Android, seekTo(0) before play() is often a no-op because
+                // ExoPlayer hasn't loaded the track yet. Seeking here (after
+                // PlaybackActiveTrackChanged) guarantees position 0 regardless
+                // of any cached offset the native player restored.
+                await TrackPlayer.seekTo(0).catch(() => {});
+                setPlaybackAnchor(0, true, nextSong);
                 return;
             }
 
@@ -515,44 +638,43 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
 
         console.log('[MusicContext] Remote event received:', event.type);
-        // Always perform the local action FIRST and verify the engine
-        // actually transitioned before telling the partner. The previous
-        // pattern (broadcast immediately, then call play() without await)
-        // could lie to the partner if buffering failed: they'd see "you
-        // resumed" while your device was silent. Now the broadcast is
-        // gated on the engine confirming the transition.
-        const isPlayingState = (s: any) =>
-            s === (TrackPlayerEvents.State?.Playing || 'playing') ||
-            s === (TrackPlayerEvents.State?.Buffering || 'buffering');
 
         if (event.type === TrackPlayerEvents.Event.RemotePlay) {
             try {
+                const currentSong = musicStateRef.current.currentSong;
+                const positionMs = getEstimatedPlaybackPosition(currentSong);
                 userIntentRef.current = { state: 'playing', at: Date.now() };
                 markLocalInteraction();
-                await TrackPlayer.play();
-                const state = await TrackPlayer.getState();
-                if (isPlayingState(state)) {
-                    await broadcastPlaybackState('play', {
+                setPlaybackAnchor(positionMs, true, currentSong);
+                commitMusicState(prev => ({ ...prev, isPlaying: true }));
+                void Promise.resolve(TrackPlayer.play())
+                    .catch(e => console.warn('[MusicContext] RemotePlay failed:', e));
+                if (currentSong) {
+                    void broadcastPlaybackState('play', {
+                        currentSong,
                         isPlaying: true,
-                    });
-                } else {
-                    console.warn('[MusicContext] RemotePlay did not transition to Playing — skipping broadcast. State:', state);
+                        positionMs,
+                    }).catch(e => console.warn('[MusicContext] RemotePlay broadcast failed:', e));
                 }
             } catch (e) {
                 console.warn('[MusicContext] RemotePlay failed:', e);
             }
         } else if (event.type === TrackPlayerEvents.Event.RemotePause) {
             try {
+                const currentSong = musicStateRef.current.currentSong;
+                const positionMs = getEstimatedPlaybackPosition(currentSong);
                 userIntentRef.current = { state: 'paused', at: Date.now() };
                 markLocalInteraction();
-                await TrackPlayer.pause();
-                const state = await TrackPlayer.getState();
-                if (!isPlayingState(state)) {
-                    await broadcastPlaybackState('pause', {
+                setPlaybackAnchor(positionMs, false, currentSong);
+                commitMusicState(prev => ({ ...prev, isPlaying: false }));
+                void Promise.resolve(TrackPlayer.pause())
+                    .catch(e => console.warn('[MusicContext] RemotePause failed:', e));
+                if (currentSong) {
+                    void broadcastPlaybackState('pause', {
+                        currentSong,
                         isPlaying: false,
-                    });
-                } else {
-                    console.warn('[MusicContext] RemotePause did not transition to Paused — skipping broadcast. State:', state);
+                        positionMs,
+                    }).catch(e => console.warn('[MusicContext] RemotePause broadcast failed:', e));
                 }
             } catch (e) {
                 console.warn('[MusicContext] RemotePause failed:', e);
@@ -574,11 +696,22 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     useEffect(() => {
         if (!currentUser) return;
+        const normalizedCurrentUserId = normalizeId(currentUser.id);
         AsyncStorage.getItem(`ss_favorites_${currentUser.id}`).then(favs => {
             if (favs) setMusicState(prev => ({ ...prev, favorites: JSON.parse(favs) }));
         });
-        musicSyncService.initialize(currentUser.id, async (remoteState, eventType) => {
-            if (isProcessingRemoteUpdate.current) return;
+        musicSyncService.setInviteCallback((song, senderId) => {
+            setPendingMusicInvite({ song, senderId });
+        });
+
+        musicSyncService.initialize(normalizedCurrentUserId, async (remoteState, eventType) => {
+            const remoteAction = remoteState.action;
+            const isTransportAction =
+                remoteAction === 'play' ||
+                remoteAction === 'pause' ||
+                remoteAction === 'seek' ||
+                remoteAction === 'track-change';
+            if (isProcessingRemoteUpdate.current && !isTransportAction) return;
             
             // Handle Clock Sync (Ping/Pong)
             if (eventType === 'ping') {
@@ -624,6 +757,14 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             if (eventType === 'sync_request') {
                 const mySong = musicStateRef.current.currentSong;
                 if (!mySong) return;
+                // Cooldown: if we responded to a sync_request recently, skip.
+                // When both users open the chat simultaneously both fire
+                // requestMusicSync(), each responds to the other's request, and
+                // the cross-synced positions race and fight — creating a seek
+                // storm that oscillates the lyric index and makes lines repeat.
+                const now = Date.now();
+                if (now - lastSyncResponseRef.current < 3000) return;
+                lastSyncResponseRef.current = now;
                 await broadcastPlaybackState('sync', {
                     currentSong: mySong,
                     isPlaying: musicStateRef.current.isPlaying,
@@ -672,78 +813,91 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                         name: decodeHTMLEntities(remoteState.currentSong.name),
                         artist: decodeHTMLEntities(remoteState.currentSong.artist)
                     };
-                    
+
                     const currentSong = musicStateRef.current?.currentSong;
                     if (!currentSong || currentSong.id !== cleanRemoteSong.id) {
-                        console.log('[MusicSync] 🆕 New song detected — syncing to:', cleanRemoteSong.name);
-                        await TrackPlayer.reset();
-                        await TrackPlayer.add(songToTrack(cleanRemoteSong));
-                        await refreshQueueFromPlayer(cleanRemoteSong);
-                        
-                        await internalSeek(targetPosSeconds, remoteState.isPlaying);
-                        
-                        setMusicState(prev => ({
-                            ...prev,
-                            currentSong: cleanRemoteSong,
-                            isPlaying: remoteState.isPlaying,
-                        }));
+                        // Don't auto-play a new song from a remote update — the
+                        // invite banner (set by the music_invite broadcast) is the
+                        // gating mechanism. If the banner hasn't been shown yet for
+                        // this song (e.g. invite broadcast was missed), create it now.
+                        // Either way, return and wait for the user to tap Accept.
+                        if (pendingMusicInviteRef.current?.song.id !== cleanRemoteSong.id) {
+                            console.log('[MusicSync] 🆕 New song from partner — showing invite banner:', cleanRemoteSong.name);
+                            setPendingMusicInvite({ song: cleanRemoteSong, senderId: remoteState.updatedBy });
+                        }
+                        return;
                     } else {
                         // 2. Same song — sync play/pause and position drift
-                        if (isSeekLocked) {
-                            console.log('[MusicSync] 🛡️ Ignoring remote update due to active interaction lock');
-                        } else {
-                            const currentLocalPos = await TrackPlayer.getPosition();
-                            const posDifference = Math.abs(currentLocalPos - targetPosSeconds);
-                            const action = remoteState.action || 'heartbeat';
+                        const action = remoteState.action || 'heartbeat';
+                        const currentLocalPos = getEstimatedPlaybackPosition(cleanRemoteSong) / 1000;
+                        const posDifference = Math.abs(currentLocalPos - targetPosSeconds);
+                        const remotePositionMs = targetPosSeconds * 1000;
 
-                            // Explicit seek actions should apply nearly immediately;
-                            // passive heartbeats can tolerate a slightly looser drift budget.
-                            const isInitialStart = currentLocalPos < 5;
-                            const threshold =
-                                action === 'seek'
-                                    ? 0.15
-                                    : action === 'heartbeat'
-                                        ? 0.9
-                                        : (isInitialStart ? 0.35 : 0.45);
-
-                            if (action === 'seek' || posDifference > threshold) {
-                                console.log(`[MusicSync] ⏳ Compensating for ${posDifference.toFixed(2)}s drift (threshold: ${threshold}s)`);
-                                await internalSeek(targetPosSeconds, remoteState.isPlaying);
+                        if (action === 'pause') {
+                            userIntentRef.current = { state: 'paused', at: Date.now() };
+                            setPlaybackAnchor(remotePositionMs, false, cleanRemoteSong);
+                            commitMusicState(prev => ({ ...prev, isPlaying: false }));
+                            void Promise.resolve(TrackPlayer.pause())
+                                .catch(e => console.warn('[MusicSync] Remote pause failed:', e));
+                            if (posDifference > 1.25) {
+                                void Promise.resolve(TrackPlayer.seekTo(targetPosSeconds))
+                                    .catch(e => console.warn('[MusicSync] Remote pause position sync failed:', e));
                             }
-
-                            // Play/Pause Sync
-                            const playerState = await TrackPlayer.getState();
-                            const isActuallyPlaying = playerState === (TrackPlayerEvents.State?.Playing || 'playing') ||
-                                                     playerState === (TrackPlayerEvents.State?.Buffering || 'buffering');
-
-                            // Sticky-pause guard: if the user explicitly
-                            // paused recently (within 30s), partner's
-                            // heartbeats and stale state should NOT flip
-                            // us back to play. Pause syncs from partner
-                            // are still respected (no harm in a redundant
-                            // pause). This is what lets a user hold pause
-                            // even when partner is still listening.
+                        } else if (action === 'play') {
+                            userIntentRef.current = { state: 'playing', at: Date.now() };
+                            setPlaybackAnchor(remotePositionMs, true, cleanRemoteSong);
+                            commitMusicState(prev => ({ ...prev, isPlaying: true }));
+                            const playAfterOptionalSeek = posDifference > 0.75
+                                ? Promise.resolve(TrackPlayer.seekTo(targetPosSeconds)).then(() => TrackPlayer.play())
+                                : Promise.resolve(TrackPlayer.play());
+                            void playAfterOptionalSeek.catch(e => console.warn('[MusicSync] Remote play failed:', e));
+                        } else if (action === 'seek') {
+                            userIntentRef.current = { state: remoteState.isPlaying ? 'playing' : 'paused', at: Date.now() };
+                            setPlaybackAnchor(remotePositionMs, remoteState.isPlaying, cleanRemoteSong);
+                            commitMusicState(prev => ({ ...prev, isPlaying: remoteState.isPlaying }));
+                            const seekThenTransport = Promise.resolve(TrackPlayer.seekTo(targetPosSeconds))
+                                .then(() => remoteState.isPlaying ? TrackPlayer.play() : TrackPlayer.pause());
+                            void seekThenTransport.catch(e => console.warn('[MusicSync] Remote seek failed:', e));
+                        } else if (isSeekLocked) {
+                            console.log('[MusicSync] 🛡️ Ignoring passive remote update due to active interaction lock');
+                        } else if (remoteState.isPlaying && musicStateRef.current.isPlaying && posDifference > 2.0) {
+                            console.log(`[MusicSync] ⏳ Passive drift correction ${posDifference.toFixed(2)}s`);
+                            await internalSeek(targetPosSeconds, true);
+                        } else if (action === 'sync' && remoteState.isPlaying && !musicStateRef.current.isPlaying) {
                             const userPausedRecently =
                                 userIntentRef.current.state === 'paused' &&
                                 (Date.now() - userIntentRef.current.at) < 30_000;
-
-                            if (remoteState.isPlaying && !isActuallyPlaying) {
-                                if (userPausedRecently) {
-                                    console.log('[MusicSync] 🛑 User paused recently — ignoring remote play');
-                                } else {
-                                    console.log('[MusicSync] ▶️ Partner is playing — resuming locally');
-                                    await TrackPlayer.play();
-                                }
-                            } else if (!remoteState.isPlaying && isActuallyPlaying) {
-                                console.log('[MusicSync] ⏸️ Partner paused — pausing locally');
-                                await TrackPlayer.pause();
+                            if (!userPausedRecently) {
+                                userIntentRef.current = { state: 'playing', at: Date.now() };
+                                setPlaybackAnchor(remotePositionMs, true, cleanRemoteSong);
+                                commitMusicState(prev => ({ ...prev, isPlaying: true }));
+                                const playAfterOptionalSeek = posDifference > 0.75
+                                    ? Promise.resolve(TrackPlayer.seekTo(targetPosSeconds)).then(() => TrackPlayer.play())
+                                    : Promise.resolve(TrackPlayer.play());
+                                void playAfterOptionalSeek.catch(e => console.warn('[MusicSync] Remote sync play failed:', e));
                             }
+                        } else if (action === 'sync' && !remoteState.isPlaying && musicStateRef.current.isPlaying) {
+                            userIntentRef.current = { state: 'paused', at: Date.now() };
+                            setPlaybackAnchor(remotePositionMs, false, cleanRemoteSong);
+                            commitMusicState(prev => ({ ...prev, isPlaying: false }));
+                            void Promise.resolve(TrackPlayer.pause())
+                                .catch(e => console.warn('[MusicSync] Remote sync pause failed:', e));
                         }
                         
                         if (!isSeekingRef.current) {
                             const now = Date.now();
-                            if (now - lastSeekTimeRef.current > 2000) {
-                                setMusicState(prev => ({ ...prev, isPlaying: remoteState.isPlaying }));
+                            if (now - lastSeekTimeRef.current > 2000 && action !== 'heartbeat') {
+                                // Never let a remote heartbeat flip our local isPlaying:true
+                                // while the user has intentionally paused. Without this guard:
+                                // user pauses → partner heartbeat sets isPlaying=true in context
+                                // → button shows PAUSE → user taps PAUSE → getState()=Paused
+                                // → togglePlay tries to PLAY → infinite play/pause loop.
+                                const intentPaused =
+                                    userIntentRef.current.state === 'paused' &&
+                                    (Date.now() - userIntentRef.current.at) < 30_000;
+                                if (!intentPaused || !remoteState.isPlaying) {
+                                    commitMusicState(prev => ({ ...prev, isPlaying: remoteState.isPlaying }));
+                                }
                             }
                         }
                     }
@@ -807,7 +961,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             authSub?.subscription?.unsubscribe?.();
             musicSyncService.cleanup();
         };
-    }, [broadcastPlaybackState, currentUser, isPlayerReady, internalSeek, refreshQueueFromPlayer, setPlaybackOwnerChatId]);
+    }, [broadcastPlaybackState, commitMusicState, currentUser, getEstimatedPlaybackPosition, isPlayerReady, internalSeek, refreshQueueFromPlayer, setPlaybackAnchor, setPlaybackOwnerChatId]);
 
     // ── Lyrics: fetch on song change ────────────────────────────────────────
     useEffect(() => {
@@ -831,26 +985,13 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     // ── Lyrics: track current line while playing ────────────────────────────
     useEffect(() => {
         if (!musicState.isPlaying || lyrics.length === 0 || !TrackPlayer) return;
-        // Throttled error logging: tick runs every 250ms; without
-        // throttling, a transient TrackPlayer error would spam console
-        // hundreds of times per minute. Log at most once per 5s so real
-        // errors are visible during diagnosis without drowning the console.
-        let lastErrLog = 0;
-        const tick = setInterval(async () => {
-            try {
-                const posSec = await TrackPlayer.getPosition();
-                const idx = lyricsService.getCurrentLineIndex(lyrics, posSec);
-                setCurrentLyricIndex(prev => (prev === idx ? prev : idx));
-            } catch (e) {
-                const now = Date.now();
-                if (now - lastErrLog > 5000) {
-                    console.warn('[MusicContext] Lyrics tick failed:', e);
-                    lastErrLog = now;
-                }
-            }
+        const tick = setInterval(() => {
+            const posSec = getEstimatedPlaybackPosition(musicStateRef.current.currentSong) / 1000;
+            const idx = lyricsService.getCurrentLineIndex(lyrics, posSec);
+            setCurrentLyricIndex(prev => (prev === idx ? prev : idx));
         }, 250);
         return () => clearInterval(tick);
-    }, [musicState.isPlaying, lyrics]);
+    }, [getEstimatedPlaybackPosition, musicState.isPlaying, lyrics]);
 
     // ── Heartbeat Loop: Ensures real-time alignment during playback ─────────
     useEffect(() => {
@@ -902,6 +1043,14 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             console.warn('[MusicContext] Cannot play: Player not ready or module missing');
             return;
         }
+        // Idempotency key: each call gets a unique session ID. After every
+        // await we check isStale() — if a newer playSong superseded us, we
+        // bail out and let the new session own the player.
+        const sessionId = ++playSessionIdRef.current;
+        const isStale = () => playSessionIdRef.current !== sessionId;
+        isPlaySongInProgressRef.current = true;
+        let rollbackSong: Song | null = musicStateRef.current.currentSong;
+        let rollbackIsPlaying = musicStateRef.current.isPlaying;
         try {
             console.log(`[MusicContext] 🎵 Playing song: "${song.name}"`);
             console.log(`[MusicContext] 🔗 Trace URL: ${song.url}`);
@@ -919,80 +1068,119 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             };
             const upcomingQueue = queueRef.current.filter(queuedSong => queuedSong.id !== cleanSong.id);
             const playlist = [cleanSong, ...upcomingQueue];
+            const previousSong = musicStateRef.current.currentSong;
+            const previousIsPlaying = musicStateRef.current.isPlaying;
+            rollbackSong = previousSong;
+            rollbackIsPlaying = previousIsPlaying;
 
             ignoreNextTrackChangeBroadcastRef.current = true;
-            await TrackPlayer.reset();
-            
-            // Re-apply options just before play to wake up iOS media center
-            await TrackPlayer.updateOptions({
-                capabilities: [
-                    TrackPlayerEvents.Capability.Play,
-                    TrackPlayerEvents.Capability.Pause,
-                    TrackPlayerEvents.Capability.SkipToNext,
-                    TrackPlayerEvents.Capability.SkipToPrevious,
-                    TrackPlayerEvents.Capability.Stop,
-                    TrackPlayerEvents.Capability.SeekTo,
-                ],
-                notificationCapabilities: [
-                    TrackPlayerEvents.Capability.Play,
-                    TrackPlayerEvents.Capability.Pause,
-                    TrackPlayerEvents.Capability.SkipToNext,
-                    TrackPlayerEvents.Capability.SkipToPrevious,
-                    TrackPlayerEvents.Capability.Stop,
-                ],
-            });
-            await TrackPlayer.add(playlist.map(songToTrack));
-            activeTrackIndexRef.current = 0;
+            userIntentRef.current = { state: 'playing', at: Date.now() };
+            markLocalInteraction(6000, 4000);
+            setPlaybackAnchor(0, true, cleanSong);
             setQueue(upcomingQueue);
-            
-            if (broadcast) {
-                // Explicit user-initiated playback — clears any sticky
-                // pause intent so partner-sync resumes normally.
-                userIntentRef.current = { state: 'playing', at: Date.now() };
-                markLocalInteraction();
+            commitMusicState(prev => ({ ...prev, currentSong: cleanSong, isPlaying: true }));
 
-                // Await play() and confirm the engine transitioned before
-                // telling the partner. Without the await, if the URL was
-                // expired/404 or the codec failed, partner would receive
-                // currentSong + isPlaying:true and try to sync to a song
-                // we never actually started. Tight bound on the "playing"
-                // claim eliminates that ghost-broadcast class of bugs.
+            await TrackPlayer.reset();
+            if (isStale()) return;
+
+            // Re-apply options only on iOS where it wakes the media center.
+            // On Android this extra native call sits in the song-start path.
+            if (Platform.OS === 'ios') {
+                await TrackPlayer.updateOptions({
+                    capabilities: [
+                        TrackPlayerEvents.Capability.Play,
+                        TrackPlayerEvents.Capability.Pause,
+                        TrackPlayerEvents.Capability.SkipToNext,
+                        TrackPlayerEvents.Capability.SkipToPrevious,
+                        TrackPlayerEvents.Capability.Stop,
+                        TrackPlayerEvents.Capability.SeekTo,
+                    ],
+                    notificationCapabilities: [
+                        TrackPlayerEvents.Capability.Play,
+                        TrackPlayerEvents.Capability.Pause,
+                        TrackPlayerEvents.Capability.SkipToNext,
+                        TrackPlayerEvents.Capability.SkipToPrevious,
+                        TrackPlayerEvents.Capability.Stop,
+                    ],
+                });
+            }
+            await TrackPlayer.add(playlist.map(songToTrack));
+            if (isStale()) return;
+            await TrackPlayer.seekTo(0);
+            if (isStale()) return;
+            activeTrackIndexRef.current = 0;
+
+            if (broadcast) {
+                // Send invite notification so partner sees a pill before auto-sync.
+                musicSyncService.sendMusicInvite(cleanSong);
+
                 try {
-                    await TrackPlayer.play();
+                    void Promise.resolve(TrackPlayer.play()).catch((playErr) => {
+                        console.error('[MusicContext] playSong: TrackPlayer.play() failed:', playErr);
+                        commitMusicState(prev => ({
+                            ...prev,
+                            currentSong: previousSong,
+                            isPlaying: previousIsPlaying,
+                        }));
+                        setPlaybackAnchor(getEstimatedPlaybackPosition(previousSong), previousIsPlaying, previousSong);
+                        userIntentRef.current = { state: previousIsPlaying ? 'playing' : 'paused', at: Date.now() };
+                    });
                 } catch (playErr) {
                     console.error('[MusicContext] playSong: TrackPlayer.play() failed:', playErr);
                     Alert.alert(
                         'Playback Error',
                         'Could not start this track. Please try another song.'
                     );
+                    commitMusicState(prev => ({
+                        ...prev,
+                        currentSong: previousSong,
+                        isPlaying: previousIsPlaying,
+                    }));
+                    setPlaybackAnchor(getEstimatedPlaybackPosition(previousSong), previousIsPlaying, previousSong);
+                    userIntentRef.current = { state: previousIsPlaying ? 'playing' : 'paused', at: Date.now() };
                     return;
                 }
 
                 const isSynced = musicSyncService?.isClockSynced();
                 const scheduledTime = Date.now() + 100;
 
-                await broadcastPlaybackState('track-change', {
+                void broadcastPlaybackState('track-change', {
                     currentSong: cleanSong,
                     isPlaying: true,
                     positionMs: 0,
                     scheduledStartTime: isSynced ? scheduledTime : undefined,
-                });
+                }).catch(e => console.warn('[MusicContext] track-change broadcast failed:', e));
             } else {
-                await TrackPlayer.play();
+                void Promise.resolve(TrackPlayer.play())
+                    .catch(e => console.warn('[MusicContext] playSong accept-invite play failed:', e));
             }
-            setMusicState(prev => ({ ...prev, currentSong: cleanSong, isPlaying: true }));
             setTimeout(() => {
                 ignoreNextTrackChangeBroadcastRef.current = false;
             }, 1000);
         } catch (error) {
             ignoreNextTrackChangeBroadcastRef.current = false;
+            commitMusicState(prev => ({
+                ...prev,
+                currentSong: rollbackSong,
+                isPlaying: rollbackIsPlaying,
+            }));
+            setPlaybackAnchor(getEstimatedPlaybackPosition(rollbackSong), rollbackIsPlaying, rollbackSong);
+            userIntentRef.current = { state: rollbackIsPlaying ? 'playing' : 'paused', at: Date.now() };
             console.error('[MusicContext] playSong error:', error);
+        } finally {
+            if (playSessionIdRef.current === sessionId) {
+                isPlaySongInProgressRef.current = false;
+            }
         }
-    }, [broadcastPlaybackState, isPlayerReady, markLocalInteraction]);
+    }, [broadcastPlaybackState, commitMusicState, getEstimatedPlaybackPosition, isPlayerReady, markLocalInteraction, setPlaybackAnchor]);
 
     const togglePlayMusic = useCallback(async () => {
         if (!TrackPlayer) {
             console.warn('[MusicContext] togglePlayMusic: TrackPlayer module is missing');
+            return;
+        }
+        if (isPlaySongInProgressRef.current) {
+            console.log('[MusicContext] togglePlayMusic: playSong in progress, skipping');
             return;
         }
         if (!isPlayerReady) {
@@ -1001,68 +1189,61 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             setIsPlayerReady(true);
         }
 
-        const state = await TrackPlayer.getState();
-        const isPlayingState = (s: any) => 
-            s === (TrackPlayerEvents.State?.Playing || 'playing') || 
-            s === (TrackPlayerEvents.State?.Buffering || 'buffering');
-            
-        const wasPlaying = isPlayingState(state);
+        if (!musicStateRef.current.currentSong && queueRef.current.length > 0) {
+            await playSong(queueRef.current[0], true);
+            return;
+        }
+        if (!musicStateRef.current.currentSong) {
+            console.warn('[MusicContext] togglePlayMusic: no active track to resume');
+            return;
+        }
 
-        if (wasPlaying) {
-            try {
-                // Mark user intent as paused BEFORE the pause call so that
-                // any heartbeat or remote update arriving in the window
-                // between pause() and broadcast can't flip us back to play.
-                userIntentRef.current = { state: 'paused', at: Date.now() };
-                markLocalInteraction();
-                await TrackPlayer.pause();
-                await broadcastPlaybackState('pause', {
-                    isPlaying: false,
+        const currentSong = musicStateRef.current.currentSong;
+        const wasPlaying = musicStateRef.current.isPlaying;
+        const shouldPlay = !wasPlaying;
+        const positionMs = getEstimatedPlaybackPosition(currentSong);
+
+        userIntentRef.current = { state: shouldPlay ? 'playing' : 'paused', at: Date.now() };
+        markLocalInteraction();
+        setPlaybackAnchor(positionMs, shouldPlay, currentSong);
+        commitMusicState(prev => ({ ...prev, isPlaying: shouldPlay }));
+
+        try {
+            if (shouldPlay) {
+                void Promise.resolve(TrackPlayer.play()).catch((e) => {
+                    userIntentRef.current = { state: wasPlaying ? 'playing' : 'paused', at: Date.now() };
+                    setPlaybackAnchor(positionMs, wasPlaying, currentSong);
+                    commitMusicState(prev => ({ ...prev, isPlaying: wasPlaying }));
+                    console.warn('[MusicContext] play command failed:', e);
                 });
-                setMusicState(prev => ({ ...prev, isPlaying: false }));
-            } catch (e) {
-                console.warn('[MusicContext] togglePlayMusic pause failed:', e);
-            }
-        } else {
-            // Await play and verify the engine actually transitioned before
-            // broadcasting. The previous code broadcast { isPlaying: true }
-            // optimistically and then fired play() without awaiting — if
-            // buffering or codec failed, partner saw us as playing while
-            // our device was silent. Now we tell the partner only after we
-            // know we're actually playing.
-            try {
-                // Set intent BEFORE play so a partner heartbeat racing in
-                // can't be misclassified. Cleared paused-intent here so
-                // the remote handler stops blocking play sync.
-                userIntentRef.current = { state: 'playing', at: Date.now() };
-                markLocalInteraction();
-                if (!musicStateRef.current.currentSong && queueRef.current.length > 0) {
-                    await playSong(queueRef.current[0], true);
-                    return;
-                }
-                if (!musicStateRef.current.currentSong) {
-                    console.warn('[MusicContext] togglePlayMusic: no active track to resume');
-                    return;
-                }
-                await TrackPlayer.play();
-                const state = await TrackPlayer.getState();
-                const isActuallyPlaying = isPlayingState(state);
-                if (!isActuallyPlaying) {
-                    console.warn('[MusicContext] togglePlayMusic: play() did not transition to Playing. State:', state);
-                    return;
-                }
                 const isSynced = musicSyncService?.isClockSynced();
                 const scheduledTime = Date.now() + 100;
-                await broadcastPlaybackState('play', {
+                void broadcastPlaybackState('play', {
+                    currentSong,
                     isPlaying: true,
+                    positionMs,
                     scheduledStartTime: isSynced ? scheduledTime : undefined,
+                }).catch(e => console.warn('[MusicContext] play broadcast failed:', e));
+            } else {
+                void Promise.resolve(TrackPlayer.pause()).catch((e) => {
+                    userIntentRef.current = { state: wasPlaying ? 'playing' : 'paused', at: Date.now() };
+                    setPlaybackAnchor(positionMs, wasPlaying, currentSong);
+                    commitMusicState(prev => ({ ...prev, isPlaying: wasPlaying }));
+                    console.warn('[MusicContext] pause command failed:', e);
                 });
-                setMusicState(prev => ({ ...prev, isPlaying: true }));
-            } catch (e) {
-                console.error('[MusicContext] togglePlayMusic play failed:', e);
+                void broadcastPlaybackState('pause', {
+                    currentSong,
+                    isPlaying: false,
+                    positionMs,
+                }).catch(e => console.warn('[MusicContext] pause broadcast failed:', e));
             }
+        } catch (e) {
+            userIntentRef.current = { state: wasPlaying ? 'playing' : 'paused', at: Date.now() };
+            setPlaybackAnchor(positionMs, wasPlaying, currentSong);
+            commitMusicState(prev => ({ ...prev, isPlaying: wasPlaying }));
+            console.warn('[MusicContext] togglePlayMusic failed:', e);
         }
-    }, [broadcastPlaybackState, isPlayerReady, markLocalInteraction, playSong]);
+    }, [broadcastPlaybackState, commitMusicState, getEstimatedPlaybackPosition, isPlayerReady, markLocalInteraction, playSong, setPlaybackAnchor]);
 
     const toggleFavoriteSong = useCallback(async (song: Song) => {
         setMusicState(prev => {
@@ -1075,10 +1256,17 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
 
     const getPlaybackPosition = useCallback(async () => {
-        if (!isPlayerReady || !TrackPlayer) return 0;
-        const pos = await TrackPlayer.getPosition();
-        return pos * 1000;
-    }, [isPlayerReady]);
+        const estimatedPosition = getEstimatedPlaybackPosition();
+        if (!isPlayerReady || !TrackPlayer) return estimatedPosition;
+
+        void TrackPlayer.getPosition()
+            .then((pos: number) => {
+                setPlaybackAnchor(pos * 1000, musicStateRef.current.isPlaying, musicStateRef.current.currentSong);
+            })
+            .catch(() => {});
+
+        return estimatedPosition;
+    }, [getEstimatedPlaybackPosition, isPlayerReady, setPlaybackAnchor]);
 
     const toggleRepeat = useCallback(() => {
         setRepeatMode(prev => prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off');
@@ -1154,6 +1342,33 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const playNext = useCallback(async () => {
         if (!TrackPlayer || !isPlayerReady) return;
 
+        const localQueue = queueRef.current;
+        if (!shuffle && localQueue.length > 0) {
+            const nextSong = localQueue[0];
+            const nextQueue = localQueue.slice(1);
+            const shouldKeepPlaying = musicStateRef.current.isPlaying;
+            const targetIndex = activeTrackIndexRef.current + 1;
+
+            userIntentRef.current = { state: shouldKeepPlaying ? 'playing' : 'paused', at: Date.now() };
+            markLocalInteraction();
+            activeTrackIndexRef.current = targetIndex;
+            setQueue(nextQueue);
+            setPlaybackAnchor(0, shouldKeepPlaying, nextSong);
+            commitMusicState(prev => ({ ...prev, currentSong: nextSong, isPlaying: shouldKeepPlaying }));
+
+            void Promise.resolve(TrackPlayer.skip(targetIndex))
+                .catch(e => {
+                    console.warn('[MusicContext] fast next failed, falling back to playSong:', e);
+                    void playSong(nextSong);
+                });
+            void broadcastPlaybackState('track-change', {
+                currentSong: nextSong,
+                isPlaying: shouldKeepPlaying,
+                positionMs: 0,
+            }).catch(e => console.warn('[MusicContext] next broadcast failed:', e));
+            return;
+        }
+
         const nativeQueue = await TrackPlayer.getQueue();
         if (nativeQueue.length === 0) {
             if (queueRef.current.length > 0) {
@@ -1180,16 +1395,17 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
 
         markLocalInteraction();
-        await TrackPlayer.skip(targetIndex);
+        void Promise.resolve(TrackPlayer.skip(targetIndex))
+            .catch(e => console.warn('[MusicContext] next skip failed:', e));
         activeTrackIndexRef.current = targetIndex;
-    }, [isPlayerReady, markLocalInteraction, playSong, repeatMode, shuffle]);
+    }, [broadcastPlaybackState, commitMusicState, isPlayerReady, markLocalInteraction, playSong, repeatMode, setPlaybackAnchor, shuffle]);
 
     const playPrevious = useCallback(async () => {
         if (!TrackPlayer || !isPlayerReady) return;
 
-        const currentPosition = await TrackPlayer.getPosition().catch(() => 0);
+        const currentPosition = getEstimatedPlaybackPosition(musicStateRef.current.currentSong) / 1000;
         if (currentPosition > 3) {
-            await seekTo(0);
+            void seekTo(0);
             return;
         }
 
@@ -1205,14 +1421,15 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         } else if (repeatMode === 'all') {
             targetIndex = nativeQueue.length - 1;
         } else {
-            await seekTo(0);
+            void seekTo(0);
             return;
         }
 
         markLocalInteraction();
-        await TrackPlayer.skip(targetIndex);
+        void Promise.resolve(TrackPlayer.skip(targetIndex))
+            .catch(e => console.warn('[MusicContext] previous skip failed:', e));
         activeTrackIndexRef.current = targetIndex;
-    }, [isPlayerReady, markLocalInteraction, repeatMode, seekTo]);
+    }, [getEstimatedPlaybackPosition, isPlayerReady, markLocalInteraction, repeatMode, seekTo]);
 
     // Keep the refs the remote-event handler reads in sync with the
     // freshly memoized playNext/playPrevious whenever queue/shuffle/
@@ -1232,10 +1449,12 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (minutes && minutes > 0) {
             sleepTimerRef.current = setTimeout(async () => {
                 if (TrackPlayer) await TrackPlayer.pause();
+                setPlaybackAnchor(getEstimatedPlaybackPosition(), false, musicStateRef.current.currentSong);
+                commitMusicState(prev => ({ ...prev, isPlaying: false }));
                 setSleepTimerMinutes(null);
             }, minutes * 60 * 1000);
         }
-    }, []);
+    }, [commitMusicState, getEstimatedPlaybackPosition, setPlaybackAnchor]);
 
     // Auto-play next when song ends (repeat one / queue next)
     useEffect(() => {
@@ -1251,11 +1470,23 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     await TrackPlayer.play().catch(() => {});
                 }
             } else {
-                setMusicState(prev => ({ ...prev, isPlaying: false }));
+                setPlaybackAnchor(getEstimatedPlaybackPosition(), false, musicStateRef.current.currentSong);
+                commitMusicState(prev => ({ ...prev, isPlaying: false }));
             }
         });
         return () => sub?.remove?.();
-    }, [repeatMode, musicState.currentSong]);
+    }, [commitMusicState, getEstimatedPlaybackPosition, repeatMode, setPlaybackAnchor, musicState.currentSong]);
+
+    const acceptMusicInvite = useCallback(async () => {
+        const invite = pendingMusicInviteRef.current;
+        if (!invite) return;
+        setPendingMusicInvite(null);
+        await playSong(invite.song, false); // false = don't re-broadcast; sync via heartbeat
+    }, [playSong]);
+
+    const declineMusicInvite = useCallback(() => {
+        setPendingMusicInvite(null);
+    }, []);
 
     const setMusicPartner = useCallback((partnerId: string) => {
         const normalized = normalizeId(partnerId);
@@ -1291,6 +1522,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isSeeking, setIsSeeking,
         playbackOwnerChatId, setPlaybackOwnerChatId,
         lyrics, lyricsLoading, currentLyricIndex, showLyrics, setShowLyrics,
+        pendingMusicInvite, acceptMusicInvite, declineMusicInvite,
     };
     return <MusicContext.Provider value={value}>{children}</MusicContext.Provider>;
 };

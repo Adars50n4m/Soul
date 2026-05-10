@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import {
     View, Text, Image, Pressable, StyleSheet, Modal,
     ScrollView, TextInput,
-    Dimensions, KeyboardAvoidingView, Platform, Keyboard
+    Dimensions, KeyboardAvoidingView, Platform, Keyboard,
+    NativeModules,
 } from 'react-native';
-import { GestureDetector, Gesture, GestureHandlerRootView, Pressable as GHPressable } from 'react-native-gesture-handler';
+import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SoulLoader } from './ui/SoulLoader';
 import Animated, {
     useSharedValue,
@@ -12,6 +13,7 @@ import Animated, {
     withSpring,
     withTiming,
     withSequence,
+    cancelAnimation,
     interpolate,
     Extrapolation,
     useAnimatedScrollHandler,
@@ -22,6 +24,18 @@ import Animated, {
     SlideOutDown,
     Easing,
 } from 'react-native-reanimated';
+
+// Safe-require useProgress from TrackPlayer. Gives us native-event-driven position
+// updates instead of a JS setInterval, freeing the JS thread for touch events.
+let useTrackProgress: (interval?: number) => { position: number; buffered: number; duration: number } =
+    (_interval?: number) => ({ position: 0, buffered: 0, duration: 0 });
+try {
+    const hasNative = !!(NativeModules.TrackPlayerModule || NativeModules.RNTrackPlayer);
+    if (hasNative) {
+        const TP = require('react-native-track-player');
+        if (TP.useProgress) useTrackProgress = TP.useProgress;
+    }
+} catch (_) {}
 import { GlassView } from './ui/GlassView';
 import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -54,54 +68,66 @@ const formatTime = (seconds: number) => {
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
 };
 
-// Animated play button with spring press feedback
+const isAndroid = Platform.OS === 'android';
+
+// Fast timing (not spring) gives crisp Spotify-like press feedback.
+// NOT memo'd — memo + GHPressable has known Android gesture-drop issues when
+// the onPress prop reference changes every render.
 const PlayButton = ({ isPlaying, onPress, accentColor }: { isPlaying: boolean; onPress: () => void; accentColor: string }) => {
     const scale = useSharedValue(1);
+    const animatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+    const lastPressAt = useRef(0);
 
-    const animatedStyle = useAnimatedStyle(() => ({
-        transform: [{ scale: scale.value }],
-    }));
-
-    const handlePressIn = () => {
-        scale.value = withSpring(0.88, { damping: 15, stiffness: 300 });
-    };
-
-    const handlePressOut = () => {
-        scale.value = withSpring(1, { damping: 12, stiffness: 200 });
+    const handlePress = () => {
+        const now = Date.now();
+        if (now - lastPressAt.current < 300) return;
+        lastPressAt.current = now;
+        scale.value = withSequence(
+            withTiming(0.88, { duration: 60 }),
+            withTiming(1, { duration: 100 }),
+        );
+        onPress();
     };
 
     return (
-        <GHPressable
-            onPress={onPress}
-            onPressIn={handlePressIn}
-            onPressOut={handlePressOut}
-            // No upward hit extension — the seek bar sits above this button and
-            // a symmetric hitSlop would steal taps from the bar's bottom edge.
+        <Pressable
+            onPress={handlePress}
+            android_disableSound
             hitSlop={{ top: 0, bottom: 25, left: 25, right: 25 }}
         >
             <Animated.View style={[styles.playButton, animatedStyle]}>
                 <MaterialIcons name={isPlaying ? 'pause' : 'play-arrow'} size={44} color="#000" />
             </Animated.View>
-        </GHPressable>
+        </Pressable>
     );
 };
 
-// Animated icon button (shuffle, prev, next, lyrics)
 const IconButton = ({ name, size, color, onPress }: { name: any; size: number; color: string; onPress: () => void }) => {
     const scale = useSharedValue(1);
     const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+    const lastPressAt = useRef(0);
+
+    const handlePress = () => {
+        const now = Date.now();
+        if (now - lastPressAt.current < 300) return;
+        lastPressAt.current = now;
+        scale.value = withSequence(
+            withTiming(0.78, { duration: 60 }),
+            withTiming(1, { duration: 100 }),
+        );
+        onPress();
+    };
 
     return (
-        <GHPressable
-            onPress={onPress}
-            onPressIn={() => { scale.value = withSpring(0.8, { damping: 15, stiffness: 400 }); }}
-            onPressOut={() => { scale.value = withSpring(1, { damping: 10, stiffness: 200 }); }}
+        <Pressable
+            onPress={handlePress}
+            android_disableSound
             hitSlop={{ top: 4, bottom: 20, left: 20, right: 20 }}
         >
             <Animated.View style={animStyle}>
                 <MaterialIcons name={name} size={size} color={color} />
             </Animated.View>
-        </GHPressable>
+        </Pressable>
     );
 };
 
@@ -207,11 +233,49 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
             ? queue
             : searchResults;
 
-    // Lyrics state lives in MusicContext now (so the chat header can subscribe).
+    // Local mirror of context showLyrics — updates immediately on tap without
+    // waiting for the MusicContext → AppContext → component re-render chain.
+    const [localShowLyrics, setLocalShowLyrics] = useState(showLyrics);
+    useEffect(() => { setLocalShowLyrics(showLyrics); }, [showLyrics]);
+
     const lyricsScrollRef = useRef<ScrollView>(null);
 
+    // Native-event-driven position (no JS setInterval). Fires every 1000ms via
+    // TrackPlayer's internal progress tracking — JS thread is free between events.
+    const trackProgress = useTrackProgress(1000);
+
+    // displayIsPlaying flips instantly on tap (local state, no context round-trip).
+    // isPlayingRef prevents stale-closure issues in the press handler.
+    // The useEffect always re-syncs to ground truth so if a toggle fails on Android
+    // (e.g. TrackPlayer busy) we snap back to the real state within one event cycle.
+    const isPlayingRef = useRef(musicState.isPlaying);
+    const [displayIsPlaying, setDisplayIsPlaying] = useState(musicState.isPlaying);
+    useEffect(() => {
+        isPlayingRef.current = musicState.isPlaying;
+        setDisplayIsPlaying(musicState.isPlaying);
+    }, [musicState.isPlaying]);
+
+    const handleInstantTogglePlay = useCallback(() => {
+        const next = !isPlayingRef.current;
+        isPlayingRef.current = next;
+        setDisplayIsPlaying(next);
+        togglePlayMusic();
+    }, [togglePlayMusic]);
+    const miniPlayPressHandledRef = useRef(false);
+    const handleMiniPlayPressIn = useCallback(() => {
+        if (!isAndroid) return;
+        miniPlayPressHandledRef.current = true;
+        handleInstantTogglePlay();
+    }, [handleInstantTogglePlay]);
+    const handleMiniPlayPress = useCallback(() => {
+        if (isAndroid && miniPlayPressHandledRef.current) {
+            miniPlayPressHandledRef.current = false;
+            return;
+        }
+        handleInstantTogglePlay();
+    }, [handleInstantTogglePlay]);
+
     // Playback State
-    const [position, setPosition] = useState(0);
     const [duration, setDuration] = useState(0);
     const [isScrubbing, setIsScrubbing] = useState(false);
     const scrubThumbScale = useSharedValue(1);
@@ -225,6 +289,16 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
     const scrollY = useSharedValue(0);              // Scroll position for PIP transition
     const backdropOpacity = useSharedValue(0);      // Backdrop fade
     const expandedBaseHeight = useSharedValue(395); // Dynamic height to prevent lyrics overlap
+
+    // Expand the header when lyrics are active. Lyrics artworkWrapper is 270px tall
+    // vs artwork's 200px — the 70px overflow pushes controls into the search bar.
+    useEffect(() => {
+        expandedBaseHeight.value = withSpring(localShowLyrics ? 465 : 395, {
+            damping: 28,
+            stiffness: 180,
+        });
+    }, [localShowLyrics]);
+
     const [keyboardVisible, setKeyboardVisible] = useState(false);
     const scrollViewRef = useRef<any>(null);
 
@@ -349,35 +423,43 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
         height: expandedBaseHeight.value,
     }));
 
-    // ─── Playback position polling (lyrics tracking lives in MusicContext) ──
-    useEffect(() => {
-        let interval: any;
-        if (musicState.isPlaying && !isSeeking && !isScrubbing) {
-            interval = setInterval(async () => {
-                const pos = await getPlaybackPosition();
-                setPosition(pos / 1000);
-            }, 200);
-        }
-        return () => clearInterval(interval);
-    }, [musicState.isPlaying, isSeeking, isScrubbing]);
-
-    // ─── Animate header height when lyrics toggle ────────────────────────────
-    useEffect(() => {
-        if (showLyrics) {
-            expandedBaseHeight.value = withSpring(465, { damping: 25, stiffness: 120 });
-        } else {
-            expandedBaseHeight.value = withSpring(395, { damping: 25, stiffness: 120 });
-        }
-    }, [showLyrics]);
+    // Position for time labels + display. Sourced from useTrackProgress when the native
+    // hook delivers real values; falls back to a 1s timer via getPlaybackPosition so
+    // the time counter always increments even if useProgress isn't available on this build.
+    const [position, setPosition] = useState(0);
 
     useEffect(() => {
-        if (showLyrics && lyrics.length > 0 && currentLyricIndex >= 0) {
+        if (trackProgress.position > 0) {
+            setPosition(trackProgress.position);
+        }
+    }, [trackProgress.position]);
+
+    // Fallback 1s timer — only active when useTrackProgress returns zeros (not available).
+    useEffect(() => {
+        if (!musicState.isPlaying || isSeeking || isScrubbing) return;
+        if (trackProgress.position > 0 || trackProgress.duration > 0) return; // native hook active
+        const timer = setInterval(async () => {
+            const pos = await getPlaybackPosition();
+            setPosition(pos / 1000);
+        }, 1000);
+        return () => clearInterval(timer);
+    }, [musicState.isPlaying, isSeeking, isScrubbing, trackProgress.position, trackProgress.duration]);
+
+    // ─── Lyrics scroll — track current line ─────────────────────────────────
+    const lastScrolledLyricRef = useRef(-1);
+    useEffect(() => {
+        if (localShowLyrics && lyrics.length > 0 && currentLyricIndex >= 0 &&
+            currentLyricIndex !== lastScrolledLyricRef.current) {
+            lastScrolledLyricRef.current = currentLyricIndex;
+            // animated:false — was true. With currentLyricIndex updating every
+            // 250 ms, animated:true spawned a new scroll animation on every tick,
+            // competing with touch events and causing severe Android jank.
             lyricsScrollRef.current?.scrollTo({
                 y: Math.max(0, currentLyricIndex * 22 - 40),
-                animated: true
+                animated: false,
             });
         }
-    }, [currentLyricIndex, showLyrics]);
+    }, [currentLyricIndex, localShowLyrics]);
 
     useEffect(() => {
         if (musicState.currentSong?.duration) {
@@ -387,20 +469,7 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
         }
     }, [musicState.currentSong]);
 
-    useEffect(() => {
-        let cancelled = false;
-        const syncPosition = async () => {
-            if (!isOpen || !musicState.currentSong) return;
-            const pos = await getPlaybackPosition();
-            if (!cancelled) {
-                setPosition(pos / 1000);
-                setSeekPosition(pos / 1000);
-            }
-        };
-
-        void syncPosition();
-        return () => { cancelled = true; };
-    }, [getPlaybackPosition, isOpen, musicState.currentSong?.id]);
+    // No syncPosition needed — useTrackProgress already reflects current state.
 
     // ─── Song fetch ──────────────────────────────────────────────────────────
     const loadCachedSongs = async (): Promise<Song[] | null> => {
@@ -529,24 +598,32 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
     const progressBarWidthShared = useSharedValue(width - 48);
     const seekSettleTimer = useRef<any>(null);
 
-    // Live, UI-thread-driven thumb percentage (0..1). During scrub it's set by the
-    // gesture; otherwise it tracks the polled `position`.
+    // UI-thread-driven progress (0..1). Gesture scrubs set it directly.
+    // During playback we launch a continuous withTiming to end-of-track so the
+    // bar moves at 60fps (Spotify-style) instead of jumping every 1s.
     const scrubPercent = useSharedValue(0);
     const isScrubbingShared = useSharedValue(false);
 
     useEffect(() => {
-        if (!isScrubbing && duration > 0) {
-            scrubPercent.value = Math.min(position / duration, 1);
+        if (isScrubbing || duration <= 0) return;
+        // Use `position` state (reliable, from either useTrackProgress or fallback timer).
+        const pos = position;
+        const pct = Math.min(pos / duration, 1);
+        cancelAnimation(scrubPercent);
+        scrubPercent.value = pct;
+        if (displayIsPlaying && pos < duration) {
+            // Animate the bar continuously to end-of-track on the UI thread (60fps, zero JS load).
+            scrubPercent.value = withTiming(1, {
+                duration: (duration - pos) * 1000,
+                easing: Easing.linear,
+            });
         }
-    }, [position, duration, isScrubbing]);
+    }, [position, displayIsPlaying, isScrubbing, duration]);
 
     const commitSeek = useCallback(async (targetSec: number) => {
-        // Optimistically pin the displayed position so the thumb doesn't snap
-        // back while the native player completes the seek.
         setSeekPosition(targetSec);
-        setPosition(targetSec);
-        
-        // Ensure shared value is also updated immediately for UI thread consistency
+        // Cancel smooth animation and pin to seek target immediately.
+        cancelAnimation(scrubPercent);
         scrubPercent.value = duration > 0 ? Math.min(targetSec / duration, 1) : 0;
 
         if (seekSettleTimer.current) clearTimeout(seekSettleTimer.current);
@@ -787,19 +864,17 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                             <Animated.View style={[styles.headerOverlay, headerOverlayStyle]} pointerEvents="box-none">
 
                                 {/* Full Player */}
-                                <Animated.View style={[styles.fullPlayerContent, fullPlayerStyle]}>
+                                <Animated.View style={[styles.fullPlayerContent, fullPlayerStyle]} pointerEvents="auto">
                                     <ArtworkView
                                         uri={musicState.currentSong?.image}
-                                        showLyrics={showLyrics}
+                                        showLyrics={localShowLyrics}
                                         lyrics={lyrics}
                                         currentLyricIndex={currentLyricIndex}
                                         lyricsScrollRef={lyricsScrollRef}
                                         themeAccent={themeAccent}
-                                        isPlaying={musicState.isPlaying}
+                                        isPlaying={displayIsPlaying}
                                         onLyricPress={(line: LyricLine) => {
-                                            setPosition(line.time);
                                             setSeekPosition(line.time);
-                                            scrubPercent.value = duration > 0 ? Math.min(line.time / duration, 1) : 0;
                                             commitSeek(line.time);
                                         }}
                                     />
@@ -852,9 +927,13 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                                         <View style={styles.controlsRow}>
                                             <IconButton name="shuffle" size={24} color={shuffle ? themeAccent : 'rgba(255,255,255,0.4)'} onPress={toggleShuffle} />
                                             <IconButton name="skip-previous" size={36} color="rgba(255,255,255,0.7)" onPress={playPrevious} />
-                                            <PlayButton isPlaying={musicState.isPlaying} onPress={togglePlayMusic} accentColor={themeAccent} />
+                                            <PlayButton isPlaying={displayIsPlaying} onPress={handleInstantTogglePlay} accentColor={themeAccent} />
                                             <IconButton name="skip-next" size={36} color="rgba(255,255,255,0.7)" onPress={playNext} />
-                                            <IconButton name="lyrics" size={24} color={showLyrics ? themeAccent : 'rgba(255,255,255,0.4)'} onPress={() => setShowLyrics(!showLyrics)} />
+                                            <IconButton name="lyrics" size={24} color={localShowLyrics ? themeAccent : 'rgba(255,255,255,0.4)'} onPress={() => {
+                                                const next = !localShowLyrics;
+                                                setLocalShowLyrics(next);
+                                                setShowLyrics(next);
+                                            }} />
                                         </View>
                                     </View>
                                 </Animated.View>
@@ -884,9 +963,16 @@ export const MusicPlayerOverlay: React.FC<MusicPlayerOverlayProps> = ({
                                                 </Text>
                                             )}
                                         </View>
-                                        <Pressable onPress={togglePlayMusic} style={styles.miniPlayBtn} hitSlop={15}>
+                                        <Pressable
+                                            onPress={handleMiniPlayPress}
+                                            onPressIn={handleMiniPlayPressIn}
+                                            unstable_pressDelay={0}
+                                            android_disableSound
+                                            style={styles.miniPlayBtn}
+                                            hitSlop={15}
+                                        >
                                             <MaterialIcons
-                                                name={musicState.isPlaying ? 'pause-circle' : 'play-circle'}
+                                                name={displayIsPlaying ? 'pause-circle' : 'play-circle'}
                                                 size={32}
                                                 color="#fff"
                                             />

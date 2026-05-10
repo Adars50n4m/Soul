@@ -15,6 +15,7 @@ import Animated, {
   withTiming,
   withDelay,
   withSequence,
+  cancelAnimation,
   Easing,
 } from 'react-native-reanimated';
 import { useApp } from '../../context/AppContext';
@@ -150,39 +151,82 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
     focusedTabName === 'calls' ? 'calls' : focusedTabName === 'settings' ? 'settings' : 'chats';
 
   const isFirstIndicatorSync = React.useRef(true);
+  const pressHandledRef = React.useRef(false);
   const translateX = useSharedValue(currentIndex * tabWidth);
   const glowProgress = useSharedValue(0);
   const tabBarOpacity = useSharedValue(hasRenderedTabBarOnce ? 0 : 1);
+  // 150 > (tabBarInner height 64 + bottom 34 + margin) = fully off-screen on all devices
+  const entranceY = useSharedValue(hasRenderedTabBarOnce ? 150 : 0);
+  // null = first render (no animation), true/false = was previously hidden/visible
+  const prevHiddenRef = React.useRef<boolean | null>(null);
 
-  // Pill position + glow flash
+  // Pill position + glow flash — fallback for programmatic navigation.
+  // Direct press is handled in onPress for zero-latency response.
   useEffect(() => {
     if (isFirstIndicatorSync.current) {
       isFirstIndicatorSync.current = false;
       translateX.value = currentIndex * tabWidth;
       return;
     }
-    // Flash glow during shift, fade back
-    glowProgress.value = withTiming(1, { duration: 150 }, () => {
-      glowProgress.value = withTiming(0, { duration: 600 });
+    if (pressHandledRef.current) {
+      pressHandledRef.current = false;
+      return;
+    }
+    glowProgress.value = withTiming(1, { duration: 100 }, () => {
+      glowProgress.value = withTiming(0, { duration: 400 });
     });
     translateX.value = withSpring(currentIndex * tabWidth, {
-      damping: 18,
-      stiffness: 120,
-      mass: 0.8,
+      damping: 20,
+      stiffness: 320,
+      mass: 0.7,
     });
   }, [currentIndex, glowProgress, tabWidth, translateX]);
 
   useEffect(() => {
     if (!hasRenderedTabBarOnce) {
       hasRenderedTabBarOnce = true;
-      tabBarOpacity.value = 1;
       return;
     }
+    // iOS: component unmounts on navigation, so this runs on remount
+    entranceY.value = withSpring(0, { damping: 22, stiffness: 200, mass: 0.8 });
     tabBarOpacity.value = withDelay(
-      60,
-      withTiming(1, { duration: 300, easing: Easing.out(Easing.cubic) })
+      30,
+      withTiming(1, { duration: 220, easing: Easing.out(Easing.cubic) })
     );
-  }, [tabBarOpacity]);
+  }, [tabBarOpacity, entranceY]);
+
+  // Android: component stays mounted and returns null — detect hidden→visible via pathname.
+  // withDelay(16) on Reanimated is unreliable on Android for repeated navigations —
+  // Reanimated's animation state machine gets confused after the first run.
+  // requestAnimationFrame is processed after React commits the native frame, giving the
+  // Animated.View one real frame at (y=150, opacity=0) before the spring fires.
+  useEffect(() => {
+    const cp = pathname.toLowerCase();
+    const tr = ['/', '/calls', '/settings', '/(tabs)', '/(tabs)/index', '/(tabs)/calls', '/(tabs)/settings'];
+    const isNowHidden = !tr.some(r => cp === r || cp === r.replace('/(tabs)', '')) || cp.includes('/chat/');
+    const wasHidden = prevHiddenRef.current;
+    prevHiddenRef.current = isNowHidden;
+
+    if (wasHidden === null) return; // first render — no animation
+
+    if (isNowHidden) {
+      // Going to chat — pre-arm while tab bar is null (no visual flash)
+      cancelAnimation(entranceY);
+      cancelAnimation(tabBarOpacity);
+      tabBarOpacity.value = 0;
+      entranceY.value = 150;
+    } else if (wasHidden) {
+      // Returning to tabs — snap to start, then animate via rAF (reliable every time)
+      cancelAnimation(entranceY);
+      cancelAnimation(tabBarOpacity);
+      tabBarOpacity.value = 0;
+      entranceY.value = 150;
+      requestAnimationFrame(() => {
+        entranceY.value = withSpring(0, { damping: 22, stiffness: 200, mass: 0.8 });
+        tabBarOpacity.value = withTiming(1, { duration: 250, easing: Easing.out(Easing.cubic) });
+      });
+    }
+  }, [pathname]);
 
   const indicatorStyle = useAnimatedStyle(() => {
     'worklet';
@@ -241,7 +285,7 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
   const dropDownStyle = useAnimatedStyle(() => {
     'worklet';
     return {
-      transform: [{ translateY: translateY.value }],
+      transform: [{ translateY: translateY.value + entranceY.value }],
     };
   });
 
@@ -331,6 +375,18 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
 
               const onPress = () => {
                 hapticService.impact(Haptics.ImpactFeedbackStyle.Light);
+                if (!isFocused) {
+                  // Animate immediately — don't wait for navigation re-render cycle
+                  pressHandledRef.current = true;
+                  glowProgress.value = withTiming(1, { duration: 100 }, () => {
+                    glowProgress.value = withTiming(0, { duration: 400 });
+                  });
+                  translateX.value = withSpring(index * tabWidth, {
+                    damping: 20,
+                    stiffness: 320,
+                    mass: 0.7,
+                  });
+                }
                 const event = navigation.emit({
                   type: 'tabPress',
                   target: route.key,

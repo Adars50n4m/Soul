@@ -39,6 +39,11 @@ interface Song {
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+const fastTapProps = (handler: () => void) => (
+    Platform.OS === 'android'
+        ? { onPress: handler, unstable_pressDelay: 0, android_disableSound: true }
+        : { onPress: handler }
+);
 
 const InteractiveSeekBar = memo(({
     progressPercent,
@@ -62,12 +67,11 @@ const InteractiveSeekBar = memo(({
     setIsSeeking?: (val: boolean) => void;
 }) => {
     const thumbScale = useSharedValue(1);
-    const barLayout = useRef<{ x: number, width: number } | null>(null);
     const [previewMs, setPreviewMs] = useState<number | null>(null);
     const barRef = useRef<View>(null);
 
     const animatedThumbStyle = useAnimatedStyle(() => ({
-        transform: [{ scale: withTiming(thumbScale.value, { duration: 100 }) }]
+        transform: [{ scale: thumbScale.value }]
     }));
     
     const durationMs = Math.max(0, Number(durationSeconds || 0) * 1000);
@@ -96,14 +100,13 @@ const InteractiveSeekBar = memo(({
 
 
     const seekAbsoluteX = useRef<number>(0);
-    const seekStartPageX = useRef<number>(0);
 
-    const panResponder = useRef(
-        PanResponder.create({
+    const panResponder = React.useMemo(
+        () => PanResponder.create({
             onStartShouldSetPanResponder: () => true,
             onMoveShouldSetPanResponder: () => true,
             onPanResponderGrant: (evt) => {
-                thumbScale.value = 1.4;
+                thumbScale.value = withTiming(1.4, { duration: 80 });
                 setIsSeeking?.(true);
                 const { pageX } = evt.nativeEvent;
                 const relativeX = pageX - seekAbsoluteX.current;
@@ -114,19 +117,20 @@ const InteractiveSeekBar = memo(({
                 handleTouch(relativeX);
             },
             onPanResponderRelease: (evt) => {
-                thumbScale.value = 1;
+                thumbScale.value = withTiming(1, { duration: 100 });
                 setIsSeeking?.(false);
                 const relativeX = evt.nativeEvent.pageX - seekAbsoluteX.current;
                 commitTouch(relativeX);
             },
             onPanResponderTerminate: () => {
-                thumbScale.value = 1;
+                thumbScale.value = withTiming(1, { duration: 100 });
                 setIsSeeking?.(false);
                 setPreviewMs(null);
             },
             onPanResponderTerminationRequest: () => false,
-        })
-    ).current;
+        }),
+        [commitTouch, handleTouch, setIsSeeking, thumbScale]
+    );
 
     return (
         <View style={styles.progressBarWrapper}>
@@ -335,22 +339,22 @@ const ListHeader = memo(({
             {/* Controls Row — shuffle, prev, play, next, repeat, LYRICS icon */}
             {!isKeyboardVisible && (
                 <View style={styles.controlsRow}>
-                    <Pressable onPress={onToggleShuffle} hitSlop={8}>
+                    <Pressable {...fastTapProps(onToggleShuffle)} hitSlop={8}>
                         <MaterialIcons name="shuffle" size={20} color={shuffle ? magentaColor : 'rgba(255,255,255,0.3)'} />
                     </Pressable>
-                    <Pressable onPress={onPrevious} hitSlop={8}>
+                    <Pressable {...fastTapProps(onPrevious)} hitSlop={8}>
                         <MaterialIcons name="skip-previous" size={34} color="rgba(255,255,255,0.7)" />
                     </Pressable>
                     <Pressable
-                        onPress={() => currentSong ? onTogglePlay() : null}
+                        {...fastTapProps(() => { if (currentSong) onTogglePlay(); })}
                         style={[styles.playButton, !currentSong && { opacity: 0.5 }]}
                     >
                         <MaterialIcons name={isPlaying ? "pause" : "play-arrow"} size={44} color="#000" />
                     </Pressable>
-                    <Pressable onPress={onNext} hitSlop={8}>
+                    <Pressable {...fastTapProps(onNext)} hitSlop={8}>
                         <MaterialIcons name="skip-next" size={34} color="rgba(255,255,255,0.7)" />
                     </Pressable>
-                    <Pressable onPress={onToggleRepeat} hitSlop={8}>
+                    <Pressable {...fastTapProps(onToggleRepeat)} hitSlop={8}>
                         <MaterialIcons
                             name={repeatMode === 'one' ? 'repeat-one' : 'repeat'}
                             size={20}
@@ -358,7 +362,7 @@ const ListHeader = memo(({
                         />
                     </Pressable>
                     {currentSong && (
-                        <Pressable onPress={onToggleLyrics} hitSlop={8}>
+                        <Pressable {...fastTapProps(onToggleLyrics)} hitSlop={8}>
                             <MaterialIcons name="lyrics" size={20} color={showLyrics ? magentaColor : 'rgba(255,255,255,0.3)'} />
                         </Pressable>
                     )}
@@ -419,6 +423,8 @@ export default function MusicScreen() {
     const [progress, setProgress] = useState(0);
     const [playbackMs, setPlaybackMs] = useState(0);
     const lastClickTime = useRef<{ [key: string]: number }>({});
+    const isPlayingRef = useRef(musicState.isPlaying);
+    const [displayIsPlaying, setDisplayIsPlaying] = useState(musicState.isPlaying);
     const [keyboardVisible, setKeyboardVisible] = useState(false);
     const isMountedRef = useRef(true);
     const [recommendedSongs, setRecommendedSongs] = useState<Song[]>([]);
@@ -511,6 +517,23 @@ export default function MusicScreen() {
     const backdropBlurOpacity = useAnimatedStyle(() => ({
         opacity: interpolate(slideY.value, [0, height], [1, 0], Extrapolation.CLAMP),
     }));
+
+    useEffect(() => {
+        isPlayingRef.current = musicState.isPlaying;
+        setDisplayIsPlaying(musicState.isPlaying);
+    }, [musicState.isPlaying]);
+
+    const handleTogglePlay = useCallback(() => {
+        if (!musicState.currentSong) return;
+        const next = !isPlayingRef.current;
+        isPlayingRef.current = next;
+        setDisplayIsPlaying(next);
+        void togglePlayMusic().catch((error: unknown) => {
+            console.warn('[Music] togglePlayMusic failed:', error);
+            isPlayingRef.current = musicState.isPlaying;
+            setDisplayIsPlaying(musicState.isPlaying);
+        });
+    }, [musicState.currentSong, musicState.isPlaying, togglePlayMusic]);
 
     useEffect(() => {
         let cancelled = false;
@@ -907,10 +930,10 @@ export default function MusicScreen() {
                         <View style={styles.dragHandle} />
                         <ListHeader
                             currentSong={musicState.currentSong}
-                            isPlaying={musicState.isPlaying}
+                            isPlaying={displayIsPlaying}
                             progress={progress}
                             playbackMs={playbackMs}
-                            onTogglePlay={togglePlayMusic}
+                            onTogglePlay={handleTogglePlay}
                             onSeek={handleSeek}
                             onNext={playNext}
                             onPrevious={playPrevious}

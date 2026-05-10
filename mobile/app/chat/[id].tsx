@@ -78,6 +78,7 @@ import {
 } from '../../constants/sharedTransitions';
 import { Contact, Message } from '../../types';
 import GlassAlert, { AlertButton } from '../../components/ui/GlassAlert';
+import MusicInviteBanner from '../../components/chat/MusicInviteBanner';
 
 const IS_IOS = Platform.OS === 'ios';
 const ENABLE_SHARED_TRANSITIONS = SUPPORT_SHARED_TRANSITIONS;
@@ -201,7 +202,7 @@ const KaraokeLine = React.memo(({ text, lineStart, lineEnd, color, baseColor, ge
 
     return (
         <View
-            style={{ height: 20, justifyContent: 'center', overflow: 'hidden' }}
+            style={{ height: 20, justifyContent: 'center', overflow: 'hidden', alignSelf: 'stretch' }}
             onLayout={(e) => setContainerWidth(e.nativeEvent.layout.width)}
         >
             <Animated.View
@@ -243,7 +244,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
 
     const router = useRouter();
     const isFocused = useIsFocused();
-    const { contacts, messages, sendChatMessage, startCall, activeCall, updateMessage, addReaction, toggleHeart, deleteMessage, musicState, getPlaybackPosition, seekTo, isSeeking, setIsSeeking, currentUser, activeTheme, sendTyping, typingUsers, uploadProgressTracker, connectivity, initializeChatSession, cleanupChatSession, fetchOtherUserProfile, setMusicPartner, joinGroupMusicRoom, leaveGroupMusicRoom, requestMusicSync, startGroupCall, sendMediaLikePulse, remoteLikePulse, offlineService, refreshLocalCache, playbackOwnerChatId, lyrics, currentLyricIndex, showLyrics } = useApp() as any;
+    const { contacts, messages, sendChatMessage, startCall, activeCall, updateMessage, addReaction, toggleHeart, deleteMessage, musicState, getPlaybackPosition, seekTo, isSeeking, setIsSeeking, currentUser, activeTheme, sendTyping, typingUsers, uploadProgressTracker, connectivity, initializeChatSession, cleanupChatSession, fetchOtherUserProfile, setMusicPartner, joinGroupMusicRoom, leaveGroupMusicRoom, requestMusicSync, startGroupCall, sendMediaLikePulse, remoteLikePulse, offlineService, refreshLocalCache, playbackOwnerChatId, lyrics, currentLyricIndex, showLyrics, pendingMusicInvite, acceptMusicInvite, declineMusicInvite } = useApp() as any;
     // Only show music UI in this chat if this chat owns the current playback.
     // Use normalized id for comparison to handle legacy handles.
     const musicVisibleHere = !!musicState?.currentSong && playbackOwnerChatId === id;
@@ -254,7 +255,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
         musicVisibleHere && showLyrics && lyrics?.length > 0 && currentLine?.text
     ) || '';
     const karaokeLineStart: number = currentLine?.time ?? 0;
-    const karaokeLineEnd: number = nextLine?.time ?? (karaokeLineStart + (Number(musicState?.currentSong?.duration) || 5));
+    const karaokeLineEnd: number = nextLine?.time ?? (karaokeLineStart + 5);
     const themeAccent = activeTheme?.primary || '#BC002A';
     const themeAccentSoft = activeTheme?.accent || '#FF6A88';
     const { getPresence } = usePresence();
@@ -2329,6 +2330,26 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                 buttons={alertConfig.buttons}
                 onClose={closeSoulAlert}
             />
+
+            {/* Music invite banner — slides in below header pill when partner starts playing */}
+            {pendingMusicInvite && (
+                <Animated.View
+                    style={[
+                        styles.musicInviteWrap,
+                        { top: HEADER_PILL_TOP + HEADER_PILL_HEIGHT + 8 },
+                    ]}
+                    pointerEvents="box-none"
+                >
+                    <MusicInviteBanner
+                        key={pendingMusicInvite.song.id}
+                        invite={pendingMusicInvite}
+                        accent={activeTheme?.primary || '#BC002A'}
+                        contactName={contact?.name || 'Your friend'}
+                        onAccept={acceptMusicInvite}
+                        onDecline={declineMusicInvite}
+                    />
+                </Animated.View>
+            )}
         </View>
     );
 }
@@ -2396,8 +2417,10 @@ const styles = StyleSheet.create({
     },
     headerInfo: {
         flex: 1,
-        marginLeft: 3,
+        minWidth: 0,
+        marginLeft: 10,
         justifyContent: 'center',
+        overflow: 'hidden',
     },
     contactName: {
         color: '#ffffff',
@@ -2412,7 +2435,6 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         letterSpacing: 0.5,
         textTransform: 'uppercase',
-        marginLeft: -2, // Pull closer to the dot
     },
     headerButton: {
         width: 44,
@@ -2914,6 +2936,12 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         marginLeft: 6,
+    },
+    musicInviteWrap: {
+        position: 'absolute',
+        left: 16,
+        right: 16,
+        zIndex: 1100,
     },
     searchBarWrap: {
         position: 'absolute',

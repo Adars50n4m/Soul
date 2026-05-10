@@ -7,7 +7,7 @@ import { useAuth, AuthProvider, PrivacySettings, PrivacyValue, DEFAULT_PRIVACY }
 import { useChat, ChatProvider } from './ChatContext';
 import { TheaterProvider } from './TheaterContext';
 import { useCall, CallProvider } from './CallContext';
-import { useMusic, MusicProvider, RepeatMode } from './MusicContext';
+import { useMusic, MusicProvider, RepeatMode, MusicInvite } from './MusicContext';
 import { useStatus, StatusProvider } from './StatusContext';
 import { UserStatusGroup, CachedStatus, PendingUpload } from '../types';
 
@@ -147,6 +147,9 @@ interface AppContextType {
     currentLyricIndex: number;
     showLyrics: boolean;
     setShowLyrics: (v: boolean) => void;
+    pendingMusicInvite: MusicInvite | null;
+    acceptMusicInvite: () => Promise<void>;
+    declineMusicInvite: () => void;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -342,6 +345,9 @@ const AppProviderInternal: React.FC<{ children: React.ReactNode }> = ({ children
         currentLyricIndex: music.currentLyricIndex,
         showLyrics: music.showLyrics,
         setShowLyrics: music.setShowLyrics,
+        pendingMusicInvite: music.pendingMusicInvite,
+        acceptMusicInvite: music.acceptMusicInvite,
+        declineMusicInvite: music.declineMusicInvite,
 
         // Settings
         theme,
@@ -489,6 +495,9 @@ export const useAppContext = (): AppContextType => {
             currentLyricIndex: 0,
             showLyrics: false,
             setShowLyrics: () => {},
+            pendingMusicInvite: null,
+            acceptMusicInvite: async () => {},
+            declineMusicInvite: () => {},
             offlineService: null,
         } as any;
     }
