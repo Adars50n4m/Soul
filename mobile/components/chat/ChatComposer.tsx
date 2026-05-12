@@ -15,6 +15,7 @@ import {
     StyleSheet,
     StyleProp,
     ViewStyle,
+    Platform,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -721,6 +722,17 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(({
         setShowMediaPicker(false);
     }, [isExpanded, toggleOptions]);
 
+    // iOS dismisses native pickers via UIKit animation (~300ms). Presenting
+    // the MediaPreviewModal before that finishes loses the modal silently,
+    // so on iOS we defer the state update by one animation cycle.
+    const presentMediaPreview = useCallback((items: MediaItem[]) => {
+        if (Platform.OS === 'ios') {
+            setTimeout(() => setMediaPreview(items), 350);
+        } else {
+            setMediaPreview(items);
+        }
+    }, []);
+
     const handleSelectCamera = useCallback(async () => {
         closeMenu();
         const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
@@ -737,30 +749,33 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(({
         if (!result.canceled && result.assets[0]) {
             const asset = result.assets[0];
             const type = asset.type === 'video' ? 'video' : 'image';
-            setMediaPreview([{ uri: asset.uri, type }]);
+            presentMediaPreview([{ uri: asset.uri, type }]);
         }
-    }, [closeMenu, showSoulAlert]);
+    }, [closeMenu, showSoulAlert, presentMediaPreview]);
 
     const handleSelectGallery = useCallback(async () => {
         closeMenu();
-        const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ['images', 'videos'] as ImagePicker.MediaType[],
-            quality: 0.8,
-            allowsEditing: false,
-            allowsMultipleSelection: true,
-            videoMaxDuration: 600,
-            legacy: true,
-            preferredAssetRepresentationMode:
-                ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
-        });
-        if (!result.canceled && result.assets && result.assets.length > 0) {
-            const items: MediaItem[] = result.assets.map((asset) => ({
-                uri: asset.uri,
-                type: asset.type === 'video' ? 'video' : 'image',
-            }));
-            setMediaPreview(items);
+        try {
+            const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ['images', 'videos'] as ImagePicker.MediaType[],
+                quality: 0.8,
+                allowsEditing: false,
+                allowsMultipleSelection: true,
+                selectionLimit: 10,
+                preferredAssetRepresentationMode:
+                    ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
+            });
+            if (!result.canceled && result.assets && result.assets.length > 0) {
+                const items: MediaItem[] = result.assets.map((asset) => ({
+                    uri: asset.uri,
+                    type: asset.type === 'video' ? 'video' : 'image',
+                }));
+                presentMediaPreview(items);
+            }
+        } catch (error: any) {
+            showSoulAlert('Gallery Error', error?.message || 'Failed to open gallery');
         }
-    }, [closeMenu]);
+    }, [closeMenu, showSoulAlert, presentMediaPreview]);
 
     const handleSelectDocument = useCallback(async () => {
         closeMenu();
@@ -776,13 +791,13 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(({
                     type: 'file',
                     name: asset.name,
                 }));
-                setMediaPreview(items);
+                presentMediaPreview(items);
             }
         } catch (error) {
             console.error('[ChatComposer] Document picking failed:', error);
             showSoulAlert('Error', 'Failed to pick document');
         }
-    }, [closeMenu, showSoulAlert]);
+    }, [closeMenu, showSoulAlert, presentMediaPreview]);
 
     const handleSelectContact = useCallback(() => {
         closeMenu();

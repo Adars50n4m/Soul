@@ -21,8 +21,7 @@
           "fetch",
           "processing",
           "voip",
-          "picture-in-picture",
-          "remote-notification"
+          "picture-in-picture"
         ],
         "LSApplicationQueriesSchemes": [
           "mailto"

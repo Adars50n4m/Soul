@@ -176,9 +176,9 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
       glowProgress.value = withTiming(0, { duration: 400 });
     });
     translateX.value = withSpring(currentIndex * tabWidth, {
-      damping: 20,
-      stiffness: 320,
-      mass: 0.7,
+      damping: 18,
+      stiffness: 120,
+      mass: 0.8,
     });
   }, [currentIndex, glowProgress, tabWidth, translateX]);
 
@@ -382,9 +382,9 @@ const TabBar = ({ state, descriptors, navigation }: any) => {
                     glowProgress.value = withTiming(0, { duration: 400 });
                   });
                   translateX.value = withSpring(index * tabWidth, {
-                    damping: 20,
-                    stiffness: 320,
-                    mass: 0.7,
+                    damping: 18,
+                    stiffness: 120,
+                    mass: 0.8,
                   });
                 }
                 const event = navigation.emit({

@@ -10,6 +10,7 @@ import {
   StatusBar,
   useWindowDimensions,
   Alert,
+  Modal,
 } from 'react-native';
 import { SoulLoader } from './ui/SoulLoader';
 import { Image } from 'expo-image';
@@ -31,6 +32,7 @@ import Animated, {
   SlideInUp,
   SlideOutUp,
   ZoomIn,
+  runOnJS,
 } from 'react-native-reanimated';
 
 interface MediaPreviewModalProps {
@@ -96,17 +98,13 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   // Crop modal state
   const [showCropModal, setShowCropModal] = useState(false);
 
-  const currentMedia = mediaItems[currentIndex] || (initialMediaItems ? initialMediaItems[0] : { uri: mediaUri || '', type: mediaType || 'image' });
-  const currentUri = currentMedia.uri;
-  const currentType = currentMedia.type;
-
   const videoRef = useRef<Video>(null);
   const viewShotRef = useRef<View>(null);
   const { activeTheme } = useApp();
 
   // Reanimated shared values for enter/exit
-  const containerOpacity = useSharedValue(0);
-  const containerScale = useSharedValue(0.92);
+  const containerOpacity = useSharedValue(visible ? 1 : 0);
+  const containerScale = useSharedValue(visible ? 1 : 1);
   // Tools states
   const [isDrawingMode, setIsDrawingMode] = useState(false);
   const [paths, setPaths] = useState<{ path: string; color: string; strokeWidth: number }[]>([]);
@@ -119,30 +117,36 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
 
 
   useEffect(() => {
-    Promise.resolve().then(() => {
-        if (initialMediaItems && initialMediaItems.length > 0) {
-            setMediaItems(initialMediaItems);
-        } else if (mediaUri && mediaType) {
-            setMediaItems([{ uri: mediaUri, type: mediaType }]);
-        } else {
-            setMediaItems([]);
-        }
-        setCaption('');
-        setCurrentIndex(0);
-        setPaths([]);
-        setTextOverlays([]);
-    });
+    if (initialMediaItems && initialMediaItems.length > 0) {
+        setMediaItems(initialMediaItems);
+    } else if (mediaUri && mediaType) {
+        setMediaItems([{ uri: mediaUri, type: mediaType }]);
+    } else {
+        setMediaItems([]);
+    }
+    setCaption('');
+    setCurrentIndex(0);
+    setPaths([]);
+    setTextOverlays([]);
   }, [mediaUri, mediaType, initialMediaItems]);
+
+  // Internal state to handle the animation-unmount dance
+  const [renderState, setRenderState] = useState(visible);
 
   useEffect(() => {
     if (visible) {
+      setRenderState(true);
       StatusBar.setHidden(true);
       containerOpacity.value = withTiming(1, { duration: 280, easing: Easing.out(Easing.cubic) });
       containerScale.value = withSpring(1, { damping: 18, stiffness: 200, mass: 0.8 });
     } else {
       StatusBar.setHidden(false);
       containerOpacity.value = withTiming(0, { duration: 180, easing: Easing.in(Easing.cubic) });
-      containerScale.value = withTiming(0.94, { duration: 180 });
+      containerScale.value = withTiming(0.94, { duration: 180 }, (finished) => {
+          if (finished) {
+              runOnJS(setRenderState)(false);
+          }
+      });
     }
   }, [visible, containerOpacity, containerScale]);
 
@@ -151,11 +155,27 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
     transform: [{ scale: containerScale.value }],
   }));
 
-  // animatedBgStyle is no longer needed — outer bg is always solid black
+  if (!renderState && !visible) return null;
 
-  if (!visible) return null;
+  const currentMedia = mediaItems[0] 
+    ? mediaItems[currentIndex] 
+    : (initialMediaItems && initialMediaItems[0] 
+        ? initialMediaItems[currentIndex || 0] 
+        : (mediaUri ? { uri: mediaUri, type: mediaType || 'image' } : null));
 
-  // Tools Handlers
+  if (!currentMedia && visible) {
+      // Fallback to avoid empty render if state hasn't caught up
+      return (
+          <Modal visible={true} transparent>
+              <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
+                  <SoulLoader size={50} />
+              </View>
+          </Modal>
+      );
+  }
+
+  const currentUri = currentMedia?.uri || '';
+  const currentType = currentMedia?.type || 'image';
   const applyDrawingsToImage = async () => {
     if (paths.length === 0 && textOverlays.length === 0) return currentUri;
     
@@ -313,8 +333,15 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   };
 
   return (
-    <View style={styles.container}>
-      <Animated.View style={[StyleSheet.absoluteFill, animatedContainerStyle]}>
+    <Modal
+        visible={renderState || visible}
+        transparent
+        animationType="none"
+        statusBarTranslucent
+        onRequestClose={handleClose}
+    >
+        <View style={styles.container}>
+          <Animated.View style={[StyleSheet.absoluteFill, animatedContainerStyle]}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.keyboardAvoid}
@@ -505,8 +532,9 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           onClose={handleCropClose}
           onCropComplete={handleCropComplete}
         />
-      </Animated.View>
-    </View>
+        </Animated.View>
+      </View>
+    </Modal>
   );
 };
 
@@ -521,13 +549,8 @@ const canvasTextShadow = Platform.select({
 
 const styles = StyleSheet.create({
   container: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    flex: 1,
     backgroundColor: '#000000',
-    zIndex: 998,
   },
   keyboardAvoid: {
     flex: 1,

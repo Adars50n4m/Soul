@@ -62,6 +62,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { usePresence } from '../../context/PresenceContext';
 import { useScrollMotion } from '../../components/navigation/ScrollMotionProvider';
 import { normalizeId, getSuperuserName, LEGACY_TO_UUID, UUID_TO_LEGACY } from '../../utils/idNormalization';
+import { setStatusMorphOrigin } from '../../utils/statusMorphOrigins';
 import {
   getProfileAvatarTransitionTag,
   PROFILE_AVATAR_SHARED_TRANSITION,
@@ -801,6 +802,7 @@ export default function HomeScreen() {
     unfriendContact,
     activeTheme,
     refreshLocalCache,
+    refreshStatuses,
     typingUsers,
     connectivity,
     isReady,
@@ -1219,7 +1221,13 @@ const headerBackgroundStyle = useAnimatedStyle(() => {
   }, [visibleContacts, pinnedChatIds, chatFilter]);
 
   const contactsWithStories = useMemo(() => {
-    return visibleContacts.filter(c => contactStatusGroupsMap.has(c.id));
+    const filtered = visibleContacts.filter(c => contactStatusGroupsMap.has(c.id));
+    console.log('[HomeScreen] status rail join →', {
+      visibleContactIds: visibleContacts.map(c => ({ id: c.id, name: c.name })),
+      statusGroupUserIds: Array.from(contactStatusGroupsMap.keys()),
+      matchedContacts: filtered.map(c => ({ id: c.id, name: c.name })),
+    });
+    return filtered;
   }, [visibleContacts, contactStatusGroupsMap]);
 
   const isNoteValid = (timestamp?: string) => {
@@ -1231,17 +1239,33 @@ const headerBackgroundStyle = useAnimatedStyle(() => {
   };
 
   const handleStatusPress = (contact: Contact, latestStatus?: any) => {
-    router.push({
+    const morphKey = `status-hero-${contact.id}`;
+    const navigate = () => router.push({
       pathname: '/view-status',
       params: {
         id: contact.id,
-        sharedTag: `status-hero-${contact.id}`,
+        sharedTag: morphKey,
         statusId: latestStatus?.id || '',
         mediaKey: latestStatus?.mediaKey || '',
         uriHint: latestStatus?.mediaLocalPath || latestStatus?.mediaUrl || '',
         mediaType: latestStatus?.mediaType || '',
       },
     });
+    // Capture the rail card's screen-space rect at tap time so view-status
+    // can morph from this exact position into fullscreen and back.
+    const node = statusRefs.current[contact.id];
+    if (node && typeof node.measureInWindow === 'function') {
+      try {
+        node.measureInWindow((x: number, y: number, w: number, h: number) => {
+          if (typeof x === 'number' && typeof y === 'number' && w > 0 && h > 0) {
+            setStatusMorphOrigin(morphKey, { x, y, width: w, height: h, borderRadius: 24 });
+          }
+          navigate();
+        });
+        return;
+      } catch {}
+    }
+    navigate();
   };
 
   const handleProfilePress = useCallback(async (contact: Contact, layout: { x: number, y: number, width: number, height: number }) => {
@@ -1776,18 +1800,24 @@ const headerBackgroundStyle = useAnimatedStyle(() => {
   const triggerRefresh = useCallback(async () => {
     if (isRefreshing) return;
     setIsRefreshing(true);
-    
+
     // Premium Haptic: Successful start
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
     try {
-      await refreshLocalCache();
+      // Refresh contacts AND statuses in parallel. Previously only contacts
+      // were refreshed, so a manual pull-down never pulled in a friend's
+      // newly-posted status if realtime didn't fire.
+      await Promise.all([
+        refreshLocalCache(),
+        refreshStatuses(),
+      ]);
     } catch (error) {
-      console.warn('[HomeScreen] refreshLocalCache failed:', error);
+      console.warn('[HomeScreen] refresh failed:', error);
     } finally {
       setIsRefreshing(false);
     }
-  }, [isRefreshing, refreshLocalCache]);
+  }, [isRefreshing, refreshLocalCache, refreshStatuses]);
 
 
   const renderHeader = useCallback(() => (

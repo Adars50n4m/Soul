@@ -172,11 +172,28 @@ class StatusService {
     }
   }
 
-  async getStatusFeed(): Promise<UserStatusGroup[]> {
+  /**
+   * @param options.syncFirst Default true. When true, pulls fresh server state
+   * into local cache BEFORE reading — used by feed refreshes so a friend's
+   * just-posted status is visible. Pass false from screens that only need an
+   * instant local-cache snapshot (e.g. the status viewer right after a tap,
+   * which would otherwise show a black flash while waiting on the network).
+   */
+  async getStatusFeed(options: { syncFirst?: boolean } = {}): Promise<UserStatusGroup[]> {
+    const { syncFirst = true } = options;
     const db = await this.getDb();
     const actor = await this.resolveStatusActor();
     if (!actor?.id) return [];
-    
+
+    // Pull fresh server state into the local cache BEFORE reading. The old
+    // fire-and-forget pattern returned a stale snapshot whenever a realtime
+    // INSERT triggered a refresh — the friend's new row hadn't landed in
+    // SQLite yet, so the UI rendered the pre-insert feed and never re-read.
+    // If offline, the swallow falls back to whatever the cache already has.
+    if (syncFirst) {
+      await this.syncStatusFeedFromSupabase(actor.id).catch(() => {});
+    }
+
     const now = Date.now();
     let cachedUsers: CachedUser[] = [];
     try {
@@ -208,29 +225,45 @@ class StatusService {
       if (!status.isViewed) group.hasUnviewed = true;
     }
 
-    this.syncStatusFeedFromSupabase(actor.id).catch(() => {});
-
-    return Array.from(groupsMap.values()).sort((a, b) => {
+    const result = Array.from(groupsMap.values()).sort((a, b) => {
       if (a.isMine) return -1; if (b.isMine) return 1;
       if (a.hasUnviewed && !b.hasUnviewed) return -1;
       if (!a.hasUnviewed && b.hasUnviewed) return 1;
       return 0;
     });
+    console.log('[StatusService] getStatusFeed result:', {
+      groupCount: result.length,
+      groups: result.map(g => ({
+        userId: g.user.id,
+        displayName: (g.user as any).displayName || (g.user as any).username,
+        statusCount: g.statuses.length,
+        isMine: g.isMine,
+      })),
+    });
+    return result;
   }
 
   private async syncStatusFeedFromSupabase(currentUserId: string): Promise<void> {
     const db = await this.getDb();
     try {
       const { data: serverStatuses, error } = await supabase.from('statuses').select('*').gt('expires_at', new Date().toISOString());
-      if (error) throw error;
+      if (error) {
+        console.warn('[StatusService] supabase statuses query error:', error);
+        throw error;
+      }
       const userIds = Array.from(new Set((serverStatuses || []).map(s => s.user_id).filter(Boolean)));
+      console.log('[StatusService] syncStatusFeedFromSupabase →', {
+        currentUserId,
+        rowCount: serverStatuses?.length || 0,
+        userIds,
+      });
       if (userIds.length > 0) {
         const { data: profiles } = await supabase.from('profiles').select('*').in('id', userIds);
         if (profiles) {
           for (const profile of profiles) {
             const contact = await db.getFirstAsync<any>('SELECT local_avatar_uri FROM contacts WHERE id = ?', [profile.id]);
             await db.runAsync(
-              'INSERT OR REPLACE INTO cached_users (id, username, display_name, avatar_url, avatar_type, teddy_variant, local_avatar_uri, soul_note, soul_note_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+              'INSERT OR REPLACE INTO cached_users (id, username, display_name, avatar_url, avatar_type, teddy_variant, local_avatar_uri, soul_note, soul_note_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
               [profile.id, profile.username, profile.display_name, profile.avatar_url, profile.avatar_type || 'default', profile.teddy_variant, contact?.local_avatar_uri, profile.soul_note, profile.soul_note_at ? Date.parse(profile.soul_note_at) : null]
             );
           }
@@ -240,7 +273,9 @@ class StatusService {
         const existing = await db.getFirstAsync<any>('SELECT is_viewed as isViewed, media_local_path as mediaLocalPath, media_key as mediaKey, duration FROM cached_statuses WHERE id = ?', [String(s.id)]);
         await db.runAsync('INSERT OR REPLACE INTO cached_statuses (id, user_id, media_type, media_key, caption, duration, expires_at, is_viewed, is_mine, created_at, media_local_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [String(s.id), s.user_id, s.media_type, s.media_key || existing?.mediaKey, s.caption, s.duration || existing?.duration || this.getStatusDuration(s.media_type), Date.parse(s.expires_at), existing?.isViewed || 0, s.user_id === currentUserId ? 1 : 0, Date.parse(s.created_at), existing?.mediaLocalPath || null]);
       }
-    } catch (_) {}
+    } catch (err) {
+      console.warn('[StatusService] syncStatusFeedFromSupabase failed:', err);
+    }
   }
 
   async onStatusViewed(statusId: string, userId: string): Promise<void> {
