@@ -1101,14 +1101,14 @@ class WebRTCService {
         }
     }
 
-    private async getOrCreatePeerConnection(userId: string): Promise<RTCPeerConnection> {
+    private async getOrCreatePeerConnection(userId: string, overrideConfig?: any): Promise<RTCPeerConnection> {
         if (this.peerConnections.has(userId)) {
             return this.peerConnections.get(userId)!;
         }
 
         console.log(`[WebRTCService] 🏗️ Creating PeerConnection for user: ${userId}`);
-        const configs = this.getPeerConnectionConfigs();
-        const pc = this.tryCreatePeerConnection(configs[0], `MeshPeer-${userId.substring(0, 8)}`, userId);
+        const configs = await this.getPeerConnectionConfigs();
+        const pc = this.tryCreatePeerConnection(overrideConfig || configs[0], `MeshPeer-${userId.substring(0, 8)}`, userId);
         
         this.peerConnections.set(userId, pc);
 

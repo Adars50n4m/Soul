@@ -32,11 +32,13 @@ export const CustomAccordion = ({
     <BaseAccordion.Accordion 
       style={[styles.container, containerStyle]}
     >
-      <BaseAccordion.Header style={styles.header}>
-        <Text style={[styles.title, titleStyle]}>{title}</Text>
-        <BaseAccordion.HeaderIcon>
-          <Feather name="chevron-down" size={20} color={iconColor} />
-        </BaseAccordion.HeaderIcon>
+      <BaseAccordion.Header>
+        <View style={styles.header}>
+          <Text style={[styles.title, titleStyle]}>{title}</Text>
+          <BaseAccordion.HeaderIcon>
+            <Feather name="chevron-down" size={20} color={iconColor} />
+          </BaseAccordion.HeaderIcon>
+        </View>
       </BaseAccordion.Header>
 
       {preview && (

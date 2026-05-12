@@ -28,6 +28,7 @@ import VoiceNotePlayer from '../../components/chat/VoiceNotePlayer';
 import ProgressiveBlur from '../../components/chat/ProgressiveBlur';
 import MessageBubble from '../../components/chat/MessageBubble';
 import MessageContextMenu from '../../components/chat/MessageContextMenu';
+import TypingBubble from '../../components/chat/TypingBubble';
 import { ChatStyles, SCREEN_WIDTH, SCREEN_HEIGHT } from '../../components/chat/ChatStyles';
 import { applyGroupedMediaLocalUri, getMessageMediaItems, sanitizeSongTitle, isMessageEmpty } from '../../utils/chatUtils';
 import { proxySupabaseUrl } from '../../config/api';
@@ -2077,6 +2078,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                                                         scrollEventThrottle={16}
                                                         keyboardShouldPersistTaps="handled"
                                                         keyboardDismissMode="on-drag"
+                                                        ListHeaderComponent={<TypingBubble visible={isTyping} />}
                                                         ListEmptyComponent={
                                                             <View style={styles.emptyChat}>
                                                                 <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />
@@ -2104,6 +2106,7 @@ export default function SingleChatScreen({ id: propsId, isOverlay, user: propsUs
                                                 scrollEventThrottle={16}
                                                 keyboardShouldPersistTaps="handled"
                                                 keyboardDismissMode="on-drag"
+                                                ListHeaderComponent={<TypingBubble visible={isTyping} />}
                                                 ListEmptyComponent={
                                                     <View style={styles.emptyChat}>
                                                         <MaterialIcons name="chat-bubble-outline" size={60} color="rgba(255,255,255,0.1)" />

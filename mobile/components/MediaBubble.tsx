@@ -22,8 +22,8 @@ import { Image } from 'expo-image'; // expo-image has built-in disk+memory cache
 import { MaterialIcons } from '@expo/vector-icons';
 import GlassView from './ui/GlassView';
 import { mediaDownloadService, formatBytes } from '../services/MediaDownloadService';
-import { offlineService, MediaStatus } from '../services/LocalDBService';
-import { Message } from '../types';
+import { offlineService } from '../services/LocalDBService';
+import { Message, MediaStatus } from '../types';
 
 
 interface MediaBubbleProps {

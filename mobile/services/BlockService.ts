@@ -30,7 +30,7 @@ export const blockService = {
         headers: { 'x-user-id': currentUserId },
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as { success?: boolean; blockedByMe?: boolean; blockedMe?: boolean };
         if (data?.success) {
           return toRelationship(!!data.blockedByMe, !!data.blockedMe);
         }
@@ -55,7 +55,7 @@ export const blockService = {
         headers: { 'x-user-id': currentUserId },
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as { success?: boolean; blocks?: any[] };
         if (data?.success && Array.isArray(data.blocks)) {
           return data.blocks.reduce((acc: Record<string, BlockRelationship>, row: any) => {
             const targetId = row.userId || row.id;

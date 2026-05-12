@@ -22,12 +22,12 @@ interface StaggeredViewProps {
    * Direction of the entering animation (1 for top-to-bottom, -1 for bottom-to-top).
    * Defaults to 1.
    */
-  enterDirection?: number;
+  enterDirection?: 1 | -1;
   /**
    * Direction of the exiting animation.
    * Defaults to -1.
    */
-  exitDirection?: number;
+  exitDirection?: 1 | -1;
   /**
    * Initial delay before the first animation starts.
    */
@@ -77,7 +77,7 @@ export const StaggeredView = ({
       initialEnteringDelay={initialEnteringDelay}
       entering={entering}
       exiting={exiting}
-      style={style}
+      style={(style || undefined) as ViewStyle | undefined}
     >
       {children}
     </Stagger>

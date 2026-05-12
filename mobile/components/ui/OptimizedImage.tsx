@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, View, ViewStyle, StyleProp } from 'react-native';
 import { SoulLoader } from './SoulLoader';
 import { Image, ImageProps, ImageContentFit } from 'expo-image';
 
@@ -54,7 +54,7 @@ export const OptimizedImage = ({
   }, [blurhash]);
 
   return (
-    <View style={[styles.container, style]}>
+    <View style={[styles.container, style as StyleProp<ViewStyle>]}>
       <Image
         source={source}
         placeholder={placeholder}

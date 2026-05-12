@@ -13,6 +13,7 @@ import { Video, ResizeMode } from 'expo-av';
 import { useFonts, DancingScript_700Bold } from '@expo-google-fonts/dancing-script';
 import { AppContext, AppProvider } from '../context/AppContext';
 import { PresenceProvider } from '../context/PresenceContext';
+import { supabase } from '../config/supabase';
 import { backgroundSyncService } from '../services/BackgroundSyncService';
 import { notificationService } from '../services/NotificationService';
 import PipOverlay from '../components/PipOverlay';

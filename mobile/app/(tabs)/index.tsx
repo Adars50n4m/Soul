@@ -1212,13 +1212,31 @@ const headerBackgroundStyle = useAnimatedStyle(() => {
       list = list.filter(c => (c as any).isGroup === true);
     }
 
-    // Sort pinned chats to top (Signal/WhatsApp style)
+    // Resolve the freshest available timestamp for each contact: prefer
+    // the in-memory last message (real-time), fall back to the contact
+    // record's lastMessage timestamp fields, finally 0 for "never". Read
+    // directly from `messages` here instead of `lastMessagesMap` since
+    // that memo is declared further down the component body.
+    const tsOf = (c: Contact): number => {
+      const chatMsgs = messages[c.id] || [];
+      const lastMsg = chatMsgs[chatMsgs.length - 1];
+      const tsStr = lastMsg?.timestamp
+        || (c as any).lastMessageTimestamp
+        || (c as any).lastMessageAt
+        || '';
+      if (!tsStr) return 0;
+      const parsed = Date.parse(tsStr);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    // WhatsApp-style: pinned first, then most-recent message first.
     return list.sort((a, b) => {
       const aPinned = pinnedChatIds.includes(a.id) ? 1 : 0;
       const bPinned = pinnedChatIds.includes(b.id) ? 1 : 0;
-      return bPinned - aPinned; // pinned first
+      if (aPinned !== bPinned) return bPinned - aPinned;
+      return tsOf(b) - tsOf(a);
     });
-  }, [visibleContacts, pinnedChatIds, chatFilter]);
+  }, [visibleContacts, pinnedChatIds, chatFilter, messages]);
 
   const contactsWithStories = useMemo(() => {
     const filtered = visibleContacts.filter(c => contactStatusGroupsMap.has(c.id));

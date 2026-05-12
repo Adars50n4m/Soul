@@ -81,7 +81,10 @@ const ChatListContextMenu = ({
     if (!visible || !chatItem || !layout) return null;
 
     const ACTION_ITEM_HEIGHT = 50;
-    const numberOfActions = 4; // Pin, Mute, Archive, Cancel
+    // Pin, Mute, Select, Archive, Delete, Cancel — must match the actual
+    // Pressables rendered below or the menu overflows hidden and the
+    // "place above" overflow check uses the wrong height.
+    const numberOfActions = 6;
     const ACTION_MENU_HEIGHT = numberOfActions * ACTION_ITEM_HEIGHT;
     const GAP = 12;
 

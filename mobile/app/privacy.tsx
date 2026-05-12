@@ -1,7 +1,8 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet, StatusBar, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useApp, PrivacyValue } from '../context/AppContext';
+import { useApp } from '../context/AppContext';
+import { PrivacyValue } from '../context/AuthContext';
 import GlassView from '../components/ui/GlassView';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
