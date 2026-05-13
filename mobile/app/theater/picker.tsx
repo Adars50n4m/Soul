@@ -19,6 +19,8 @@ import { MaterialIcons } from '@expo/vector-icons';
 import Animated, {
     FadeIn,
     FadeOut,
+    SlideInDown,
+    SlideOutDown,
     useSharedValue,
     useAnimatedStyle,
     withTiming,
@@ -207,10 +209,24 @@ export default function TheaterPickerScreen() {
         };
     }, [query, activePill, fetchForState]);
 
+    const [visible, setVisible] = useState(true);
+    const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
     const handleClose = useCallback(() => {
-        if (router.canGoBack()) router.back();
-        else router.replace('/' as any);
+        if (closeTimerRef.current) return;
+        setVisible(false);
+        closeTimerRef.current = setTimeout(() => {
+            closeTimerRef.current = null;
+            if (router.canGoBack()) router.back();
+            else router.replace('/' as any);
+        }, 280);
     }, [router]);
+
+    useEffect(() => {
+        return () => {
+            if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+        };
+    }, []);
 
     const handlePickVideo = useCallback(async (video: YouTubeSnippet) => {
         if (!chatId) {
@@ -312,13 +328,20 @@ export default function TheaterPickerScreen() {
 
     return (
         <View style={styles.root}>
-            <Pressable style={StyleSheet.absoluteFill} onPress={handleClose}>
-                <View style={[StyleSheet.absoluteFill, styles.backdrop]} />
-            </Pressable>
+            {visible && (
+                <Pressable style={StyleSheet.absoluteFill} onPress={handleClose}>
+                    <Animated.View
+                        entering={FadeIn.duration(260)}
+                        exiting={FadeOut.duration(240)}
+                        style={[StyleSheet.absoluteFill, styles.backdrop]}
+                    />
+                </Pressable>
+            )}
 
+            {visible && (
             <Animated.View
-                entering={FadeIn.duration(220)}
-                exiting={FadeOut.duration(180)}
+                entering={SlideInDown.springify().damping(22).stiffness(180).mass(0.7)}
+                exiting={SlideOutDown.duration(280)}
                 style={[
                     styles.sheet,
                     { paddingTop: 8, paddingBottom: insets.bottom + 6 },
@@ -463,6 +486,7 @@ export default function TheaterPickerScreen() {
                     />
                 )}
             </Animated.View>
+            )}
 
             {submitting ? (
                 <Animated.View

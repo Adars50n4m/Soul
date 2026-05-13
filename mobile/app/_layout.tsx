@@ -386,9 +386,9 @@ function RootContent() {
         }} />
         <Stack.Screen name="theater/picker" options={{
           presentation: 'transparentModal',
-          animation: 'fade',
+          animation: 'none',
           headerShown: false,
-          gestureEnabled: true,
+          gestureEnabled: false,
           contentStyle: { backgroundColor: 'transparent' },
         }} />
       </Stack>
