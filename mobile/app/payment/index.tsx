@@ -7,6 +7,7 @@ import {
     TextInput,
     Linking,
     Alert,
+    Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -70,6 +71,21 @@ const DIAL_PAD: string[][] = [
 ];
 
 const OPERATORS = ['+', '−', '×', '÷'];
+
+// iOS doesn't have a system-level upi:// chooser like Android. Each UPI
+// app registers its own scheme, so we fall back to them in priority order
+// if the generic upi:// scheme isn't claimed by anything.
+const UPI_FALLBACK_APPS: { name: string; scheme: string }[] = [
+    { name: 'Google Pay', scheme: 'gpay://upi/pay' },
+    { name: 'Google Pay', scheme: 'tez://upi/pay' },
+    { name: 'PhonePe', scheme: 'phonepe://pay' },
+    { name: 'Paytm', scheme: 'paytmmp://pay' },
+    { name: 'Paytm', scheme: 'paytm://pay' },
+    { name: 'BHIM', scheme: 'bhim://pay' },
+    { name: 'CRED', scheme: 'credpay://pay' },
+    { name: 'MobiKwik', scheme: 'mobikwik://pay' },
+    { name: 'Amazon Pay', scheme: 'amazonpay://pay' },
+];
 
 export default function PaymentScreen() {
     const router = useRouter();
@@ -137,25 +153,50 @@ export default function PaymentScreen() {
             Alert.alert('UPI ID', 'Enter a valid UPI ID (e.g. name@okhdfcbank).');
             return;
         }
-        const params = new URLSearchParams({
+        const queryString = new URLSearchParams({
             pa: trimmedUpi,
             pn: 'Recipient',
             am: total.toFixed(2),
             cu: 'INR',
             tn: note.trim() || 'Paid via Soul',
-        });
-        const url = `upi://pay?${params.toString()}`;
-        try {
-            const supported = await Linking.canOpenURL(url);
-            if (!supported) {
-                Alert.alert('No UPI app', 'No UPI-capable app found on this device.');
-                return;
+        }).toString();
+
+        const tryOpen = async (url: string): Promise<boolean> => {
+            try {
+                const ok = await Linking.canOpenURL(url);
+                if (!ok) return false;
+                await Linking.openURL(url);
+                return true;
+            } catch {
+                return false;
             }
-            await Linking.openURL(url);
+        };
+
+        // Android: upi:// is the canonical NPCI scheme; system shows app chooser.
+        // iOS: try upi:// first (some apps register it), then fall back to
+        // each app-specific scheme until one is installed.
+        const opened = await tryOpen(`upi://pay?${queryString}`);
+        if (opened) {
             handleClose();
-        } catch (err: any) {
-            Alert.alert('Error', err?.message || 'Could not launch UPI app.');
+            return;
         }
+
+        if (Platform.OS === 'ios') {
+            for (const app of UPI_FALLBACK_APPS) {
+                const ok = await tryOpen(`${app.scheme}?${queryString}`);
+                if (ok) {
+                    handleClose();
+                    return;
+                }
+            }
+        }
+
+        Alert.alert(
+            'No UPI app found',
+            Platform.OS === 'ios'
+                ? 'Install a UPI app like PhonePe, Google Pay, or Paytm to send money.'
+                : 'No UPI-capable app is installed on this device.',
+        );
     }, [total, upiId, note, handleClose]);
 
     return (

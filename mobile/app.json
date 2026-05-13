@@ -24,7 +24,17 @@
           "picture-in-picture"
         ],
         "LSApplicationQueriesSchemes": [
-          "mailto"
+          "mailto",
+          "upi",
+          "tez",
+          "gpay",
+          "phonepe",
+          "paytmmp",
+          "paytm",
+          "bhim",
+          "credpay",
+          "mobikwik",
+          "amazonpay"
         ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
