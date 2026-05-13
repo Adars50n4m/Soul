@@ -16,84 +16,60 @@ import Animated, {
     FadeOut,
     SlideInDown,
     SlideOutDown,
-    useSharedValue,
-    useAnimatedStyle,
-    withSpring,
-    withTiming,
-    Easing,
 } from 'react-native-reanimated';
 import GlassView from '../../components/ui/GlassView';
 import { useApp } from '../../context/AppContext';
 
 const PAY_SHARED_TAG = 'soul-pay-pill';
 
-const safeEvalExpression = (expr: string): number | null => {
-    const trimmed = expr.replace(/\s/g, '');
-    if (!trimmed) return null;
-    if (!/^[\d+\-*/.()]+$/.test(trimmed)) return null;
-    if (/[+\-*/.]$/.test(trimmed)) return null;
-    try {
-        // eslint-disable-next-line no-new-func
-        const result = new Function(`"use strict"; return (${trimmed})`)();
-        if (typeof result !== 'number' || isNaN(result) || !isFinite(result)) return null;
-        return Math.round(result * 100) / 100;
-    } catch {
-        return null;
-    }
-};
-
-const OPERATOR_MAP: Record<string, string> = {
+const OP_DISPLAY_TO_INTERNAL: Record<string, string> = {
     '÷': '/',
     '×': '*',
     '−': '-',
     '+': '+',
 };
 
-const KEYPAD: string[][] = [
-    ['7', '8', '9', '÷'],
-    ['4', '5', '6', '×'],
-    ['1', '2', '3', '−'],
-    ['.', '0', '⌫', '+'],
-];
-
-type KeyProps = {
-    label: string;
-    accent: string;
-    onPress: () => void;
+const safeEvalExpression = (display: string): number => {
+    const internal = display
+        .replace(/\s/g, '')
+        .replace(/[÷×−]/g, (c) => OP_DISPLAY_TO_INTERNAL[c] || c);
+    if (!internal) return 0;
+    if (!/^[\d+\-*/.]+$/.test(internal)) return 0;
+    if (/^\d+(\.\d+)?$/.test(internal)) return parseFloat(internal);
+    if (/[+\-*/.]$/.test(internal)) {
+        // dangling operator → drop it for live evaluation
+        const trimmed = internal.replace(/[+\-*/.]+$/, '');
+        if (!trimmed) return 0;
+        try {
+            // eslint-disable-next-line no-new-func
+            const r = new Function(`"use strict"; return (${trimmed})`)();
+            if (typeof r !== 'number' || !isFinite(r)) return 0;
+            return Math.round(r * 100) / 100;
+        } catch {
+            return 0;
+        }
+    }
+    try {
+        // eslint-disable-next-line no-new-func
+        const r = new Function(`"use strict"; return (${internal})`)();
+        if (typeof r !== 'number' || !isFinite(r)) return 0;
+        return Math.round(r * 100) / 100;
+    } catch {
+        return 0;
+    }
 };
 
-const Key: React.FC<KeyProps> = React.memo(({ label, accent, onPress }) => {
-    const pressed = useSharedValue(0);
-    const isOp = label in OPERATOR_MAP;
-    const isBack = label === '⌫';
+const formatINR = (n: number): string =>
+    n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
-    const animatedStyle = useAnimatedStyle(() => ({
-        transform: [{ scale: 1 - pressed.value * 0.05 }],
-        opacity: 1 - pressed.value * 0.25,
-    }));
+const DIAL_PAD: string[][] = [
+    ['1', '2', '3'],
+    ['4', '5', '6'],
+    ['7', '8', '9'],
+    ['.', '0', '⌫'],
+];
 
-    return (
-        <Pressable
-            style={styles.keyTouchable}
-            onPressIn={() => {
-                pressed.value = withTiming(1, { duration: 80, easing: Easing.out(Easing.quad) });
-            }}
-            onPressOut={() => {
-                pressed.value = withTiming(0, { duration: 140, easing: Easing.out(Easing.quad) });
-            }}
-            onPress={onPress}
-        >
-            <Animated.View style={[styles.key, isOp && styles.keyOp, animatedStyle]}>
-                {isBack ? (
-                    <MaterialIcons name="backspace" size={20} color="#fff" />
-                ) : (
-                    <Text style={[styles.keyText, isOp && { color: accent }]}>{label}</Text>
-                )}
-            </Animated.View>
-        </Pressable>
-    );
-});
-Key.displayName = 'Key';
+const OPERATORS = ['+', '−', '×', '÷'];
 
 export default function PaymentScreen() {
     const router = useRouter();
@@ -103,18 +79,12 @@ export default function PaymentScreen() {
 
     const [visible, setVisible] = useState(true);
     const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const [expression, setExpression] = useState('');
+    const [expression, setExpression] = useState('0');
     const [upiId, setUpiId] = useState('');
-    const [recipientName, setRecipientName] = useState('');
+    const [note, setNote] = useState('');
 
     const hasOperator = useMemo(() => /[÷×−+]/.test(expression), [expression]);
-
-    const evaluated = useMemo(() => {
-        if (!expression) return 0;
-        if (/^\d+(\.\d+)?$/.test(expression)) return parseFloat(expression);
-        const internal = expression.replace(/[÷×−]/g, (c) => OPERATOR_MAP[c] || c);
-        return safeEvalExpression(internal) ?? 0;
-    }, [expression]);
+    const total = useMemo(() => safeEvalExpression(expression), [expression]);
 
     const handleClose = useCallback(() => {
         if (closeTimerRef.current) return;
@@ -134,17 +104,20 @@ export default function PaymentScreen() {
 
     const handleKey = useCallback((key: string) => {
         setExpression((prev) => {
-            if (key === '⌫') return prev.slice(0, -1);
+            if (key === '⌫') {
+                if (prev.length <= 1) return '0';
+                return prev.slice(0, -1);
+            }
             if (key === '.') {
                 const lastNumber = prev.split(/[÷×−+]/).pop() || '';
                 if (lastNumber.includes('.')) return prev;
                 if (!lastNumber) return prev + '0.';
                 return prev + key;
             }
-            if (key in OPERATOR_MAP) {
-                if (!prev) return prev;
+            if (OPERATORS.includes(key)) {
+                if (prev === '0') return prev;
                 const last = prev.slice(-1);
-                if (last in OPERATOR_MAP) return prev.slice(0, -1) + key;
+                if (OPERATORS.includes(last)) return prev.slice(0, -1) + key;
                 if (last === '.') return prev;
                 return prev + key;
             }
@@ -155,7 +128,7 @@ export default function PaymentScreen() {
     }, []);
 
     const handleSend = useCallback(async () => {
-        if (evaluated <= 0) {
+        if (total <= 0) {
             Alert.alert('Amount', 'Enter a valid amount.');
             return;
         }
@@ -166,10 +139,10 @@ export default function PaymentScreen() {
         }
         const params = new URLSearchParams({
             pa: trimmedUpi,
-            pn: recipientName.trim() || 'Recipient',
-            am: evaluated.toFixed(2),
+            pn: 'Recipient',
+            am: total.toFixed(2),
             cu: 'INR',
-            tn: 'Paid via Soul',
+            tn: note.trim() || 'Paid via Soul',
         });
         const url = `upi://pay?${params.toString()}`;
         try {
@@ -183,7 +156,7 @@ export default function PaymentScreen() {
         } catch (err: any) {
             Alert.alert('Error', err?.message || 'Could not launch UPI app.');
         }
-    }, [evaluated, upiId, recipientName, handleClose]);
+    }, [total, upiId, note, handleClose]);
 
     return (
         <View style={styles.root}>
@@ -203,112 +176,134 @@ export default function PaymentScreen() {
                     exiting={SlideOutDown.duration(280)}
                     style={[
                         styles.sheet,
-                        { paddingBottom: insets.bottom + 14 },
+                        { paddingBottom: Math.max(insets.bottom, 12) + 8 },
                     ]}
                 >
-                    <GlassView intensity={70} tint="dark" style={StyleSheet.absoluteFill} />
+                    <GlassView intensity={75} tint="dark" style={StyleSheet.absoluteFill} />
 
                     <View style={styles.handle} />
 
-                    <View style={styles.headerRow}>
-                        <Pressable hitSlop={10} onPress={handleClose} style={styles.headerIconBtn}>
-                            <MaterialIcons name="close" size={20} color="rgba(255,255,255,0.85)" />
+                    {/* Header */}
+                    <View style={styles.header}>
+                        <Pressable onPress={handleClose} style={styles.headerBtn} hitSlop={6}>
+                            <MaterialIcons name="arrow-back" size={20} color="#fff" />
                         </Pressable>
 
                         <View style={styles.headerCenter}>
                             <Animated.View
                                 sharedTransitionTag={PAY_SHARED_TAG}
-                                style={[styles.headerPaymentBadge, { backgroundColor: accent }]}
+                                style={[styles.headerBadge, { backgroundColor: accent }]}
                             >
-                                <MaterialIcons name="currency-rupee" size={16} color="#fff" />
+                                <MaterialIcons name="currency-rupee" size={14} color="#fff" />
                             </Animated.View>
-                            <Text style={styles.headerTitle}>Pay via UPI</Text>
+                            <Text style={styles.headerTitle}>Send Money</Text>
                         </View>
 
                         <Pressable
-                            hitSlop={10}
                             onPress={() => Alert.alert('Scan QR', 'Coming soon')}
-                            style={styles.headerIconBtn}
+                            style={styles.headerBtn}
+                            hitSlop={6}
                         >
-                            <MaterialIcons name="qr-code-scanner" size={20} color="rgba(255,255,255,0.85)" />
+                            <MaterialIcons name="qr-code-scanner" size={20} color="#fff" />
                         </Pressable>
                     </View>
 
+                    {/* Recipient card */}
+                    <View style={styles.recipientCard}>
+                        <View style={styles.recipientAvatar}>
+                            <MaterialIcons name="person" size={22} color="rgba(255,255,255,0.6)" />
+                        </View>
+                        <TextInput
+                            style={styles.recipientInput}
+                            value={upiId}
+                            onChangeText={setUpiId}
+                            placeholder="Enter UPI ID  (name@okhdfcbank)"
+                            placeholderTextColor="rgba(255,255,255,0.38)"
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            keyboardType="email-address"
+                            underlineColorAndroid="transparent"
+                        />
+                    </View>
+
+                    {/* Amount hero */}
                     <View style={styles.amountWrap}>
-                        <Text style={styles.amountCurrency}>₹</Text>
-                        <Text
-                            style={styles.amountValue}
-                            numberOfLines={1}
-                            adjustsFontSizeToFit
-                        >
-                            {expression || '0'}
-                        </Text>
-                    </View>
-                    {hasOperator ? (
-                        <Text style={styles.amountEval}>
-                            = ₹{evaluated.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                        </Text>
-                    ) : (
-                        <Text style={styles.amountHint}>Tap + − × ÷ to calculate inline</Text>
-                    )}
-
-                    <View style={styles.recipientStack}>
-                        <View style={styles.recipientRow}>
-                            <GlassView intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
-                            <MaterialIcons
-                                name="alternate-email"
-                                size={18}
-                                color="rgba(255,255,255,0.55)"
-                                style={{ marginLeft: 12 }}
-                            />
-                            <TextInput
-                                style={styles.recipientInput}
-                                value={upiId}
-                                onChangeText={setUpiId}
-                                placeholder="UPI ID  (e.g. name@okhdfcbank)"
-                                placeholderTextColor="rgba(255,255,255,0.4)"
-                                autoCapitalize="none"
-                                autoCorrect={false}
-                                keyboardType="email-address"
-                                underlineColorAndroid="transparent"
-                            />
+                        <View style={styles.amountRow}>
+                            <Text style={styles.amountCurrency}>₹</Text>
+                            <Text
+                                style={styles.amountValue}
+                                numberOfLines={1}
+                                adjustsFontSizeToFit
+                                minimumFontScale={0.4}
+                            >
+                                {expression}
+                            </Text>
                         </View>
-
-                        <View style={styles.recipientRow}>
-                            <GlassView intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
-                            <MaterialIcons
-                                name="person-outline"
-                                size={18}
-                                color="rgba(255,255,255,0.55)"
-                                style={{ marginLeft: 12 }}
-                            />
-                            <TextInput
-                                style={styles.recipientInput}
-                                value={recipientName}
-                                onChangeText={setRecipientName}
-                                placeholder="Recipient name  (optional)"
-                                placeholderTextColor="rgba(255,255,255,0.4)"
-                                autoCorrect={false}
-                                underlineColorAndroid="transparent"
-                            />
-                        </View>
+                        {hasOperator ? (
+                            <Text style={[styles.amountEval, { color: accent }]}>
+                                = ₹{formatINR(total)}
+                            </Text>
+                        ) : (
+                            <Text style={styles.amountHint}>tap operators to do quick math</Text>
+                        )}
                     </View>
 
-                    <View style={styles.keypad}>
-                        {KEYPAD.map((row, ri) => (
-                            <View key={ri} style={styles.keypadRow}>
-                                {row.map((label) => (
-                                    <Key
-                                        key={label}
-                                        label={label}
-                                        accent={accent}
-                                        onPress={() => handleKey(label)}
-                                    />
+                    {/* Note */}
+                    <View style={styles.noteRow}>
+                        <MaterialIcons name="edit" size={14} color="rgba(255,255,255,0.4)" />
+                        <TextInput
+                            style={styles.noteInput}
+                            value={note}
+                            onChangeText={setNote}
+                            placeholder="Add a note"
+                            placeholderTextColor="rgba(255,255,255,0.35)"
+                            underlineColorAndroid="transparent"
+                            maxLength={50}
+                        />
+                    </View>
+
+                    {/* Operators */}
+                    <View style={styles.opsRow}>
+                        {OPERATORS.map((op) => (
+                            <Pressable
+                                key={op}
+                                onPress={() => handleKey(op)}
+                                style={({ pressed }) => [
+                                    styles.opChip,
+                                    pressed && { backgroundColor: 'rgba(255,255,255,0.12)' },
+                                ]}
+                            >
+                                <Text style={[styles.opChipText, { color: accent }]}>{op}</Text>
+                            </Pressable>
+                        ))}
+                    </View>
+
+                    {/* Dial pad */}
+                    <View style={styles.dialpad}>
+                        {DIAL_PAD.map((row, ri) => (
+                            <View key={ri} style={styles.dialRow}>
+                                {row.map((k) => (
+                                    <Pressable
+                                        key={k}
+                                        onPress={() => handleKey(k)}
+                                        android_ripple={{ color: 'rgba(255,255,255,0.08)', borderless: false }}
+                                        style={({ pressed }) => [
+                                            styles.dialKey,
+                                            pressed && { backgroundColor: 'rgba(255,255,255,0.08)' },
+                                        ]}
+                                    >
+                                        {k === '⌫' ? (
+                                            <MaterialIcons name="backspace" size={22} color="#fff" />
+                                        ) : (
+                                            <Text style={styles.dialKeyText}>{k}</Text>
+                                        )}
+                                    </Pressable>
                                 ))}
                             </View>
                         ))}
                     </View>
 
+                    {/* Send */}
                     <Pressable
                         onPress={handleSend}
                         style={({ pressed }) => [
@@ -317,9 +312,8 @@ export default function PaymentScreen() {
                             pressed && { opacity: 0.85 },
                         ]}
                     >
-                        <Text style={styles.sendBtnText}>
-                            Send ₹{evaluated.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                        </Text>
+                        <MaterialIcons name="lock" size={14} color="rgba(255,255,255,0.9)" />
+                        <Text style={styles.sendBtnText}>Pay ₹{formatINR(total)}</Text>
                         <MaterialIcons name="arrow-forward" size={18} color="#fff" />
                     </Pressable>
                 </Animated.View>
@@ -332,13 +326,13 @@ const styles = StyleSheet.create({
     root: { flex: 1, justifyContent: 'flex-end' },
     backdrop: { backgroundColor: 'rgba(0,0,0,0.55)' },
     sheet: {
-        height: '88%',
-        borderTopLeftRadius: 26,
-        borderTopRightRadius: 26,
+        height: '92%',
+        borderTopLeftRadius: 28,
+        borderTopRightRadius: 28,
         overflow: 'hidden',
         borderTopWidth: 1,
         borderColor: 'rgba(255,255,255,0.1)',
-        backgroundColor: 'rgba(15,15,18,0.6)',
+        backgroundColor: 'rgba(15,15,18,0.65)',
         paddingTop: 8,
     },
     handle: {
@@ -349,20 +343,20 @@ const styles = StyleSheet.create({
         backgroundColor: 'rgba(255,255,255,0.25)',
         marginTop: 4,
     },
-    headerRow: {
+    header: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
         paddingHorizontal: 14,
-        marginTop: 14,
+        marginTop: 12,
     },
-    headerIconBtn: {
-        width: 34,
-        height: 34,
-        borderRadius: 17,
+    headerBtn: {
+        width: 36,
+        height: 36,
+        borderRadius: 18,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'rgba(255,255,255,0.07)',
+        backgroundColor: 'rgba(255,255,255,0.08)',
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.1)',
     },
@@ -371,10 +365,10 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         gap: 8,
     },
-    headerPaymentBadge: {
-        width: 26,
-        height: 26,
-        borderRadius: 13,
+    headerBadge: {
+        width: 24,
+        height: 24,
+        borderRadius: 12,
         alignItems: 'center',
         justifyContent: 'center',
     },
@@ -384,27 +378,60 @@ const styles = StyleSheet.create({
         fontWeight: '700',
         letterSpacing: 0.2,
     },
+    recipientCard: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginHorizontal: 14,
+        marginTop: 16,
+        paddingHorizontal: 8,
+        paddingVertical: 8,
+        borderRadius: 16,
+        backgroundColor: 'rgba(255,255,255,0.05)',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.08)',
+        gap: 10,
+    },
+    recipientAvatar: {
+        width: 36,
+        height: 36,
+        borderRadius: 18,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(255,255,255,0.08)',
+    },
+    recipientInput: {
+        flex: 1,
+        color: '#fff',
+        fontSize: 14,
+        fontWeight: '600',
+        padding: 0,
+    },
     amountWrap: {
+        alignItems: 'center',
+        marginTop: 22,
+        paddingHorizontal: 24,
+        minHeight: 76,
+        justifyContent: 'center',
+    },
+    amountRow: {
         flexDirection: 'row',
         alignItems: 'baseline',
         justifyContent: 'center',
-        marginTop: 22,
-        paddingHorizontal: 24,
     },
     amountCurrency: {
         color: 'rgba(255,255,255,0.55)',
-        fontSize: 26,
+        fontSize: 28,
         fontWeight: '600',
         marginRight: 4,
     },
     amountValue: {
         color: '#fff',
-        fontSize: 52,
+        fontSize: 56,
         fontWeight: '700',
         letterSpacing: 0.5,
+        textAlign: 'center',
     },
     amountEval: {
-        color: 'rgba(255,255,255,0.78)',
         fontSize: 14,
         fontWeight: '700',
         textAlign: 'center',
@@ -416,70 +443,82 @@ const styles = StyleSheet.create({
         fontSize: 11,
         fontWeight: '500',
         textAlign: 'center',
-        marginTop: 6,
+        marginTop: 4,
         letterSpacing: 0.3,
     },
-    recipientStack: {
-        marginTop: 18,
-        marginHorizontal: 14,
-        gap: 8,
-    },
-    recipientRow: {
+    noteRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        borderRadius: 14,
-        overflow: 'hidden',
+        alignSelf: 'center',
+        marginTop: 12,
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 12,
+        backgroundColor: 'rgba(255,255,255,0.04)',
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
-        height: 44,
+        borderColor: 'rgba(255,255,255,0.06)',
+        gap: 6,
+        maxWidth: '85%',
     },
-    recipientInput: {
+    noteInput: {
         flex: 1,
         color: '#fff',
-        fontSize: 14,
+        fontSize: 12.5,
         fontWeight: '500',
-        paddingHorizontal: 10,
         padding: 0,
+        minWidth: 140,
     },
-    keypad: {
+    opsRow: {
+        flexDirection: 'row',
+        justifyContent: 'center',
+        gap: 12,
         marginTop: 14,
         paddingHorizontal: 14,
-        gap: 8,
     },
-    keypadRow: {
-        flexDirection: 'row',
-        gap: 8,
-    },
-    keyTouchable: {
-        flex: 1,
-    },
-    key: {
-        flex: 1,
-        height: 52,
-        borderRadius: 14,
+    opChip: {
+        width: 52,
+        height: 36,
+        borderRadius: 18,
         alignItems: 'center',
         justifyContent: 'center',
         backgroundColor: 'rgba(255,255,255,0.06)',
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.08)',
+        borderColor: 'rgba(255,255,255,0.1)',
     },
-    keyOp: {
-        backgroundColor: 'rgba(255,255,255,0.04)',
+    opChipText: {
+        fontSize: 18,
+        fontWeight: '700',
     },
-    keyText: {
+    dialpad: {
+        marginTop: 12,
+        paddingHorizontal: 8,
+    },
+    dialRow: {
+        flexDirection: 'row',
+    },
+    dialKey: {
+        flex: 1,
+        height: 56,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 14,
+    },
+    dialKeyText: {
         color: '#fff',
-        fontSize: 20,
+        fontSize: 26,
         fontWeight: '600',
+        lineHeight: 32,
+        includeFontPadding: false,
     },
     sendBtn: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
         gap: 8,
-        marginTop: 14,
+        marginTop: 12,
         marginHorizontal: 14,
-        height: 52,
-        borderRadius: 16,
+        height: 54,
+        borderRadius: 18,
     },
     sendBtnText: {
         color: '#fff',
