@@ -8,6 +8,7 @@ import {
     ActivityIndicator,
     Alert,
     Platform,
+    ScrollView,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,7 +16,16 @@ import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
-import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
+import Animated, {
+    FadeIn,
+    FadeOut,
+    useSharedValue,
+    useAnimatedStyle,
+    withTiming,
+    withSpring,
+    interpolateColor,
+    Easing,
+} from 'react-native-reanimated';
 import * as Crypto from 'expo-crypto';
 import GlassView from '../../components/ui/GlassView';
 import { useApp } from '../../context/AppContext';
@@ -47,6 +57,61 @@ const formatDuration = (sec?: number): string | null => {
 
 const SEARCH_DEBOUNCE_MS = 350;
 
+const PILL_INACTIVE_BG = 'rgba(255,255,255,0.06)';
+const PILL_INACTIVE_BORDER = 'rgba(255,255,255,0.12)';
+const PILL_INACTIVE_TEXT = 'rgba(255,255,255,0.78)';
+const PILL_SLIDER_SPRING = { damping: 22, stiffness: 280, mass: 0.6 } as const;
+
+type PillItemProps = {
+    label: string;
+    active: boolean;
+    onPress: () => void;
+    onLayout: (e: { nativeEvent: { layout: { x: number; width: number } } }) => void;
+};
+
+const PillItem: React.FC<PillItemProps> = React.memo(({ label, active, onPress, onLayout }) => {
+    const progress = useSharedValue(active ? 1 : 0);
+
+    useEffect(() => {
+        progress.value = withTiming(active ? 1 : 0, {
+            duration: 240,
+            easing: Easing.bezier(0.2, 0.8, 0.2, 1),
+        });
+    }, [active, progress]);
+
+    const animatedBox = useAnimatedStyle(() => ({
+        backgroundColor: interpolateColor(
+            progress.value,
+            [0, 1],
+            [PILL_INACTIVE_BG, 'rgba(0,0,0,0)'],
+        ),
+        borderColor: interpolateColor(
+            progress.value,
+            [0, 1],
+            [PILL_INACTIVE_BORDER, 'rgba(0,0,0,0)'],
+        ),
+    }));
+
+    const animatedText = useAnimatedStyle(() => ({
+        color: interpolateColor(
+            progress.value,
+            [0, 1],
+            [PILL_INACTIVE_TEXT, '#ffffff'],
+        ),
+    }));
+
+    return (
+        <Animated.View style={[styles.pill, animatedBox]} onLayout={onLayout}>
+            <Pressable onPress={onPress} style={styles.pillPressable}>
+                <Animated.Text style={[styles.pillText, animatedText]}>
+                    {label}
+                </Animated.Text>
+            </Pressable>
+        </Animated.View>
+    );
+});
+PillItem.displayName = 'PillItem';
+
 export default function TheaterPickerScreen() {
     const router = useRouter();
     const insets = useSafeAreaInsets();
@@ -66,6 +131,30 @@ export default function TheaterPickerScreen() {
 
     const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const requestSeqRef = useRef(0);
+    const pillsScrollRef = useRef<ScrollView>(null);
+    const pillLayoutsRef = useRef<Record<string, { x: number; width: number }>>({});
+    const pillsContainerWidthRef = useRef(0);
+    const sliderX = useSharedValue(0);
+    const sliderWidth = useSharedValue(0);
+    const sliderInitialized = useRef(false);
+
+    useEffect(() => {
+        const layout = pillLayoutsRef.current[activePill.label];
+        if (!layout) return;
+        if (!sliderInitialized.current) {
+            sliderX.value = layout.x;
+            sliderWidth.value = layout.width;
+            sliderInitialized.current = true;
+        } else {
+            sliderX.value = withSpring(layout.x, PILL_SLIDER_SPRING);
+            sliderWidth.value = withSpring(layout.width, PILL_SLIDER_SPRING);
+        }
+    }, [activePill.label, sliderX, sliderWidth]);
+
+    const sliderStyle = useAnimatedStyle(() => ({
+        transform: [{ translateX: sliderX.value }],
+        width: sliderWidth.value,
+    }));
 
     const fetchForState = useCallback(async (q: string, pill: YouTubeCategoryPill) => {
         const seq = ++requestSeqRef.current;
@@ -232,7 +321,7 @@ export default function TheaterPickerScreen() {
                 exiting={FadeOut.duration(180)}
                 style={[
                     styles.sheet,
-                    { paddingTop: insets.top + 6, paddingBottom: insets.bottom + 6 },
+                    { paddingTop: 8, paddingBottom: insets.bottom + 6 },
                 ]}
             >
                 <GlassView intensity={70} tint="dark" style={StyleSheet.absoluteFill} />
@@ -260,34 +349,69 @@ export default function TheaterPickerScreen() {
                     ) : null}
                 </View>
 
-                <View style={styles.pillsRow}>
-                    <FlashList
-                        data={pills}
+                <View
+                    style={styles.pillsRow}
+                    onLayout={(e) => {
+                        pillsContainerWidthRef.current = e.nativeEvent.layout.width;
+                    }}
+                >
+                    <ScrollView
+                        ref={pillsScrollRef}
                         horizontal
-                        keyExtractor={(p) => p.label}
                         showsHorizontalScrollIndicator={false}
-                        estimatedItemSize={92}
-                        contentContainerStyle={{ paddingHorizontal: 12 }}
-                        renderItem={({ item }) => {
+                        contentContainerStyle={{ paddingHorizontal: 12, alignItems: 'center' }}
+                        keyboardShouldPersistTaps="handled"
+                    >
+                        <Animated.View
+                            pointerEvents="none"
+                            style={[
+                                styles.pillSlider,
+                                { backgroundColor: accent, borderColor: accent },
+                                sliderStyle,
+                            ]}
+                        />
+                        {pills.map((item) => {
                             const active = item.label === activePill.label && query.trim().length === 0;
+                            const handlePress = () => {
+                                setActivePill(item);
+                                setQuery('');
+                                const layout = pillLayoutsRef.current[item.label];
+                                const containerWidth = pillsContainerWidthRef.current;
+                                if (layout && containerWidth > 0) {
+                                    const targetX = Math.max(
+                                        0,
+                                        layout.x - (containerWidth - layout.width) / 2,
+                                    );
+                                    pillsScrollRef.current?.scrollTo({
+                                        x: targetX,
+                                        y: 0,
+                                        animated: true,
+                                    });
+                                }
+                            };
                             return (
-                                <Pressable
-                                    onPress={() => {
-                                        setActivePill(item);
-                                        setQuery('');
+                                <PillItem
+                                    key={item.label}
+                                    label={item.label}
+                                    active={active}
+                                    onPress={handlePress}
+                                    onLayout={(e) => {
+                                        const { x, width } = e.nativeEvent.layout;
+                                        pillLayoutsRef.current[item.label] = { x, width };
+                                        if (
+                                            item.label === activePill.label &&
+                                            !sliderInitialized.current &&
+                                            width > 0
+                                        ) {
+                                            sliderX.value = x;
+                                            sliderWidth.value = width;
+                                            sliderInitialized.current = true;
+                                        }
                                     }}
-                                    style={[
-                                        styles.pill,
-                                        active && { backgroundColor: accent, borderColor: accent },
-                                    ]}
-                                >
-                                    <Text style={[styles.pillText, active && { color: '#fff', fontWeight: '700' }]}>
-                                        {item.label}
-                                    </Text>
-                                </Pressable>
+                                />
                             );
-                        }}
-                    />
+                        })}
+                    </ScrollView>
                 </View>
 
                 {error ? (
@@ -413,20 +537,31 @@ const styles = StyleSheet.create({
     },
     pill: {
         height: 32,
-        paddingHorizontal: 14,
-        borderRadius: 16,
         marginRight: 8,
+        borderRadius: 16,
+        borderWidth: 1,
+        overflow: 'hidden',
+    },
+    pillPressable: {
+        flex: 1,
+        paddingHorizontal: 14,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'rgba(255,255,255,0.06)',
+    },
+    pillSlider: {
+        position: 'absolute',
+        left: 0,
+        top: 6,
+        height: 32,
+        borderRadius: 16,
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.12)',
     },
     pillText: {
-        color: 'rgba(255,255,255,0.78)',
         fontSize: 13,
-        fontWeight: '600',
+        fontWeight: '700',
         letterSpacing: 0.1,
+        lineHeight: 16,
+        includeFontPadding: false,
     },
     tile: {
         flex: 1,

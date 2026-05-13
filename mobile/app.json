@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Soul",
-    "slug": "Soul-app",
+    "slug": "mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",

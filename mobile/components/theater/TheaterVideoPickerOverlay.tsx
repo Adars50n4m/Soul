@@ -7,12 +7,18 @@ import {
     TextInput,
     ActivityIndicator,
     Platform,
+    ScrollView,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
-import Animated, { FadeIn, FadeOut, SlideInDown, SlideOutDown } from 'react-native-reanimated';
+import Animated, {
+    FadeIn,
+    FadeOut,
+    SlideInDown,
+    SlideOutDown,
+} from 'react-native-reanimated';
 import GlassView from '../ui/GlassView';
 import {
     youtubeService,
@@ -67,6 +73,9 @@ const TheaterVideoPickerOverlay: React.FC<TheaterVideoPickerOverlayProps> = ({
 
     const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const requestSeqRef = useRef(0);
+    const pillsScrollRef = useRef<ScrollView>(null);
+    const pillLayoutsRef = useRef<Record<string, { x: number; width: number }>>({});
+    const pillsContainerWidthRef = useRef(0);
 
     const fetchForState = useCallback(async (q: string, pill: YouTubeCategoryPill) => {
         const seq = ++requestSeqRef.current;
@@ -175,7 +184,6 @@ const TheaterVideoPickerOverlay: React.FC<TheaterVideoPickerOverlayProps> = ({
     }, [currentVideoId, onPick, themeAccent]);
 
     const pills = useMemo(() => YOUTUBE_CATEGORY_PILLS, []);
-    const activePillLabel = query.trim().length === 0 ? activePill.label : '';
 
     return (
         <Animated.View
@@ -220,35 +228,69 @@ const TheaterVideoPickerOverlay: React.FC<TheaterVideoPickerOverlayProps> = ({
                     ) : null}
                 </View>
 
-                <View style={styles.pillsRow}>
-                    <FlashList
-                        data={pills}
+                <View
+                    style={styles.pillsRow}
+                    onLayout={(e) => {
+                        pillsContainerWidthRef.current = e.nativeEvent.layout.width;
+                    }}
+                >
+                    <ScrollView
+                        ref={pillsScrollRef}
                         horizontal
-                        keyExtractor={(p) => p.label}
                         showsHorizontalScrollIndicator={false}
-                        estimatedItemSize={92}
-                        extraData={{ activePillLabel, themeAccent }}
-                        contentContainerStyle={{ paddingHorizontal: 12 }}
-                        renderItem={({ item }) => {
-                            const active = item.label === activePillLabel;
+                        contentContainerStyle={styles.pillsContent}
+                        keyboardShouldPersistTaps="handled"
+                        {...({ delaysContentTouches: false } as any)}
+                    >
+                        {pills.map((item) => {
+                            const active = item.label === activePill.label && query.trim().length === 0;
+                            const handlePress = () => {
+                                setActivePill(item);
+                                setQuery('');
+                                const layout = pillLayoutsRef.current[item.label];
+                                const containerWidth = pillsContainerWidthRef.current;
+                                if (layout && containerWidth > 0) {
+                                    // Center the tapped pill in the visible area
+                                    // (clamps to 0 for early pills automatically).
+                                    const targetX = Math.max(
+                                        0,
+                                        layout.x - (containerWidth - layout.width) / 2,
+                                    );
+                                    pillsScrollRef.current?.scrollTo({
+                                        x: targetX,
+                                        y: 0,
+                                        animated: true,
+                                    });
+                                }
+                            };
                             return (
                                 <Pressable
-                                    onPress={() => {
-                                        setActivePill(item);
-                                        setQuery('');
+                                    key={item.label}
+                                    onPress={handlePress}
+                                    onLayout={(e) => {
+                                        const { x, width } = e.nativeEvent.layout;
+                                        pillLayoutsRef.current[item.label] = { x, width };
                                     }}
                                     style={[
                                         styles.pill,
-                                        active && { backgroundColor: themeAccent, borderColor: themeAccent },
+                                        active && {
+                                            backgroundColor: themeAccent,
+                                            borderColor: themeAccent,
+                                        },
                                     ]}
                                 >
-                                    <Text style={[styles.pillText, active && { color: '#fff', fontWeight: '700' }]}>
+                                    <Text
+                                        style={[
+                                            styles.pillText,
+                                            active && styles.pillTextActive,
+                                        ]}
+                                    >
                                         {item.label}
                                     </Text>
                                 </Pressable>
                             );
-                        }}
-                    />
+                        })}
+                    </ScrollView>
                 </View>
 
                 {error ? (
@@ -379,6 +421,10 @@ const styles = StyleSheet.create({
         height: 44,
         marginTop: 12,
     },
+    pillsContent: {
+        paddingHorizontal: 12,
+        alignItems: 'center',
+    },
     pill: {
         height: 32,
         paddingHorizontal: 14,
@@ -395,6 +441,10 @@ const styles = StyleSheet.create({
         fontSize: 13,
         fontWeight: '600',
         letterSpacing: 0.1,
+    },
+    pillTextActive: {
+        color: '#fff',
+        fontWeight: '700',
     },
     tile: {
         flex: 1,
