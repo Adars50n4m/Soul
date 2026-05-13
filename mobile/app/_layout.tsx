@@ -391,6 +391,13 @@ function RootContent() {
           gestureEnabled: false,
           contentStyle: { backgroundColor: 'transparent' },
         }} />
+        <Stack.Screen name="payment/index" options={{
+          presentation: 'transparentModal',
+          animation: 'none',
+          headerShown: false,
+          gestureEnabled: false,
+          contentStyle: { backgroundColor: 'transparent' },
+        }} />
       </Stack>
 
       {/* Persistence / Loading Overlay: Always sits on top until isReady AND isNavSettled are true */}

@@ -555,6 +555,53 @@ const StatusCardWrapper = React.memo(({
   );
 });
 
+const PAY_SHARED_TAG = 'soul-pay-pill';
+
+const PaymentPillButton = ({ router }: { router: any }) => {
+  const { activeTheme } = useApp() as any;
+  const accent = activeTheme?.primary || '#ff0080';
+  const pressed = useSharedValue(0);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 - pressed.value * 0.1 }],
+  }));
+
+  return (
+    <Pressable
+      hitSlop={8}
+      onPressIn={() => {
+        pressed.value = withTiming(1, { duration: 90, easing: Easing.out(Easing.quad) });
+      }}
+      onPressOut={() => {
+        pressed.value = withTiming(0, { duration: 160, easing: Easing.out(Easing.quad) });
+      }}
+      onPress={() => router.push('/payment' as any)}
+    >
+      <Animated.View
+        sharedTransitionTag={PAY_SHARED_TAG}
+        style={[
+          {
+            width: 40,
+            height: 40,
+            borderRadius: 20,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: accent,
+            shadowColor: accent,
+            shadowOpacity: 0.35,
+            shadowRadius: 8,
+            shadowOffset: { width: 0, height: 3 },
+            elevation: 4,
+          },
+          animatedStyle,
+        ]}
+      >
+        <MaterialIcons name="currency-rupee" size={20} color="#fff" />
+      </Animated.View>
+    </Pressable>
+  );
+};
+
 const AnimatedMoreMenu = ({ router, isSearching }: { router: any, isSearching: boolean }) => {
   const [expanded, setExpanded] = useState(false);
   const progress = useSharedValue(0);
@@ -1854,6 +1901,7 @@ const headerBackgroundStyle = useAnimatedStyle(() => {
         ) : (
           <View style={styles.headerActions}>
             <Text style={styles.headerTitle}>Soul</Text>
+            <PaymentPillButton router={router} />
             <AnimatedMoreMenu router={router} isSearching={false} />
           </View>
         )}
