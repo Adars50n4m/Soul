@@ -11,6 +11,7 @@ import {
     BackHandler,
     useWindowDimensions,
     KeyboardAvoidingView,
+    Keyboard,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -315,6 +316,28 @@ export default function TheaterScreen() {
         setParticipantTilesCollapsed(false);
     }, [setParticipantTilesCollapsed]);
 
+    // --- KEYBOARD AUTO-COLLAPSE ---
+    useEffect(() => {
+        const showSub = Keyboard.addListener(
+            Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+            () => setParticipantTilesCollapsed(true)
+        );
+        const hideSub = Keyboard.addListener(
+            Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+            () => {
+                // Only expand back if the user isn't in the middle of a manual swipe
+                if (!participantTileSwipeTriggeredRef.current) {
+                    setParticipantTilesCollapsed(false);
+                }
+            }
+        );
+
+        return () => {
+            showSub.remove();
+            hideSub.remove();
+        };
+    }, [setParticipantTilesCollapsed]);
+
     // Sync state refs — kept outside React state so the heartbeat closure
     // and remote-event handler always read the current values.
     const positionRef = useRef(0);
@@ -344,7 +367,7 @@ export default function TheaterScreen() {
     // Without this, when the host switches video via the picker, only the
     // single change_video broadcast carries the new id — if it gets dropped,
     // the guest is stuck on the old video forever. With it in heartbeats,
-    // any drift between host/guest videoId self-heals within 1.5s.
+    // any drift between host/guest videoId self-heals within 1.5s of the next tick.
     const currentVideoMetaRef = useRef<{
         videoId?: string; mediaTitle?: string; channelTitle?: string; thumbnail?: string;
     }>({});
@@ -1068,16 +1091,28 @@ export default function TheaterScreen() {
         + (PARTICIPANT_TILE_COMPACT_HORIZONTAL_PADDING * 2);
     const useTileSharedTransition = SUPPORT_SHARED_TRANSITIONS && Platform.OS === 'ios';
 
-    const participantRowAnimatedStyle = useAnimatedStyle(() => {
+    const topSectionAnimatedStyle = useAnimatedStyle(() => {
         const p = participantTilesMorph.value;
         return {
-            width: screenWidth + (compactParticipantRowWidth - screenWidth) * p,
-            paddingHorizontal:
-                PARTICIPANT_TILE_EXPANDED_HORIZONTAL_PADDING
-                + (PARTICIPANT_TILE_COMPACT_HORIZONTAL_PADDING - PARTICIPANT_TILE_EXPANDED_HORIZONTAL_PADDING) * p,
-            paddingVertical: PARTICIPANT_TILE_VERTICAL_PADDING,
+            flexDirection: p > 0.5 ? 'row' : 'column',
         };
-    }, [compactParticipantRowWidth, screenWidth]);
+    });
+
+    const participantRowAnimatedStyle = useAnimatedStyle(() => {
+        const p = participantTilesMorph.value;
+        const targetVideoWidth = screenWidth * 0.77 - 12;
+        const videoHeight = targetVideoWidth * (9 / 16);
+        return {
+            flexDirection: p > 0.5 ? 'column' : 'row',
+            width: screenWidth + (screenWidth * 0.23 - screenWidth) * p,
+            height: p > 0.5 ? videoHeight : 'auto',
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingHorizontal: PARTICIPANT_TILE_EXPANDED_HORIZONTAL_PADDING
+                + (PARTICIPANT_TILE_COMPACT_HORIZONTAL_PADDING - PARTICIPANT_TILE_EXPANDED_HORIZONTAL_PADDING) * p,
+            gap: p > 0.5 ? 4 : PARTICIPANT_TILE_GAP,
+        };
+    }, [screenWidth]);
 
     const participantTileAnimatedStyle = useAnimatedStyle(() => {
         const p = participantTilesMorph.value;
@@ -1097,11 +1132,48 @@ export default function TheaterScreen() {
         };
     });
 
+    const videoAreaAnimatedStyle = useAnimatedStyle(() => {
+        const p = participantTilesMorph.value;
+        const targetWidth = screenWidth * 0.77 - 12;
+        const width = screenWidth + (targetWidth - screenWidth) * p;
+        return {
+            width,
+            marginLeft: 12 * p,
+            borderRadius: 16 * p, // Smooth rounded corners when shrunk
+            aspectRatio: 16 / 9,
+        };
+    });
+
+    const videoContentAnimatedStyle = useAnimatedStyle(() => {
+        const p = participantTilesMorph.value;
+        const targetWidth = screenWidth * 0.77 - 12;
+        const width = screenWidth + (targetWidth - screenWidth) * p;
+        const scale = width / screenWidth;
+        const height = (screenWidth * 9) / 16;
+        return {
+            width: screenWidth,
+            height: height,
+            transform: [
+                { translateX: -(screenWidth * (1 - scale)) / 2 },
+                { translateY: -(height * (1 - scale)) / 2 },
+                { scale },
+            ],
+        };
+    });
+
     const participantTileControlsAnimatedStyle = useAnimatedStyle(() => {
         const p = participantTilesMorph.value;
         return {
             opacity: 1 - p,
             transform: [{ translateY: 10 * p }],
+        };
+    });
+
+    const participantTileMiniIndicatorAnimatedStyle = useAnimatedStyle(() => {
+        const p = participantTilesMorph.value;
+        return {
+            opacity: p,
+            transform: [{ scale: p }],
         };
     });
 
@@ -1253,14 +1325,16 @@ export default function TheaterScreen() {
                 </View>
             </View>
 
-            <Animated.View
-                {...(useSharedTransition ? {
-                    sharedTransitionTag: sharedCardTag,
-                    sharedTransitionStyle: SOUL_LIQUID_TRANSITION,
-                } : {})}
-                collapsable={false}
-                style={styles.videoArea}
-            >
+            <Animated.View style={[styles.topSection, topSectionAnimatedStyle]}>
+                <Animated.View
+                    {...(useSharedTransition ? {
+                        sharedTransitionTag: sharedCardTag,
+                        sharedTransitionStyle: SOUL_LIQUID_TRANSITION,
+                    } : {})}
+                    collapsable={false}
+                    style={[styles.videoArea, videoAreaAnimatedStyle]}
+                >
+                <Animated.View style={videoContentAnimatedStyle}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={handleTapVideo}>
                 {thumbnail ? (
                     useSharedTransition ? (
@@ -1496,7 +1570,7 @@ export default function TheaterScreen() {
                                         ? 'Video unavailable'
                                         : "Couldn't load this video"}
                             </Text>
-                            <Text style={styles.embedErrorBody}>
+                            <Text style={embedError === 'embed_not_allowed' ? styles.embedErrorBody : styles.embedErrorBody}>
                                 {embedError === 'embed_not_allowed'
                                     ? 'The uploader has disabled playback outside YouTube. Pick a different video to start a session.'
                                     : 'It may have been removed or made private. Try another video.'}
@@ -1618,19 +1692,16 @@ export default function TheaterScreen() {
                     </Animated.View>
                 )}
                 </Pressable>
+                </Animated.View>
             </Animated.View>
 
-            {/* Two large participant tiles side-by-side, Rave-style. Left
-                tile is the remote peer (or an empty placeholder if nobody
-                has joined yet), right tile is the local user. Each tile
-                shows a video stream when available and falls back to the
-                avatar otherwise. */}
             <Animated.View
                 style={[styles.participantRow, participantRowAnimatedStyle]}
                 onTouchStart={handleParticipantTilesTouchStart}
                 onTouchMove={handleParticipantTilesTouchMove}
                 onTouchEnd={handleParticipantTilesTouchEnd}
             >
+                {/* Remote Tile */}
                 {(() => {
                     const hasRemote = !!remoteUserId;
                     const showVideo = !!(remoteRtcParticipant?.stream && remoteRtcParticipant?.hasVideo && RTCView);
@@ -1701,11 +1772,21 @@ export default function TheaterScreen() {
                                     </View>
                                 </Animated.View>
                             )}
+                            {hasRemote && (
+                                <Animated.View style={[styles.participantTileMiniIndicator, participantTileMiniIndicatorAnimatedStyle]}>
+                                    <View style={[
+                                        styles.miniIndicatorDot,
+                                        { backgroundColor: hasAudio ? accent : '#666' }
+                                    ]}>
+                                        <MaterialIcons name={hasAudio ? "mic" : "mic-off"} size={8} color="#fff" />
+                                    </View>
+                                </Animated.View>
+                            )}
                         </Animated.View>
                     );
                 })()}
 
-                {/* Local self-tile — mirrored video, mic + camera-switch. */}
+                {/* Local Tile */}
                 <Animated.View
                     {...(useTileSharedTransition ? {
                         sharedTransitionTag: `theater-${sessionId}-local-tile`,
@@ -1795,6 +1876,14 @@ export default function TheaterScreen() {
                             />
                         </Pressable>
                     </Animated.View>
+                    <Animated.View style={[styles.participantTileMiniIndicator, participantTileMiniIndicatorAnimatedStyle]}>
+                        <View style={[
+                            styles.miniIndicatorDot,
+                            { backgroundColor: theater.roomState.micEnabled ? accent : '#666' }
+                        ]}>
+                            <MaterialIcons name={theater.roomState.micEnabled ? "mic" : "mic-off"} size={8} color="#fff" />
+                        </View>
+                    </Animated.View>
                     {theater.roomState.cameraEnabled && (
                         <Animated.View
                             pointerEvents={participantTilesCollapsed ? 'none' : 'auto'}
@@ -1812,75 +1901,85 @@ export default function TheaterScreen() {
                     )}
                 </Animated.View>
             </Animated.View>
+            </Animated.View>
 
-            {/* Theater chat — same data + MessageBubble as the main chat
-                screen, rendered inline so it's always visible below the PIPs.
-                Join taps on a theater bubble for a DIFFERENT session would
-                navigate to that session; for the current session we just
-                ignore (we're already inside it). End taps for the current
-                session route through the existing endForEveryone flow. */}
-            {chatId ? (
-                <View style={[styles.inlineChatWrap, { paddingBottom: composerReservedHeight }]}>
-                    <TheaterChatOverlay
-                        chatId={chatId}
-                        contactName={contactName}
+            <KeyboardAvoidingView
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                keyboardVerticalOffset={0}
+                style={{ flex: 1 }}
+                pointerEvents="box-none"
+            >
+
+                {chatId ? (
+                    <View style={styles.inlineChatWrap}>
+                        <TheaterChatOverlay
+                            chatId={chatId}
+                            contactName={contactName}
+                            accent={accent}
+                            onClose={() => { }}
+                            bottomInset={0}
+                            style={styles.inlineChat}
+                            inline
+                            onMediaTap={(payload) => {
+                                if (!payload?.theaterSession) return;
+                                const tappedSessionId =
+                                    payload.sessionId || payload.theater?.sessionId;
+                                if (tappedSessionId && tappedSessionId !== sessionId) {
+                                    router.replace({
+                                        pathname: '/theater/[sessionId]' as any,
+                                        params: {
+                                            sessionId: String(tappedSessionId),
+                                            chatId,
+                                            contactName,
+                                            messageId: payload.messageId || '',
+                                            title: payload.title || 'Theater Night',
+                                            mediaTitle: payload.theater?.mediaTitle || '',
+                                            channelTitle: payload.theater?.channelTitle || '',
+                                            thumbnail: payload.thumbnail || '',
+                                            youtubeVideoId: payload.youtubeVideoId || payload.theater?.youtubeVideoId || '',
+                                            isLocked: payload.theater?.isLocked ? '1' : '0',
+                                            isHost: payload.theater?.hostId === currentUser?.id ? '1' : '0',
+                                            hostId: payload.theater?.hostId || '',
+                                        },
+                                    });
+                                }
+                            }}
+                            onTheaterEnd={(mid, _meta) => {
+                                if (mid === messageId && isHost) {
+                                    endForEveryone();
+                                }
+                            }}
+                            composerRef={chatComposerRef}
+                            skipComposer
+                            listBottomPadding={12}
+                            // Enable full chat features
+                            showRichInteractions
+                        />
+                        <ProgressiveBlur
+                            position="top"
+                            height={70}
+                            intensity={70}
+                            tint="dark"
+                        />
+                    </View>
+                ) : null}
+
+                {showFloatingComposer ? (
+                    <ChatComposer
+                        ref={chatComposerRef}
+                        messageKey={chatId}
                         accent={accent}
-                        onClose={() => {}}
-                        bottomInset={0}
-                        style={styles.inlineChat}
-                        inline
-                        onMediaTap={(payload) => {
-                            if (!payload?.theaterSession) return;
-                            const tappedSessionId =
-                                payload.sessionId || payload.theater?.sessionId;
-                            if (tappedSessionId && tappedSessionId !== sessionId) {
-                                // Different theater bubble tapped from inside an
-                                // active theater — leave current and open the
-                                // new one.
-                                router.replace({
-                                    pathname: '/theater/[sessionId]' as any,
-                                    params: {
-                                        sessionId: String(tappedSessionId),
-                                        chatId,
-                                        contactName,
-                                        messageId: payload.messageId || '',
-                                        title: payload.title || 'Theater Night',
-                                        mediaTitle: payload.theater?.mediaTitle || '',
-                                        channelTitle: payload.theater?.channelTitle || '',
-                                        thumbnail: payload.thumbnail || '',
-                                        youtubeVideoId: payload.youtubeVideoId || payload.theater?.youtubeVideoId || '',
-                                        isLocked: payload.theater?.isLocked ? '1' : '0',
-                                        isHost: payload.theater?.hostId === currentUser?.id ? '1' : '0',
-                                        hostId: payload.theater?.hostId || '',
-                                    },
-                                });
-                            }
-                        }}
-                        onTheaterEnd={(mid, _meta) => {
-                            // Only the host of THIS session can end via the
-                            // bubble; route through the existing flow which
-                            // updates Supabase + broadcasts theater-ended.
-                            if (mid === messageId && isHost) {
-                                endForEveryone();
-                            }
-                        }}
-                        composerRef={chatComposerRef}
-                        skipComposer
-                        listBottomPadding={12}
+                        contactName={contactName}
+                        enableTheaterAction
+                        theaterActionSelected
+                        style={[
+                            styles.floatingComposer,
+                            { marginBottom: Math.max(insets.bottom, 12) },
+                        ]}
+                        onAttachMenuToggle={handleAttachMenuToggle}
                     />
-                    {/* Progressive blur overlay at the top of the chat — chat
-                        messages scroll up into this fade zone so they bleed
-                        smoothly under the participant tiles instead of getting
-                        cut by a hard edge. pointerEvents: 'none' lets taps pass
-                        through to the FlashList underneath. */}
-                    <ProgressiveBlur
-                        position="top"
-                        height={70}
-                        intensity={70}
-                        tint="dark"
-                    />
-                </View>
-            ) : null}
+                ) : null}
+            </KeyboardAvoidingView>
 
             {showFloatingComposer && isAttachMenuOpen ? (
                 <Animated.View
@@ -1893,29 +1992,6 @@ export default function TheaterScreen() {
                         onPress={dismissAttachMenu}
                     />
                 </Animated.View>
-            ) : null}
-
-            {showFloatingComposer ? (
-                <KeyboardAvoidingView
-                    pointerEvents="box-none"
-                    behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-                    keyboardVerticalOffset={0}
-                    style={styles.floatingComposerLayer}
-                >
-                    <ChatComposer
-                        ref={chatComposerRef}
-                        messageKey={chatId}
-                        accent={accent}
-                        contactName={contactName}
-                        enableTheaterAction
-                        theaterActionSelected
-                        style={[
-                            styles.floatingComposer,
-                            { marginBottom: composerBottomInset },
-                        ]}
-                        onAttachMenuToggle={handleAttachMenuToggle}
-                    />
-                </KeyboardAvoidingView>
             ) : null}
 
             {showParticipants ? (
@@ -1959,6 +2035,10 @@ const styles = StyleSheet.create({
         flex: 1,
         backgroundColor: '#000',
     },
+    topSection: {
+        width: '100%',
+        backgroundColor: '#000',
+    },
     // Video occupies a 16:9 strip below the header. Participant row picks up
     // the remaining vertical space below it. This is the Rave-style layout
     // where video and participants are stacked, not overlaid.
@@ -1966,8 +2046,8 @@ const styles = StyleSheet.create({
         width: '100%',
         aspectRatio: 16 / 9,
         backgroundColor: '#000',
-        alignItems: 'center',
-        justifyContent: 'center',
+        alignItems: 'flex-start',
+        justifyContent: 'flex-start',
         position: 'relative',
         overflow: 'hidden',
     },
@@ -2040,6 +2120,21 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
+    participantTileMiniIndicator: {
+        position: 'absolute',
+        bottom: -2,
+        right: -2,
+        zIndex: 5,
+    },
+    miniIndicatorDot: {
+        width: 16,
+        height: 16,
+        borderRadius: 8,
+        borderWidth: 1.5,
+        borderColor: '#000',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     // The chat lives directly under the PIPs and grabs the rest of the
     // vertical space (flex: 1). The TheaterChatOverlay component is reused
     // but rendered inline (not as a sliding modal), so we strip its absolute
@@ -2063,7 +2158,7 @@ const styles = StyleSheet.create({
     },
     attachMenuScrim: {
         ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'rgba(0,0,0,0.66)',
+        backgroundColor: 'transparent',
         zIndex: 200,
         elevation: 200,
     },
