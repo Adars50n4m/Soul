@@ -12,6 +12,7 @@ import {
   TextInput,
   useWindowDimensions,
   BackHandler,
+  Image as RNImage,
 } from 'react-native';
 import { supabase } from '../config/supabase';
 import { proxySupabaseUrl } from '../config/api';
@@ -44,6 +45,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { SheetScreen } from 'react-native-sheet-transitions';
 import { myStatusTransitionState } from '../services/myStatusTransitionState';
+import { setStatusMorphOrigin } from '../utils/statusMorphOrigins';
 import { SOUL_LIQUID_TRANSITION, SOUL_LIQUID_SPRING } from '../constants/sharedTransitions';
 
 const statusTransition = SOUL_LIQUID_TRANSITION;
@@ -126,6 +128,42 @@ export default function MyStatusScreen() {
   const isClosingRef = useRef(false);
   const allowNativePopRef = useRef(false);
   const dismissedRef = useRef(false);
+  const statusItemRefs = useRef<Record<string, any>>({});
+
+  const handleOpenStatus = useCallback((item: StatusWithViewers) => {
+    const morphKey = `status-hero-status-${item.id}`;
+    const uriHint = item.mediaLocalPath || item.mediaUrl || '';
+    // Kick off the network fetch BEFORE navigating so the image is already
+    // (or close to) cached by the time view-status mounts and renders <Image>.
+    // Local file:// paths are free, http(s) URLs are the ones that gain.
+    if (uriHint.startsWith('http://') || uriHint.startsWith('https://')) {
+      RNImage.prefetch(uriHint).catch(() => {});
+    }
+    const navigate = () => router.push({
+      pathname: '/view-status' as any,
+      params: {
+        id: currentUser?.id || item.userId,
+        sharedTag: morphKey,
+        statusId: item.id,
+        mediaKey: item.mediaKey || '',
+        uriHint,
+        mediaType: item.mediaType || '',
+      },
+    });
+    const node = statusItemRefs.current[item.id];
+    if (node?.measureInWindow) {
+      try {
+        node.measureInWindow((x: number, y: number, w: number, h: number) => {
+          if (Number.isFinite(x) && Number.isFinite(y) && w > 0 && h > 0) {
+            setStatusMorphOrigin(morphKey, { x, y, width: w, height: h, borderRadius: w / 2 });
+          }
+          navigate();
+        });
+        return;
+      } catch {}
+    }
+    navigate();
+  }, [currentUser?.id, router]);
 
   useEffect(() => {
     if (!hasCardMorph) {
@@ -478,22 +516,18 @@ export default function MyStatusScreen() {
         entering={FadeInDown.duration(400).delay(150 + index * 40).springify().damping(20).stiffness(120)}
       >
         <View style={styles.statusItem}>
-          <Pressable 
+          <Pressable
             style={styles.itemMain}
-            onPress={() => router.push({
-              pathname: '/view-status' as any,
-              params: { 
-                id: currentUser?.id || item.userId,
-                sharedTag: `status-hero-status-${item.id}`,
-                statusId: item.id,
-                mediaKey: item.mediaKey || '',
-                uriHint: item.mediaLocalPath || item.mediaUrl || '',
-                mediaType: item.mediaType || '',
-              },
-            })}
+            onPress={() => handleOpenStatus(item)}
           >
             <View style={styles.avatarContainer}>
-              <Animated.View style={styles.statusThumbShell}>
+              <View
+                ref={(node) => {
+                  if (node) statusItemRefs.current[item.id] = node;
+                  else delete statusItemRefs.current[item.id];
+                }}
+                style={styles.statusThumbShell}
+              >
                 <StatusThumbnail
                   statusId={item.id}
                   mediaKey={item.mediaKey}
@@ -510,7 +544,7 @@ export default function MyStatusScreen() {
                     />
                   )}
                 />
-              </Animated.View>
+              </View>
             </View>
             <View style={styles.itemInfo}>
               <Text style={styles.viewText}>

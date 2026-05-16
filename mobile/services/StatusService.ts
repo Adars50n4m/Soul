@@ -91,6 +91,33 @@ class StatusService {
     );
   }
 
+  // Copy an upload's source file into Documents/status-media/ so that
+  // media_local_path keeps pointing at something readable after iOS cleans
+  // up its tmp/cache directories (which is where ImagePicker hands us URIs).
+  // On any failure, falls back to the original URI — getMediaSource will
+  // then transparently fall through to the R2 signed URL.
+  private async persistStatusMediaLocally(sourceUri: string, statusId: string): Promise<string> {
+    try {
+      if (!sourceUri || !sourceUri.startsWith('file://')) return sourceUri;
+      const info = await getInfoAsync(sourceUri);
+      if (!info.exists) return sourceUri;
+      const dir = `${documentDirectory}status-media/`;
+      const dirInfo = await getInfoAsync(dir);
+      if (!dirInfo.exists) {
+        await makeDirectoryAsync(dir, { intermediates: true });
+      }
+      const ext = (sourceUri.split('.').pop() || 'bin').toLowerCase();
+      const target = `${dir}${statusId}.${ext}`;
+      const existing = await getInfoAsync(target);
+      if (existing.exists) await deleteAsync(target, { idempotent: true }).catch(() => {});
+      await copyAsync({ from: sourceUri, to: target });
+      return target;
+    } catch (e) {
+      console.warn('[StatusService] persistStatusMediaLocally failed:', e);
+      return sourceUri;
+    }
+  }
+
   async uploadStory(localUri: string, mediaType: 'image' | 'video', caption?: string): Promise<void> {
     const db = await this.getDb();
     const actor = await this.resolveStatusActor();
@@ -160,11 +187,20 @@ class StatusService {
 
         const statusId = String(data.id);
         await db.runAsync('DELETE FROM pending_uploads WHERE id = ?', [item.id]);
-        await db.runAsync('DELETE FROM cached_statuses WHERE id = ?', [item.id]); 
-        
+        await db.runAsync('DELETE FROM cached_statuses WHERE id = ?', [item.id]);
+
+        // Copy the picker's ephemeral file into Documents/ so it survives iOS
+        // tmp/cache cleanup. Without this, media_local_path points at a path
+        // that gets purged across app sessions/rebuilds, and every subsequent
+        // view of "your own" status falls through to an R2 signed-URL fetch.
+        const persistedLocalPath = await this.persistStatusMediaLocally(
+          item.localUri,
+          statusId
+        );
+
         await db.runAsync(
           'INSERT OR REPLACE INTO cached_statuses (id, user_id, media_local_path, media_key, media_type, caption, duration, expires_at, is_viewed, is_mine, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [statusId, userId, item.localUri, data.media_key || mediaKey, item.mediaType, item.caption || null, data.duration, Date.parse(expiresAt), 1, 1, Date.parse(data.created_at)]
+          [statusId, userId, persistedLocalPath, data.media_key || mediaKey, item.mediaType, item.caption || null, data.duration, Date.parse(expiresAt), 1, 1, Date.parse(data.created_at)]
         );
       } catch (e: any) {
         await db.runAsync('UPDATE pending_uploads SET upload_status = ?, retry_count = retry_count + 1 WHERE id = ?', ['failed', item.id]);

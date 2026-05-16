@@ -1,26 +1,32 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import LottieView from 'lottie-react-native';
 import {
-    View, Text, Image, StyleSheet, StatusBar,
-    useWindowDimensions, Pressable, Alert, TextInput, Modal, ScrollView
+    View, Text, StyleSheet, StatusBar,
+    useWindowDimensions, Pressable, Alert, TextInput, Modal, ScrollView,
+    BackHandler,
 } from 'react-native';
+// expo-image gives us a persistent on-disk cache keyed by URI, shared across
+// screens. Same R2 URL fetched in my-status's StatusThumbnail is served from
+// cache here without a re-download — fixes the "loads from R2 every time"
+// black-flash even when the photo was already on screen seconds ago.
+import { Image } from 'expo-image';
 import { SoulLoader } from '../components/ui/SoulLoader';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
-import Animated, { 
-    useSharedValue, 
-    useAnimatedStyle, 
-    withTiming, 
-    runOnJS, 
-    cancelAnimation, 
+import Animated, {
+    useSharedValue,
+    useAnimatedStyle,
+    withTiming,
+    withDelay,
+    runOnJS,
+    cancelAnimation,
     Easing,
     withSpring,
-    SharedTransition
+    interpolate,
+    Extrapolation,
 } from 'react-native-reanimated';
-import { SOUL_LIQUID_TRANSITION } from '../constants/sharedTransitions';
-
-const statusTransition = SOUL_LIQUID_TRANSITION;
+import { getStatusMorphOrigin, clearStatusMorphOrigin } from '../utils/statusMorphOrigins';
 import { Video, ResizeMode } from 'expo-av';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -67,6 +73,7 @@ export default function ViewStatusScreen() {
         mediaType?: string;
     }>();
     const router = useRouter();
+    const navigation = useNavigation();
     const { currentUser, sendChatMessage, activeTheme } = useApp();
     const themeAccent = activeTheme.primary;
     const currentUserId = currentUser?.id;
@@ -93,7 +100,9 @@ export default function ViewStatusScreen() {
     }, []);
     const initialImmediateSource = buildImmediateMediaSource(initialUriHint, initialMediaKey);
     const [mediaSource, setMediaSource] = useState<{uri: string, isLocal: boolean} | null>(initialImmediateSource);
-    const [loading, setLoading] = useState(initialMediaType === 'video' && !!initialImmediateSource);
+    // Start in loading state whenever we mount with a source — even images
+    // need a beat to download/decode, and showing the SoulLoader beats black.
+    const [loading, setLoading] = useState(!!initialImmediateSource);
     const [isPaused, setIsPaused] = useState(false);
     const [replyText, setReplyText] = useState('');
     const [isReplyComposerActive, setIsReplyComposerActive] = useState(false);
@@ -106,6 +115,152 @@ export default function ViewStatusScreen() {
     const translateY = useSharedValue(0);
     const scale = useSharedValue(1);
     const isLongPressing = useSharedValue(0);
+
+    // ───── Circle → fullscreen morph (source thumbnail / pill → this screen) ─────
+    // my-status / home rail measures the source rect and stashes it via
+    // setStatusMorphOrigin(initialSharedTag, rect). We read it here and animate
+    // a wrapping container from that rect (circle) up to fullscreen on mount,
+    // then reverse on dismiss. Mirrors the theater morph pattern — required
+    // because this route is presented as transparentModal w/ animation:'none',
+    // so Reanimated shared-element transitions can't fire on their own.
+    const circleOrigin = useMemo(
+        () => getStatusMorphOrigin(initialSharedTag),
+        [initialSharedTag]
+    );
+    const hasCircleMorph =
+        !!circleOrigin
+        && Number.isFinite(circleOrigin.x)
+        && Number.isFinite(circleOrigin.y)
+        && circleOrigin.width > 0
+        && circleOrigin.height > 0;
+
+    const morphProgress = useSharedValue(hasCircleMorph ? 0 : 1);
+    const morphBgOpacity = useSharedValue(hasCircleMorph ? 0 : 1);
+    const isClosingMorphRef = useRef(false);
+    const allowNativePopRef = useRef(false);
+    const didFinishRef = useRef(false);
+
+    useEffect(() => {
+        if (!hasCircleMorph) {
+            morphProgress.value = 1;
+            morphBgOpacity.value = 1;
+            return;
+        }
+        // 80ms hold at p=0 before expanding — without this, view-status's
+        // mount cost (useEffect setup, shared-value init, first paint) eats
+        // the first few frames of the animation, so the user never actually
+        // sees the small thumbnail-sized circle state. The brief hold makes
+        // the starting circle visible, then the timing curve takes over for
+        // a clean expand. Total perceived: ~580ms cinematic morph from a
+        // CLEARLY small circle out to fullscreen, ease-in-out curve so it
+        // builds momentum then settles gently.
+        morphProgress.value = withDelay(
+            80,
+            withTiming(1, {
+                duration: 500,
+                easing: Easing.bezier(0.4, 0, 0.2, 1),
+            })
+        );
+        morphBgOpacity.value = withDelay(
+            80,
+            withTiming(1, {
+                duration: 360,
+                easing: Easing.out(Easing.cubic),
+            })
+        );
+    }, [hasCircleMorph, morphProgress, morphBgOpacity]);
+
+    const morphContainerStyle = useAnimatedStyle(() => {
+        'worklet';
+        if (!hasCircleMorph) {
+            return {
+                position: 'absolute',
+                left: 0,
+                top: 0,
+                width,
+                height,
+                borderRadius: 0,
+            };
+        }
+        const p = morphProgress.value;
+        const srcX = circleOrigin!.x;
+        const srcY = circleOrigin!.y;
+        const srcW = circleOrigin!.width;
+        const srcH = circleOrigin!.height;
+        // Position + size interpolate linearly with the spring. For
+        // borderRadius we DON'T want straight linear interp: when width
+        // grows but radius doesn't keep up, the shape reads as a sharp
+        // rectangle way too early. Instead we keep the radius at ~50% of
+        // the current width (i.e. perceptually circular) for most of the
+        // morph, and sharpen it down toward zero only at the very end via
+        // a (1 - p^4) decay. Visually the container stays a soft pebble
+        // shape while it expands, then crisps into a rectangle.
+        const curW = interpolate(p, [0, 1], [srcW, width], Extrapolation.CLAMP);
+        const curH = interpolate(p, [0, 1], [srcH, height], Extrapolation.CLAMP);
+        const shapeFactor = 1 - p * p * p * p;
+        const radius = (Math.min(curW, curH) / 2) * shapeFactor;
+        return {
+            position: 'absolute',
+            left: interpolate(p, [0, 1], [srcX, 0], Extrapolation.CLAMP),
+            top: interpolate(p, [0, 1], [srcY, 0], Extrapolation.CLAMP),
+            width: curW,
+            height: curH,
+            borderRadius: radius,
+        };
+    });
+
+    const morphBgStyle = useAnimatedStyle(() => {
+        'worklet';
+        return { opacity: morphBgOpacity.value };
+    });
+
+    const finishDismiss = useCallback(() => {
+        if (didFinishRef.current) return;
+        didFinishRef.current = true;
+        clearStatusMorphOrigin(initialSharedTag);
+        allowNativePopRef.current = true;
+        router.back();
+    }, [initialSharedTag, router]);
+
+    const runDismissAnimation = useCallback(() => {
+        if (isClosingMorphRef.current) return;
+        isClosingMorphRef.current = true;
+        if (!hasCircleMorph) {
+            finishDismiss();
+            return;
+        }
+        // Tight, snappy collapse — keeps the dismiss feeling responsive
+        // instead of dragging. Bezier eases out hard at the end so the photo
+        // "snaps" back into the source circle rather than easing into it.
+        const DURATION = 260;
+        const dismissEasing = Easing.bezier(0.32, 0, 0.16, 1);
+        morphBgOpacity.value = withTiming(0, { duration: 200, easing: dismissEasing });
+        morphProgress.value = withTiming(0, { duration: DURATION, easing: dismissEasing }, (finished) => {
+            'worklet';
+            if (finished) runOnJS(finishDismiss)();
+        });
+        setTimeout(() => {
+            if (isClosingMorphRef.current) finishDismiss();
+        }, DURATION + 60);
+    }, [hasCircleMorph, finishDismiss, morphBgOpacity, morphProgress]);
+
+    useEffect(() => {
+        const unsub = navigation.addListener('beforeRemove' as any, (event: any) => {
+            if (!hasCircleMorph || isClosingMorphRef.current || allowNativePopRef.current) return;
+            event.preventDefault();
+            runDismissAnimation();
+        });
+        const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
+            if (!hasCircleMorph || isClosingMorphRef.current) return false;
+            runDismissAnimation();
+            return true;
+        });
+        return () => {
+            allowNativePopRef.current = false;
+            unsub();
+            backSub.remove();
+        };
+    }, [hasCircleMorph, navigation, runDismissAnimation]);
 
     // Initial Load
     useEffect(() => {
@@ -149,7 +304,11 @@ export default function ViewStatusScreen() {
             );
             if (immediateSource) {
                 setMediaSource(immediateSource);
-                setLoading(currentStatus.mediaType === 'video');
+                // Keep loading=true until the Image/Video reports onLoadEnd.
+                // Before this, setting loading=false for images meant <Image>
+                // was mounted with a URI that was still downloading from R2,
+                // so the user saw a black frame instead of the SoulLoader.
+                setLoading(true);
             } else {
                 setLoading(true);
             }
@@ -217,9 +376,9 @@ export default function ViewStatusScreen() {
         if (statusGroup && currentIndex < statusGroup.statuses.length - 1) {
             setCurrentIndex(prev => prev + 1);
         } else {
-            router.back();
+            runDismissAnimation();
         }
-    }, [currentIndex, router, statusGroup]);
+    }, [currentIndex, runDismissAnimation, statusGroup]);
 
     const handlePrev = useCallback(() => {
         if (currentIndex > 0) {
@@ -295,7 +454,7 @@ export default function ViewStatusScreen() {
         })
         .onEnd((e) => {
             if (e.translationY > 100) {
-                runOnJS(router.back)();
+                runOnJS(runDismissAnimation)();
             } else {
                 translateY.value = withSpring(0);
                 scale.value = withSpring(1);
@@ -313,6 +472,41 @@ export default function ViewStatusScreen() {
             ] as any,
             borderRadius: translateY.value > 0 ? 30 : 0,
             overflow: 'hidden'
+        };
+    });
+
+    // Chrome (progress bar, header, reply/viewers footer) lives inside the
+    // morph container along with the photo. During the circle→fullscreen
+    // expand we hide it so the user only sees the photo growing; once the
+    // morph has settled past ~70% we fade chrome in at its final layout
+    // position. Reverse on dismiss — chrome out first, then circle collapse.
+    const chromeStyle = useAnimatedStyle(() => {
+        'worklet';
+        return {
+            opacity: hasCircleMorph
+                ? interpolate(morphProgress.value, [0.55, 1], [0, 1], Extrapolation.CLAMP)
+                : 1,
+        };
+    });
+
+    // Placeholder (cover-fit photo behind the masked main media) is what
+    // makes the circle→fullscreen expand look seamless: it's a clean, opaque
+    // photo with no gradient feather, so during the morph the user sees a
+    // photo growing from the thumbnail circle into a pebble. But at the very
+    // end we DON'T want it sitting on top of the bg blur — that hides the
+    // blurry-edge immersive effect. So we fade it out in the last 15% of the
+    // morph, letting the bg blur + masked photo (with its gradient feather)
+    // become the final visible state. Mirror on dismiss.
+    const placeholderStyle = useAnimatedStyle(() => {
+        'worklet';
+        if (!hasCircleMorph) return { opacity: 0 };
+        return {
+            opacity: interpolate(
+                morphProgress.value,
+                [0.85, 1],
+                [1, 0],
+                Extrapolation.CLAMP
+            ),
         };
     });
 
@@ -415,19 +609,43 @@ export default function ViewStatusScreen() {
     if (!statusGroup || !currentStatus) return <View style={styles.black} />;
 
     return (
-        <GestureHandlerRootView style={styles.black}>
-            <Animated.View 
-                style={[styles.container, animatedStyle]}
-            >
-                <StatusBar hidden />
-                
+        <GestureHandlerRootView style={styles.transparentRoot}>
+            <Animated.View
+                style={[StyleSheet.absoluteFill, { backgroundColor: '#000' }, morphBgStyle]}
+                pointerEvents="none"
+            />
+            <Animated.View style={[morphContainerStyle, styles.morphClip]}>
+                <Animated.View
+                    style={[styles.container, animatedStyle]}
+                >
+                    <StatusBar hidden />
+
+                {/* Morph placeholder — same URI + cover-fit my-status
+                    thumbnail rendered. Cover (not contain) so the photo
+                    fills the circle exactly like the source thumbnail —
+                    no letterbox gap during the expand, giving a seamless
+                    visual handoff from the small circle to the growing
+                    pebble shape. Stays visible behind the masked main
+                    media; the gradient feather only kicks in at the end. */}
+                {initialImmediateSource && (
+                    <Animated.View style={[StyleSheet.absoluteFill, placeholderStyle]} pointerEvents="none">
+                        <Image
+                            source={{ uri: initialImmediateSource.uri }}
+                            style={StyleSheet.absoluteFill}
+                            contentFit="cover"
+                            cachePolicy="memory-disk"
+                        />
+                    </Animated.View>
+                )}
+
                 {/* Background Blur */}
                 {mediaSource && (
                     <View style={StyleSheet.absoluteFill}>
-                        <Image 
-                            source={{ uri: mediaSource.uri }} 
-                            style={[StyleSheet.absoluteFill, { opacity: 0.5 }]} 
+                        <Image
+                            source={{ uri: mediaSource.uri }}
+                            style={[StyleSheet.absoluteFill, { opacity: 0.5 }]}
                             blurRadius={100}
+                            cachePolicy="memory-disk"
                         />
                         <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} />
                     </View>
@@ -466,11 +684,12 @@ export default function ViewStatusScreen() {
                                         onLoad={() => setLoading(false)}
                                     />
                                 ) : (
-                                    <Image 
-                                        source={{ uri: mediaSource.uri }} 
-                                        style={StyleSheet.absoluteFill} 
-                                        resizeMode="contain"
-                                        onLoadEnd={() => setLoading(false)}
+                                    <Image
+                                        source={{ uri: mediaSource.uri }}
+                                        style={StyleSheet.absoluteFill}
+                                        contentFit="contain"
+                                        cachePolicy="memory-disk"
+                                        onLoad={() => setLoading(false)}
                                     />
                                 )
                             ) : null}
@@ -485,7 +704,7 @@ export default function ViewStatusScreen() {
                 </GestureDetector>
 
                 {/* Overlays (Gradients only, NO sharp blur blocks) */}
-                <Animated.View style={[StyleSheet.absoluteFill, overlayAnimatedStyle]} pointerEvents="none">
+                <Animated.View style={[StyleSheet.absoluteFill, overlayAnimatedStyle, chromeStyle]} pointerEvents="none">
                     {/* Top Section Readiness Gradient */}
                     <View style={styles.topGradientContainer}>
                         <LinearGradient
@@ -519,7 +738,7 @@ export default function ViewStatusScreen() {
 
 
                 {/* UI Content (Progress, Header, Reply) */}
-                <Animated.View style={[StyleSheet.absoluteFill, uiAnimatedStyle]} pointerEvents="box-none">
+                <Animated.View style={[StyleSheet.absoluteFill, uiAnimatedStyle, chromeStyle]} pointerEvents="box-none">
                     <View style={[styles.overlay, { paddingTop: insets.top + 20 }]}>
                         {/* Progress Bars */}
                             <View style={[styles.progressRow, { marginBottom: 12 }]}>
@@ -533,16 +752,20 @@ export default function ViewStatusScreen() {
                             ))}
                         </View>
 
-                        {/* Header */}
+                        {/* Header — back circle, user pill, time pill.
+                            Matches the app-wide glass-pill chrome used in
+                            my-status / chat headers: 40-tall rounded glass
+                            surfaces with a hairline white border. */}
                         <View style={styles.header}>
-                            <Pressable onPress={() => router.back()} style={styles.backBtn}>
-                                <Ionicons name="chevron-back" size={28} color="#fff" />
+                            {/* Back button — glass circle */}
+                            <Pressable onPress={() => runDismissAnimation()} hitSlop={10}>
+                                <GlassView intensity={40} tint="dark" style={styles.headerBackBtn}>
+                                    <Ionicons name="chevron-back" size={22} color="#fff" />
+                                </GlassView>
                             </Pressable>
-                            <View style={styles.userRow}>
-                                {/* For my own status, prefer currentUser from AppContext.
-                                    statusGroup.user is hydrated from cached_users (which
-                                    is filled via supabase.profiles), and a bypass/super
-                                    user has no profiles row → empty avatar. */}
+
+                            {/* Avatar + name pill (center) */}
+                            <GlassView intensity={40} tint="dark" style={styles.headerUserPill}>
                                 <SoulAvatar
                                     uri={proxySupabaseUrl(
                                         statusGroup.isMine
@@ -564,19 +787,21 @@ export default function ViewStatusScreen() {
                                             ? (currentUser?.teddyVariant as any) || (statusGroup.user as any).teddyVariant
                                             : (statusGroup.user as any).teddyVariant
                                     }
-                                    size={36}
+                                    size={22}
                                 />
-                                <View style={{ marginLeft: 12 }}>
-                                    <Text style={styles.userName}>
-                                        {statusGroup.isMine
-                                            ? (currentUser?.name || currentUser?.username || statusGroup.user.displayName || statusGroup.user.username)
-                                            : (statusGroup.user.displayName || statusGroup.user.username)}
-                                    </Text>
-                                    <Text style={styles.timeLabel}>
-                                        {new Date(currentStatus.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                    </Text>
-                                </View>
-                            </View>
+                                <Text style={styles.headerUserName} numberOfLines={1}>
+                                    {statusGroup.isMine
+                                        ? (currentUser?.name || currentUser?.username || statusGroup.user.displayName || statusGroup.user.username)
+                                        : (statusGroup.user.displayName || statusGroup.user.username)}
+                                </Text>
+                            </GlassView>
+
+                            {/* Time pill (right) */}
+                            <GlassView intensity={40} tint="dark" style={styles.headerTimePill}>
+                                <Text style={styles.headerTimeText}>
+                                    {new Date(currentStatus.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </Text>
+                            </GlassView>
                         </View>
                     </View>
 
@@ -682,6 +907,7 @@ export default function ViewStatusScreen() {
                         />
                     </View>
                 )}
+                </Animated.View>
             </Animated.View>
         </GestureHandlerRootView>
     );
@@ -689,6 +915,8 @@ export default function ViewStatusScreen() {
 
 const styles = StyleSheet.create({
     black: { flex: 1, backgroundColor: '#000' },
+    transparentRoot: { flex: 1, backgroundColor: 'transparent' },
+    morphClip: { overflow: 'hidden' },
     container: { flex: 1, backgroundColor: '#000' },
     mediaContainer: { flex: 1, backgroundColor: 'transparent' },
     loader: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)' },
@@ -696,12 +924,63 @@ const styles = StyleSheet.create({
     progressRow: { flexDirection: 'row', gap: 6, width: '100%', marginBottom: 15 },
     progressBar: { flex: 1, height: 3, backgroundColor: 'rgba(255,255,255,0.25)', borderRadius: 2, overflow: 'hidden' },
     progressFill: { height: '100%', backgroundColor: '#fff' },
-    header: { flexDirection: 'row', alignItems: 'center' },
+    header: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        paddingHorizontal: 4,
+    },
     backBtn: { padding: 5 },
     userRow: { flexDirection: 'row', alignItems: 'center', marginLeft: 10 },
     avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#333', marginRight: 12 },
     userName: { color: '#fff', fontSize: 16, fontWeight: '700' },
     timeLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 12 },
+    // Glass-pill header chrome — matches my-status / chat header pattern.
+    // overflow:hidden so GlassView's blur clips to the borderRadius.
+    headerBackBtn: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        overflow: 'hidden',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.12)',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    headerUserPill: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        height: 32,
+        borderRadius: 16,
+        overflow: 'hidden',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.12)',
+        paddingLeft: 4,
+        paddingRight: 10,
+        maxWidth: '60%',
+    },
+    headerUserName: {
+        color: '#fff',
+        fontSize: 12,
+        fontWeight: '700',
+    },
+    headerTimePill: {
+        height: 40,
+        paddingHorizontal: 14,
+        borderRadius: 20,
+        overflow: 'hidden',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.12)',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    headerTimeText: {
+        color: '#fff',
+        fontSize: 13,
+        fontWeight: '600',
+    },
     bottomOverlay: { position: 'absolute', bottom: 0, width: '100%', paddingHorizontal: 20 },
     captionBox: { backgroundColor: 'rgba(0,0,0,0.5)', padding: 12, borderRadius: 12, marginBottom: 20 },
     captionText: { color: '#fff', fontSize: 16, textAlign: 'center' },
